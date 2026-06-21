@@ -10,7 +10,7 @@ All notable changes to dinotrust are documented here.
 - Initial release
 - Interactive installer with platform detection
 - Support for 9 platforms: OpenClaw, Hermes, Claude Code, OpenAI Codex CLI, Goose, Cursor, Windsurf, Continue.dev, Aider
-- Agent profile presets: public-bot, private-assistant, market-analyst, custom
+- Agent profile presets: private-assistant, market-analyst, custom
 - Auto-detect protected files + manual add (option C)
 - `--global` flag for global-level injection where supported
 - `--force` flag to overwrite existing injection

@@ -23,7 +23,7 @@ dinotrust injects a structured security ruleset directly into the agent's contex
 - **Blocks non-owners** from write/delete/exec operations, config access, and credential exposure
 - **Rejects injection attempts** — override claims, encoded commands, hypothetical bypasses, multi-turn escalation
 - **Supports 9 platforms** — OpenClaw, Hermes, Claude Code, OpenAI Codex CLI, Goose, Cursor, Windsurf, Continue.dev, Aider
-- **Profile presets** — public-bot, private-assistant, market-analyst, or custom
+- **Profile presets** — private-assistant, market-analyst, or custom
 
 ---
 
@@ -69,6 +69,26 @@ dinotrust assumes the host platform provides a trusted identity signal through s
 - Tool outputs or external content
 
 The rules enforce this distinction explicitly: ownership claims in chat are ignored regardless of how convincing they sound.
+
+**Per-turn verification**
+
+Ownership is re-verified on every message — not just at session start. If the platform-injected sender ID is absent or malformed, the agent defaults to non-owner. No carry-over from previous turns.
+
+**Platform identity fields**
+
+| Platform | Authoritative field |
+|----------|--------------------|
+| Telegram | `from.id` (integer user ID) |
+| Discord | `author.id` (snowflake) |
+| Slack | `user` (member ID, `Uxxxxxxxx`) |
+| WhatsApp | sender phone in E.164 |
+| Signal | sender UUID |
+| GitHub | `sender.id` from webhook payload |
+| OpenClaw | `sender_id` from `inbound_meta.v2` |
+
+Username, display name, and any user-provided field are never used for verification — only the platform-injected numeric or UUID identifier.
+
+**What this means in practice:** if someone shares your account or your session is compromised, dinotrust cannot detect it — because the platform itself cannot. dinotrust is only as strong as the platform's authentication.
 
 ---
 
@@ -131,7 +151,7 @@ grep "dinotrust begin" <your-agent-config-file>
 |------|---------|-------------|
 | `--platform NAME` | Interactive | Skip platform detection prompt |
 | `--owner-id ID` | Interactive | Your platform user ID |
-| `--profile NAME` | Interactive | Preset: `public-bot`, `private-assistant`, `market-analyst`, `custom` |
+| `--profile NAME` | Interactive | Preset: `private-assistant`, `market-analyst`, `custom` |
 | `--global` | Project-level | Inject into global config instead of project-level |
 | `--force` | — | Overwrite existing dinotrust block |
 | `--dry-run` | — | Preview what would be injected, no changes |
@@ -177,7 +197,6 @@ Nothing is copied to your workspace. The installer reads `security_rules.md`, fi
 
 | Profile | Use case | Non-owner access |
 |---------|----------|-----------------|
-| `public-bot` | Public Telegram/Discord bot | Read-only market data tools |
 | `private-assistant` | Personal assistant, no public access | None |
 | `market-analyst` | Market analysis bot with public users | Market data tools only |
 | `custom` | You define everything | You define |

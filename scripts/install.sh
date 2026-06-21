@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --platform NAME     Platform: openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
       echo "  --owner-id ID       Your platform user ID"
-      echo "  --profile NAME      Preset: public-bot|private-assistant|market-analyst|custom"
+      echo "  --profile NAME      Preset: private-assistant|market-analyst|custom"
       echo "  --global            Inject into global config (where supported)"
       echo "  --force             Overwrite existing dinotrust block"
       echo "  --dry-run           Preview injection, no changes"
@@ -200,17 +200,15 @@ info "Owner ID: $OPT_OWNER_ID"
 if [[ -z "$OPT_PROFILE" ]]; then
   echo ""
   ask "Agent profile preset:"
-  echo "  1) public-bot          — public bot; non-owners get read-only market/data tools"
-  echo "  2) private-assistant   — personal assistant; non-owners get nothing"
-  echo "  3) market-analyst      — market analysis bot; non-owners get data tools only"
-  echo "  4) custom              — you define allowed actions manually"
+  echo "  1) private-assistant   — personal assistant; non-owners get nothing"
+  echo "  2) market-analyst      — market analysis bot; non-owners get data tools only"
+  echo "  3) custom              — you define allowed actions manually"
   echo ""
-  read -rp "Enter number [1-4]: " PROFILE_NUM
+  read -rp "Enter number [1-3]: " PROFILE_NUM
   case "$PROFILE_NUM" in
-    1) OPT_PROFILE="public-bot" ;;
-    2) OPT_PROFILE="private-assistant" ;;
-    3) OPT_PROFILE="market-analyst" ;;
-    4) OPT_PROFILE="custom" ;;
+    1) OPT_PROFILE="private-assistant" ;;
+    2) OPT_PROFILE="market-analyst" ;;
+    3) OPT_PROFILE="custom" ;;
     *) error "Invalid selection." ;;
   esac
 fi
@@ -252,10 +250,6 @@ fi
 
 # ── Step 6: Profile-specific config ──────────────────────────────────────────
 case "$OPT_PROFILE" in
-  public-bot)
-    DEFLECTION_MSG="I use various data sources for analysis"
-    ALLOWED_ACTIONS="      - read_only_data_queries: true"
-    ;;
   private-assistant)
     DEFLECTION_MSG="This assistant is private"
     ALLOWED_ACTIONS="      - none"
