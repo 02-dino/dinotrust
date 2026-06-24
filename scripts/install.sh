@@ -304,6 +304,44 @@ INJECTION_BLOCK="# --- dinotrust begin (v${VERSION}) ---
 ${RULES_CONTENT}
 # --- dinotrust end ---"
 
+# ── Step 7b: Bootstrap budget check ───────────────────────────────────────────
+# dinotrust injects into the file the agent loads as instructions EVERY turn.
+# If that file grows past the platform's per-turn injection budget, the platform
+# silently TRUNCATES it — and if part of the dinotrust ruleset is cut, enforcement
+# runs half-applied with no error. For a security ruleset that is a silent hole,
+# so we check size up front and warn loudly. (Warn, never block: budgets can be
+# raised, and non-OpenClaw caps vary.)
+BLOCK_CHARS=$(printf '%s' "$INJECTION_BLOCK" | wc -c)
+# Existing target size with any prior dinotrust block stripped (avoid double-count).
+EXISTING_CHARS=0
+if [[ -f "$CONFIG_FILE" ]]; then
+  EXISTING_CHARS=$(awk '/# --- dinotrust begin/,/# --- dinotrust end ---/{next}1' "$CONFIG_FILE" | wc -c)
+fi
+PROJECTED_CHARS=$((EXISTING_CHARS + BLOCK_CHARS))
+
+if [[ "$OPT_PLATFORM" == "openclaw" ]]; then
+  # OpenClaw bootstrap caps: per-file 20000, total 60000 (defaults).
+  if [[ "$PROJECTED_CHARS" -gt 20000 ]]; then
+    warn "After injection, $CONFIG_FILE would be ~${PROJECTED_CHARS} chars — over OpenClaw's per-file bootstrap cap (20000)."
+    warn "  OpenClaw truncates the bootstrap silently — part of the dinotrust ruleset may NOT be injected, leaving enforcement INCOMPLETE."
+    warn "  Fix: trim $CONFIG_FILE, or raise agents.defaults.bootstrapMaxChars, then verify the whole 'dinotrust begin..end' block is present in the agent's context."
+  elif [[ "$PROJECTED_CHARS" -gt 17000 ]]; then
+    warn "After injection, $CONFIG_FILE would be ~${PROJECTED_CHARS} chars — approaching OpenClaw's bootstrap cap (20000). Trim soon so the ruleset can't get truncated."
+  else
+    success "Bootstrap budget: ~${PROJECTED_CHARS} chars after injection — within OpenClaw's per-file cap (20000)."
+  fi
+else
+  # Other platforms (Claude Code, Cursor, Windsurf, Aider, …): truncation behavior
+  # and caps vary or are undocumented. Use a conservative generic threshold.
+  if [[ "$PROJECTED_CHARS" -gt 20000 ]]; then
+    warn "After injection, $CONFIG_FILE would be ~${PROJECTED_CHARS} chars — large for an instruction file."
+    warn "  Some platforms truncate long instruction files, which could silently cut part of the dinotrust ruleset and leave enforcement INCOMPLETE."
+    warn "  Verify your agent actually reads the full 'dinotrust begin..end' block (ask it to quote a rule near the end), and trim the file if it doesn't."
+  else
+    success "Instruction file: ~${PROJECTED_CHARS} chars after injection — reasonable size."
+  fi
+fi
+
 # ── Step 8: Dry run or apply ──────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────────────────"

@@ -240,6 +240,11 @@ bash scripts/install.sh --platform openclaw
 bash scripts/install.sh --dry-run
 ```
 
+**Rules seem partially enforced / the agent doesn't follow rules near the end of the block**
+Your instruction file may be getting truncated. Agents inject the config file into context every turn, and most platforms cap how much they'll inject (OpenClaw's default per-file bootstrap cap is 20000 chars). If the file plus the dinotrust block exceeds that cap, the platform silently drops the overflow — and if part of the ruleset is cut, enforcement runs half-applied with no error.
+
+The installer warns you at install time if the projected size is over the cap. To confirm at runtime, ask the agent to quote a rule from near the end of the `dinotrust begin..end` block — if it can't, the block is being truncated. Fixes: trim the instruction file, or (on OpenClaw) raise `agents.defaults.bootstrapMaxChars`. Because dinotrust is a security ruleset, a truncated block is a silent enforcement gap, not just a cosmetic issue.
+
 ---
 
 ## FAQ

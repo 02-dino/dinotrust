@@ -4,6 +4,28 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.2.2] — 2026-06-24
+
+### Added
+- **Bootstrap-budget check at install time.** Before injecting, `install.sh` now
+  measures the projected size of the target file + the dinotrust block and warns
+  if it would exceed the platform's per-turn injection budget — because a truncated
+  *security* ruleset is a silent enforcement gap, not just a cosmetic issue.
+  - OpenClaw: checks against the bootstrap per-file cap (20000 chars); warns at
+    17000 (approaching) and over 20000 (will truncate) with remediation
+    (trim file or raise `agents.defaults.bootstrapMaxChars`).
+  - Other platforms (Claude Code, Cursor, Windsurf, Aider, …): caps vary/undocumented,
+    so a conservative generic warning fires over 20000 chars, telling the user to
+    verify the agent reads the full `dinotrust begin..end` block.
+  - Warn-only, never blocks: budgets can be raised and per-platform caps differ.
+  - Existing dinotrust blocks are stripped before measuring, so re-installs don't
+    double-count.
+  - README: new Troubleshooting entry on partial enforcement / truncation.
+
+  Ported and upgraded from the OpenClaw-only size check already shipping in dinomem
+  and dinomem-neuron (root-file scan), adapted for dinotrust's single dynamic target
+  file and multi-platform reach.
+
 ## [1.2.1] — 2026-06-24
 
 ### Changed
