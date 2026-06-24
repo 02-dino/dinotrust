@@ -1,18 +1,21 @@
-# 🦖 dinotrust — AI Agent Security Rules Installer
+# 🦖 dinotrust — The Firewall Inside Your AI Agent
 
-> One command to harden any AI agent against prompt injection, impersonation, and unauthorized access.
+> Access control & prompt-injection defense for any AI agent — block impersonation and unauthorized access in under a minute.
 
 ---
 
 ## Why dinotrust is different
 
-Most AI agents ship with no access control. Anyone in the chat can ask them to read files, run commands, or reveal secrets.
+Knowing a Telegram user ID is easy. Knowing whether that ID is allowed to read your files, run commands, or see your keys — and enforcing it every turn — is what dinotrust does.
 
-dinotrust injects a structured security ruleset directly into the agent's context — the same way the agent reads its own instructions. No middleware, no proxy, no API changes. The agent enforces the rules itself.
+Most agent-security tools sit *in front of* the agent: a proxy, a middleware firewall, an API gateway that intercepts every message. That means another service to deploy, another endpoint to secure, another thing that breaks.
 
-- **Platform-native** — works with how each agent already reads its config (AGENTS.md, CLAUDE.md, .windsurfrules, etc.)
-- **Owner-verified** — ownership is verified via platform-injected metadata, not chat claims
-- **Injection-resistant** — explicit reject patterns for override attempts, encoded commands, and hypothetical bypasses
+dinotrust has **zero infrastructure**. It injects a structured ruleset straight into the agent's own context — the same channel the agent reads its instructions from — and the agent enforces the rules itself. No proxy. No middleware. No API changes. Delete the injected block and it's gone cleanly.
+
+- **Self-enforcing** — the agent is the firewall. Nothing to run in front of it, nothing to keep online.
+- **Zero-infrastructure** — one config block, no extra service, no new attack surface.
+- **9 platforms, one ruleset** — OpenClaw, Hermes, Claude Code, Codex CLI, Goose, Cursor, Windsurf, Continue.dev, Aider — each via its native config mechanism (AGENTS.md, CLAUDE.md, .windsurfrules, …).
+- **Authorization, not authentication** — ownership is bound to the platform's verified identity signal (numeric/UUID), never to chat claims. Re-checked every turn.
 
 ---
 

@@ -62,7 +62,7 @@ ask()     { echo -e "${BOLD}?${NC} $*"; }
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${BOLD}🦖 dinotrust v${VERSION}${NC} — AI Agent Security Rules Installer"
+echo -e "${BOLD}🦖 dinotrust v${VERSION}${NC} — Access control & prompt-injection defense for AI agents"
 echo "────────────────────────────────────────────────────────"
 echo ""
 
