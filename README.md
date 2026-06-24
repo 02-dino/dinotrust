@@ -17,6 +17,8 @@ dinotrust has **zero infrastructure**. It injects a structured ruleset straight 
 - **9 platforms, one ruleset** — OpenClaw, Hermes, Claude Code, Codex CLI, Goose, Cursor, Windsurf, Continue.dev, Aider — each via its native config mechanism (AGENTS.md, CLAUDE.md, .windsurfrules, …).
 - **Authorization, not authentication** — ownership is bound to the platform's verified identity signal (numeric/UUID), never to chat claims. Re-checked every turn.
 
+**This tracks model capability.** Enforcement is the agent's own instruction-following, not a static regex or proxy filter. As models get better at following instructions, they enforce the rules more reliably and resist manipulation better — while a fixed filter stays exactly as good (or as brittle) as the day it shipped. It cuts both ways: stronger models also mean stronger adversaries, so this raises reliability, not absolute guarantees (see the Identity model note).
+
 ---
 
 ## What it does

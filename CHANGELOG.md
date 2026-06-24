@@ -4,6 +4,16 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.2.1] — 2026-06-24
+
+### Changed
+- README “Why dinotrust is different”: added a closing paragraph on how enforcement
+  tracks model capability — because enforcement is the agent’s own instruction-
+  following (not a static regex/proxy filter), stronger models enforce more reliably
+  and resist manipulation better, while fixed filters stay as brittle as shipped.
+  Includes the honest double-edged caveat (stronger models also mean stronger
+  adversaries → raises reliability, not absolute guarantees).
+
 ## [1.2.0] — 2026-06-24
 
 ### Added
