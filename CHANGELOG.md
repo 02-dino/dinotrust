@@ -4,6 +4,23 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.4.1] — 2026-06-24
+
+### Added
+- **Agent action hint on every missing-input error.** Non-interactive errors now
+  end with an `ACTION[agent]:` line telling an autonomous installer whether to
+  self-resolve or ask the human:
+  - `self` (platform, target path, overwrite-vs-detect) — “resolve this from your
+    own host/workspace context and re-run with the flag.”
+  - `owner` (owner ID, profile, custom policy, overwriting an existing block) —
+    “ask the OWNER for this (identity/security policy — do not guess), then
+    re-run.”
+  This removes the guesswork an agent would otherwise face: identity and security
+  decisions are routed to the human; environment facts the agent already knows are
+  routed to itself. Human interactive flow is unchanged.
+
+---
+
 ## [1.4.0] — 2026-06-24
 
 ### Added

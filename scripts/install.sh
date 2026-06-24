@@ -75,10 +75,22 @@ fi
 
 # need_input: in non-interactive mode, abort with the flag the caller should
 # pass instead of prompting. Used to guard every interactive read below.
+# $3 = source hint for an autonomous caller (e.g. an installing agent):
+#   "self"  -> the agent can resolve this from its own host/workspace context
+#             and retry; no human needed.
+#   "owner" -> identity or security policy the agent MUST NOT guess; pause and
+#             ask the human owner for the value, then retry.
 need_input() {
-  # $1 = human description, $2 = flag hint
+  # $1 = human description, $2 = flag hint, $3 = self|owner (default: self)
   if [[ "$OPT_NONINTERACTIVE" == "true" ]]; then
-    error "Missing required input: $1. Pass $2 (running non-interactively / no TTY)."
+    local _src="${3:-self}"
+    local _guide
+    if [[ "$_src" == "owner" ]]; then
+      _guide="ACTION[agent]: ask the OWNER for this (identity/security policy — do not guess), then re-run with the flag."
+    else
+      _guide="ACTION[agent]: resolve this from your own host/workspace context and re-run with the flag."
+    fi
+    error "Missing required input: $1. Pass $2 (running non-interactively / no TTY). $_guide"
   fi
 }
 
@@ -99,7 +111,7 @@ echo ""
 PLATFORMS=(openclaw hermes claude-code codex-cli goose cursor windsurf continue aider)
 
 if [[ -z "$OPT_PLATFORM" ]]; then
-  need_input "platform" "--platform openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
+  need_input "platform" "--platform openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider" self
   # Auto-detect
   DETECTED=""
   [[ -f "$HOME/.openclaw/openclaw.json" ]] && DETECTED="openclaw"
@@ -208,7 +220,7 @@ fi
 
 # OpenClaw: multiple workspaces found — present a numbered menu of what we detected.
 if [[ "$CONFIG_FILE" == "__menu__" ]]; then
-  need_input "which OpenClaw workspace to target (multiple detected)" "--config PATH or --workspace DIR"
+  need_input "which OpenClaw workspace to target (multiple detected)" "--config PATH or --workspace DIR" self
   echo ""
   ask "Multiple OpenClaw workspaces detected — pick one:"
   mapfile -t _WS_LIST < <(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
@@ -232,7 +244,7 @@ fi
 
 # OpenClaw: zero workspaces found — say so, then ask.
 if [[ "$CONFIG_FILE" == "__none__" ]]; then
-  need_input "target config path (no OpenClaw workspace detected)" "--config PATH or --workspace DIR"
+  need_input "target config path (no OpenClaw workspace detected)" "--config PATH or --workspace DIR" self
   echo ""
   warn "No OpenClaw workspaces detected under $HOME/.openclaw/workspace-*/"
   ask "Path to your OpenClaw workspace AGENTS.md:"
@@ -241,7 +253,7 @@ fi
 
 # Generic fallback for non-OpenClaw platforms that returned __ask__.
 if [[ "$CONFIG_FILE" == "__ask__" ]]; then
-  need_input "target config path" "--config PATH"
+  need_input "target config path" "--config PATH" self
   echo ""
   ask "Path to your agent's config file:"
   read -rp "> " CONFIG_FILE
@@ -251,7 +263,7 @@ info "Config file: $CONFIG_FILE"
 
 # ── Step 3: Owner ID ──────────────────────────────────────────────────────────
 if [[ -z "$OPT_OWNER_ID" ]]; then
-  need_input "owner ID(s)" "--owner-id ID[,ID...]"
+  need_input "owner ID(s)" "--owner-id ID[,ID...]" owner
   echo ""
   ask "Your platform user ID(s) (numeric/UUID; comma-separated for multiple owners):"
   echo "  Telegram: Settings → Advanced → copy numeric ID"
@@ -292,7 +304,7 @@ fi
 
 # ── Step 4: Profile preset ────────────────────────────────────────────────────
 if [[ -z "$OPT_PROFILE" ]]; then
-  need_input "profile preset" "--profile private-assistant|market-analyst|custom"
+  need_input "profile preset" "--profile private-assistant|market-analyst|custom" owner
   echo ""
   ask "Agent profile preset:"
   echo "  1) private-assistant   — personal assistant; non-owners get nothing"
@@ -358,7 +370,7 @@ case "$OPT_PROFILE" in
       - memory_search: true"
     ;;
   custom)
-    need_input "custom profile details (deflection message + allowed actions)" "a preset --profile private-assistant|market-analyst (custom needs interactive input)"
+    need_input "custom profile details (deflection message + allowed actions)" "a preset --profile private-assistant|market-analyst (custom needs interactive input)" owner
     echo ""
     ask "Deflection message for non-owners (what the agent says when refusing):"
     read -rp "> " DEFLECTION_MSG
@@ -447,7 +459,7 @@ fi
 # Check for existing block
 if grep -q "dinotrust begin" "$CONFIG_FILE" 2>/dev/null; then
   if [[ "$OPT_FORCE" == "false" ]]; then
-    need_input "confirmation to overwrite the existing dinotrust block" "--force"
+    need_input "confirmation to overwrite the existing dinotrust block" "--force" owner
     warn "dinotrust block already exists in $CONFIG_FILE"
     echo ""
     read -rp "Overwrite? [y/N]: " CONFIRM_OVERWRITE
