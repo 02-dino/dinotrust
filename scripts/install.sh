@@ -127,8 +127,12 @@ resolve_config_file() {
         count=$(echo "$workspaces" | grep -c . || true)
         if [[ $count -eq 1 ]]; then
           echo "${workspaces%$'\n'}/AGENTS.md"
+        elif [[ $count -gt 1 ]]; then
+          # Multiple workspaces — let the caller present a numbered menu.
+          echo "__menu__"
         else
-          echo "__ask__"
+          # Zero workspaces found — signal so the caller can say so explicitly.
+          echo "__none__"
         fi
       fi
       ;;
@@ -167,16 +171,41 @@ resolve_config_file() {
 
 CONFIG_FILE=$(resolve_config_file "$OPT_PLATFORM" "$OPT_GLOBAL")
 
-if [[ "$CONFIG_FILE" == "__ask__" ]]; then
+# OpenClaw: multiple workspaces found — present a numbered menu of what we detected.
+if [[ "$CONFIG_FILE" == "__menu__" ]]; then
   echo ""
-  ask "Path to your agent's config file:"
+  ask "Multiple OpenClaw workspaces detected — pick one:"
+  mapfile -t _WS_LIST < <(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
+  _i=1
+  for _ws in "${_WS_LIST[@]}"; do
+    echo "  $_i) ${_ws%/}"
+    _i=$((_i + 1))
+  done
+  echo "  0) Enter a custom path"
+  echo ""
+  read -rp "Enter number [0-$(( ${#_WS_LIST[@]} ))]: " _WS_NUM
+  if [[ "$_WS_NUM" == "0" ]]; then
+    ask "Path to your OpenClaw workspace AGENTS.md:"
+    read -rp "> " CONFIG_FILE
+  elif [[ "$_WS_NUM" =~ ^[0-9]+$ ]] && (( _WS_NUM >= 1 && _WS_NUM <= ${#_WS_LIST[@]} )); then
+    CONFIG_FILE="${_WS_LIST[$((_WS_NUM - 1))]%/}/AGENTS.md"
+  else
+    error "Invalid selection."
+  fi
+fi
+
+# OpenClaw: zero workspaces found — say so, then ask.
+if [[ "$CONFIG_FILE" == "__none__" ]]; then
+  echo ""
+  warn "No OpenClaw workspaces detected under $HOME/.openclaw/workspace-*/"
+  ask "Path to your OpenClaw workspace AGENTS.md:"
   read -rp "> " CONFIG_FILE
 fi
 
-# Handle OpenClaw multi-workspace
-if [[ "$OPT_PLATFORM" == "openclaw" && "$CONFIG_FILE" == "__ask__" ]]; then
+# Generic fallback for non-OpenClaw platforms that returned __ask__.
+if [[ "$CONFIG_FILE" == "__ask__" ]]; then
   echo ""
-  ask "Path to your OpenClaw workspace AGENTS.md:"
+  ask "Path to your agent's config file:"
   read -rp "> " CONFIG_FILE
 fi
 
@@ -203,6 +232,12 @@ IFS=',' read -ra _OWNER_IDS <<< "$OPT_OWNER_ID"
 for _oid in "${_OWNER_IDS[@]}"; do
   _oid="${_oid// /}"   # trim spaces
   [[ -z "$_oid" ]] && continue
+  # Shape sanity check: most platform IDs are numeric (Telegram/Discord) or
+  # UUID-ish (some platforms). Warn — never block — on anything else, since a
+  # garbage/typo'd owner id silently grants no one (or the wrong one) access.
+  if [[ ! "$_oid" =~ ^[0-9]+$ && ! "$_oid" =~ ^[0-9a-fA-F-]{16,}$ ]]; then
+    warn "Owner ID '$_oid' doesn't look numeric or UUID-like — double-check it matches your platform's user ID, or the agent won't recognize you as owner."
+  fi
   if [[ $OWNER_ID_COUNT -gt 0 ]]; then OWNER_IDS_YAML+=", "; fi
   OWNER_IDS_YAML+="$_oid"
   OWNER_ID_COUNT=$((OWNER_ID_COUNT + 1))
@@ -356,6 +391,16 @@ if [[ "$OPT_DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
+# Back up the target before any in-place mutation. This file is the agent's
+# instruction source; we strip/append in place, so a timestamped backup is the
+# undo path if anything goes wrong (incl. a malformed prior block confusing the
+# awk range strip below). Only back up a non-empty existing file.
+if [[ -f "$CONFIG_FILE" && -s "$CONFIG_FILE" ]]; then
+  BACKUP_FILE="${CONFIG_FILE}.dinotrust-bak.$(date -u +%Y%m%d-%H%M%S)"
+  cp "$CONFIG_FILE" "$BACKUP_FILE"
+  info "Backed up $CONFIG_FILE → $BACKUP_FILE"
+fi
+
 # Check for existing block
 if grep -q "dinotrust begin" "$CONFIG_FILE" 2>/dev/null; then
   if [[ "$OPT_FORCE" == "false" ]]; then
@@ -363,6 +408,14 @@ if grep -q "dinotrust begin" "$CONFIG_FILE" 2>/dev/null; then
     echo ""
     read -rp "Overwrite? [y/N]: " CONFIRM_OVERWRITE
     [[ "$CONFIRM_OVERWRITE" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
+  fi
+  # Guard against a malformed prior block: an unterminated 'begin' (no matching
+  # 'end') would make the awk range delete everything to EOF. Detect and refuse
+  # rather than silently eat the rest of the file (the backup above is the net).
+  _begins=$(grep -c '# --- dinotrust begin' "$CONFIG_FILE" || true)
+  _ends=$(grep -c '# --- dinotrust end ---' "$CONFIG_FILE" || true)
+  if [[ "$_begins" != "$_ends" ]]; then
+    error "Malformed existing dinotrust block in $CONFIG_FILE ($_begins begin / $_ends end markers). Fix manually (backup at ${BACKUP_FILE:-none}) and re-run."
   fi
   # Remove existing block
   info "Removing existing dinotrust block..."

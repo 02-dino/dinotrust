@@ -4,6 +4,32 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.3.0] — 2026-06-24
+
+### Added
+- **Backup before mutate.** `install.sh` now writes a timestamped backup
+  (`<config>.dinotrust-bak.<UTC-timestamp>`) of the target instruction file
+  before any in-place strip/append. The target is the agent's instruction
+  source; this is the undo path if anything goes wrong.
+- **Multi-workspace picker (OpenClaw).** When more than one
+  `~/.openclaw/workspace-*/` exists, the installer now shows a numbered menu of
+  the detected workspaces (plus a custom-path option) instead of silently asking
+  for a full path.
+- **Zero-workspace message (OpenClaw).** When no workspaces are detected, the
+  installer now says so explicitly before prompting for a path.
+- **Owner-ID shape check.** Owner IDs that are neither numeric nor UUID-like now
+  trigger a warning (never a block) so a typo'd ID that would silently grant no
+  one owner access is caught early.
+
+### Fixed
+- **Malformed-block guard.** If the target already contains an unterminated
+  dinotrust block (a `begin` with no matching `end` — e.g. from an interrupted
+  prior run), the `awk` range strip would delete everything from `begin` to EOF.
+  The installer now detects mismatched begin/end marker counts and refuses with
+  a clear message (backup already taken) instead of eating the rest of the file.
+
+---
+
 ## [1.2.2] — 2026-06-24
 
 ### Added
