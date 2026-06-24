@@ -283,8 +283,8 @@ Removes the dinotrust block from your agent's config file. Agent returns to defa
 
 ## License
 
-MIT — see LICENSE.
+MIT
 
 ---
 
-Made with 🦖 by [@02-dino](https://github.com/02-dino) | [komunitech.com](https://komunitech.com)
+Made with 🦖 by [@02-dino](https://github.com/02-dino)
