@@ -4,6 +4,40 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.5.0] — 2026-06-25
+
+### Changed
+- **`security_rules.md` rewritten to terse machine-readable style.** Removed all
+  prose `note:` blocks and the inline credential-masking example; folded their
+  intent into flat key-value fields the agent enforces directly:
+  - `role_verification`: prose notes → `carry_over_ownership: false`,
+    `owner_match`, `malformed_metadata_policy: deny`, `infer_from_content`/
+    `infer_from_username`/`infer_from_display_name: false`.
+  - `who_is_owner.detection`: folded note → `authenticator`, `owner_match`,
+    `multi_owner` keys.
+  - `platform_identity_fields`: stripped parenthetical descriptions → bare
+    field names.
+  - `owner_rules.exceptions`: prose strings → `true` flags.
+  - `S0_security_directive`: prose sentences → `access_to`,
+    `forbid_display_raw`, `reference_policy: mask_only`,
+    `reveal_full_on_request: refuse`.
+  No behavior change — the ruleset enforces the same policy in fewer tokens.
+
+### Added
+- **Multi-item custom `allowed` actions.** The `custom` profile prompt now
+  accepts a comma-separated list; each item becomes its own YAML entry under
+  `allowed:`, matching the preset structure. `none`/empty → `- none`; spaces
+  trimmed and empty entries dropped. Previously custom captured a single
+  free-text bullet only.
+
+### Fixed
+- **Restored `roles:` block** (`owner: {access: full}`,
+  `non_owner: {apply_restrictions_below: true}`) under `who_is_owner`, which was
+  accidentally dropped while collapsing the adjacent `detection` note during the
+  terse rewrite.
+
+---
+
 ## [1.4.1] — 2026-06-24
 
 ### Added

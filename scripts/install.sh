@@ -375,9 +375,23 @@ case "$OPT_PROFILE" in
     ask "Deflection message for non-owners (what the agent says when refusing):"
     read -rp "> " DEFLECTION_MSG
     echo ""
-    ask "What are non-owners allowed to do? (describe briefly, or 'none')"
+    ask "What are non-owners allowed to do? (comma-separated for multiple, or 'none')"
+    echo "  Example: market_data_queries: true, web_search: true, memory_search: true"
     read -rp "> " ALLOWED_RAW
-    ALLOWED_ACTIONS="      - $ALLOWED_RAW"
+    # Build a multi-item YAML list from comma-separated input. 'none'/empty -> '- none'.
+    ALLOWED_ACTIONS=""
+    if [[ -z "$ALLOWED_RAW" || "${ALLOWED_RAW,,}" == "none" ]]; then
+      ALLOWED_ACTIONS="      - none"
+    else
+      IFS=',' read -ra _ALLOWED_ITEMS <<< "$ALLOWED_RAW"
+      for _item in "${_ALLOWED_ITEMS[@]}"; do
+        _item="${_item#"${_item%%[![:space:]]*}"}"   # ltrim
+        _item="${_item%"${_item##*[![:space:]]}"}"   # rtrim
+        [[ -n "$_item" ]] && ALLOWED_ACTIONS+="      - $_item"$'\n'
+      done
+      ALLOWED_ACTIONS="${ALLOWED_ACTIONS%$'\n'}"   # drop trailing newline
+      [[ -z "$ALLOWED_ACTIONS" ]] && ALLOWED_ACTIONS="      - none"
+    fi
     ;;
 esac
 
