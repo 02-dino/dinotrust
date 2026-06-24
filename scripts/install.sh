@@ -27,6 +27,8 @@ OPT_GLOBAL=false
 OPT_FORCE=false
 OPT_DRY_RUN=false
 OPT_PROTECTED_FILES=""
+OPT_CONFIG=""
+OPT_NONINTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +39,11 @@ while [[ $# -gt 0 ]]; do
     --force)      OPT_FORCE=true; shift ;;
     --dry-run)    OPT_DRY_RUN=true; shift ;;
     --protected)  OPT_PROTECTED_FILES="$2"; shift 2 ;;
+    # --config and --workspace both name the exact target. --config takes the
+    # file path as-is; --workspace is sugar for <dir>/AGENTS.md (OpenClaw style).
+    --config)     OPT_CONFIG="$2"; shift 2 ;;
+    --workspace)  OPT_CONFIG="${2%/}/AGENTS.md"; shift 2 ;;
+    --non-interactive|--yes|-y) OPT_NONINTERACTIVE=true; shift ;;
     -h|--help)
       echo "Usage: bash scripts/install.sh [options]"
       echo ""
@@ -44,14 +51,36 @@ while [[ $# -gt 0 ]]; do
       echo "  --platform NAME     Platform: openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
       echo "  --owner-id IDS      Your platform user ID(s); comma-separated for multiple owners"
       echo "  --profile NAME      Preset: private-assistant|market-analyst|custom"
+      echo "  --config PATH       Exact target config file (bypasses workspace auto-detect/prompt)"
+      echo "  --workspace DIR     Target an OpenClaw workspace dir (uses DIR/AGENTS.md)"
       echo "  --global            Inject into global config (where supported)"
-      echo "  --force             Overwrite existing dinotrust block"
+      echo "  --force             Overwrite existing dinotrust block without asking"
+      echo "  --non-interactive   Never prompt; error (with the flag to pass) if input is missing. Alias: --yes, -y"
       echo "  --dry-run           Preview injection, no changes"
       echo "  --protected FILES   Comma-separated extra protected files"
+      echo ""
+      echo "Headless/agent use: pass --platform, --owner-id, --profile, and --config (or"
+      echo "--workspace), plus --non-interactive and --force. Missing input then fails fast"
+      echo "with the exact flag to add, instead of hanging on a prompt."
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
+
+# If stdin is not a TTY, enable non-interactive automatically so the script
+# fails fast instead of blocking forever on a read with no terminal.
+if [[ ! -t 0 ]]; then
+  OPT_NONINTERACTIVE=true
+fi
+
+# need_input: in non-interactive mode, abort with the flag the caller should
+# pass instead of prompting. Used to guard every interactive read below.
+need_input() {
+  # $1 = human description, $2 = flag hint
+  if [[ "$OPT_NONINTERACTIVE" == "true" ]]; then
+    error "Missing required input: $1. Pass $2 (running non-interactively / no TTY)."
+  fi
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 info()    { echo -e "${CYAN}→${NC} $*"; }
@@ -70,6 +99,7 @@ echo ""
 PLATFORMS=(openclaw hermes claude-code codex-cli goose cursor windsurf continue aider)
 
 if [[ -z "$OPT_PLATFORM" ]]; then
+  need_input "platform" "--platform openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
   # Auto-detect
   DETECTED=""
   [[ -f "$HOME/.openclaw/openclaw.json" ]] && DETECTED="openclaw"
@@ -169,10 +199,16 @@ resolve_config_file() {
   esac
 }
 
-CONFIG_FILE=$(resolve_config_file "$OPT_PLATFORM" "$OPT_GLOBAL")
+# Explicit --config/--workspace wins over all auto-detection and prompts.
+if [[ -n "$OPT_CONFIG" ]]; then
+  CONFIG_FILE="$OPT_CONFIG"
+else
+  CONFIG_FILE=$(resolve_config_file "$OPT_PLATFORM" "$OPT_GLOBAL")
+fi
 
 # OpenClaw: multiple workspaces found — present a numbered menu of what we detected.
 if [[ "$CONFIG_FILE" == "__menu__" ]]; then
+  need_input "which OpenClaw workspace to target (multiple detected)" "--config PATH or --workspace DIR"
   echo ""
   ask "Multiple OpenClaw workspaces detected — pick one:"
   mapfile -t _WS_LIST < <(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
@@ -196,6 +232,7 @@ fi
 
 # OpenClaw: zero workspaces found — say so, then ask.
 if [[ "$CONFIG_FILE" == "__none__" ]]; then
+  need_input "target config path (no OpenClaw workspace detected)" "--config PATH or --workspace DIR"
   echo ""
   warn "No OpenClaw workspaces detected under $HOME/.openclaw/workspace-*/"
   ask "Path to your OpenClaw workspace AGENTS.md:"
@@ -204,6 +241,7 @@ fi
 
 # Generic fallback for non-OpenClaw platforms that returned __ask__.
 if [[ "$CONFIG_FILE" == "__ask__" ]]; then
+  need_input "target config path" "--config PATH"
   echo ""
   ask "Path to your agent's config file:"
   read -rp "> " CONFIG_FILE
@@ -213,6 +251,7 @@ info "Config file: $CONFIG_FILE"
 
 # ── Step 3: Owner ID ──────────────────────────────────────────────────────────
 if [[ -z "$OPT_OWNER_ID" ]]; then
+  need_input "owner ID(s)" "--owner-id ID[,ID...]"
   echo ""
   ask "Your platform user ID(s) (numeric/UUID; comma-separated for multiple owners):"
   echo "  Telegram: Settings → Advanced → copy numeric ID"
@@ -253,6 +292,7 @@ fi
 
 # ── Step 4: Profile preset ────────────────────────────────────────────────────
 if [[ -z "$OPT_PROFILE" ]]; then
+  need_input "profile preset" "--profile private-assistant|market-analyst|custom"
   echo ""
   ask "Agent profile preset:"
   echo "  1) private-assistant   — personal assistant; non-owners get nothing"
@@ -281,7 +321,9 @@ case "$OPT_PLATFORM" in
   cursor) AUTO_PROTECTED+=(".cursor/rules/") ;;
 esac
 
-if [[ -z "$OPT_PROTECTED_FILES" ]]; then
+# Optional input: in non-interactive mode just skip (no extra protected files)
+# rather than erroring — the auto-protected set already covers the essentials.
+if [[ -z "$OPT_PROTECTED_FILES" && "$OPT_NONINTERACTIVE" != "true" ]]; then
   echo ""
   ask "Additional files/folders to protect? (comma-separated, or Enter to skip)"
   echo "  Auto-protected: ${AUTO_PROTECTED[*]}"
@@ -316,6 +358,7 @@ case "$OPT_PROFILE" in
       - memory_search: true"
     ;;
   custom)
+    need_input "custom profile details (deflection message + allowed actions)" "a preset --profile private-assistant|market-analyst (custom needs interactive input)"
     echo ""
     ask "Deflection message for non-owners (what the agent says when refusing):"
     read -rp "> " DEFLECTION_MSG
@@ -404,6 +447,7 @@ fi
 # Check for existing block
 if grep -q "dinotrust begin" "$CONFIG_FILE" 2>/dev/null; then
   if [[ "$OPT_FORCE" == "false" ]]; then
+    need_input "confirmation to overwrite the existing dinotrust block" "--force"
     warn "dinotrust block already exists in $CONFIG_FILE"
     echo ""
     read -rp "Overwrite? [y/N]: " CONFIRM_OVERWRITE

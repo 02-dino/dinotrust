@@ -4,6 +4,26 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.4.0] — 2026-06-24
+
+### Added
+- **Headless / agent-friendly install.** The installer can now run fully
+  unattended with deterministic failures instead of hanging on prompts:
+  - `--config PATH` — name the exact target file, bypassing all workspace
+    auto-detection and prompts.
+  - `--workspace DIR` — sugar for `DIR/AGENTS.md` (OpenClaw style).
+  - `--non-interactive` (aliases `--yes`, `-y`) — never prompt; if a required
+    input is missing, abort with the exact flag to pass.
+  - **Automatic non-interactive when stdin is not a TTY** — piped/CI/agent runs
+    no longer block on `read`; a missing input fails fast with the flag hint.
+  - Every interactive prompt (platform, owner-id, profile, workspace/config
+    path, overwrite confirmation, custom-profile details) is now guarded.
+    Optional input (extra protected files) is simply skipped headless rather
+    than erroring.
+  - `--help` documents a headless usage recipe.
+
+---
+
 ## [1.3.0] — 2026-06-24
 
 ### Added
