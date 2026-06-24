@@ -36,7 +36,7 @@ dinotrust has **zero infrastructure**. It injects a structured ruleset straight 
 install.sh
     │
     ├── Detect platform (or ask)
-    ├── Ask: owner ID + profile preset
+    ├── Ask: owner ID(s) + profile preset
     ├── Fill placeholders in security_rules.md
     ├── Inject into platform config file
     │     (project-level by default; --global for global)
@@ -92,6 +92,18 @@ Ownership is re-verified on every message — not just at session start. If the 
 Username, display name, and any user-provided field are never used for verification — only the platform-injected numeric or UUID identifier.
 
 **What this means in practice:** if someone shares your account or your session is compromised, dinotrust cannot detect it — because the platform itself cannot. dinotrust is only as strong as the platform's authentication.
+
+**Multiple owners**
+
+dinotrust supports more than one owner. Pass several IDs comma-separated:
+
+```bash
+bash scripts/install.sh --owner-id "123456789,987654321"
+```
+
+The rules store them as a set (`owner_ids`), and a sender is the owner if and only if their platform-injected ID is an exact member of that set. A single ID behaves exactly like single-owner mode — fully backward-compatible.
+
+> **⚠️ Each owner is a full-access account.** More owners means more accounts that, if compromised, grant the agent's full owner privileges. Add only IDs you trust at the same level as your own. There is no partial-owner tier — owner is all-or-nothing (use a profile preset if you need scoped non-owner access instead).
 
 ---
 
@@ -153,7 +165,7 @@ grep "dinotrust begin" <your-agent-config-file>
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--platform NAME` | Interactive | Skip platform detection prompt |
-| `--owner-id ID` | Interactive | Your platform user ID |
+| `--owner-id IDS` | Interactive | Your platform user ID(s) — comma-separated for multiple owners (e.g. `123,456`) |
 | `--profile NAME` | Interactive | Preset: `private-assistant`, `market-analyst`, `custom` |
 | `--global` | Project-level | Inject into global config instead of project-level |
 | `--force` | — | Overwrite existing dinotrust block |

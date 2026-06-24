@@ -4,6 +4,26 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.2.0] — 2026-06-24
+
+### Added
+- **Multiple owners.** `--owner-id` now accepts a comma-separated list (e.g.
+  `--owner-id "123,456"`); the interactive prompt accepts multiple IDs too. Rules
+  store them as a set (`owner_ids`) and grant owner access if and only if the
+  platform-injected sender ID is an exact member of that set.
+  - Fully backward-compatible: a single ID behaves identically to the old
+    single-owner mode.
+  - Security model unchanged: still metadata-only, per-turn verification,
+    deny on absent/malformed/ambiguous. The only change is `==` → set membership.
+  - install.sh prints a trust-surface warning when more than one owner is set.
+  - README: new “Multiple owners” subsection under Identity model with an explicit
+    warning that each owner is a full-access account (owner is all-or-nothing).
+
+### Changed
+- `security_rules.md`: `owner_id: <id>` → `owner_ids: [<id>, …]`; verification note
+  reworded to membership semantics. Placeholder `DINOTRUST_OWNER_ID` →
+  `DINOTRUST_OWNER_IDS`.
+
 ## [1.1.0] — 2026-06-24
 
 ### Changed

@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --platform NAME     Platform: openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
-      echo "  --owner-id ID       Your platform user ID"
+      echo "  --owner-id IDS      Your platform user ID(s); comma-separated for multiple owners"
       echo "  --profile NAME      Preset: private-assistant|market-analyst|custom"
       echo "  --global            Inject into global config (where supported)"
       echo "  --force             Overwrite existing dinotrust block"
@@ -185,16 +185,36 @@ info "Config file: $CONFIG_FILE"
 # ── Step 3: Owner ID ──────────────────────────────────────────────────────────
 if [[ -z "$OPT_OWNER_ID" ]]; then
   echo ""
-  ask "Your platform user ID (numeric):"
+  ask "Your platform user ID(s) (numeric/UUID; comma-separated for multiple owners):"
   echo "  Telegram: Settings → Advanced → copy numeric ID"
   echo "  Discord:  Developer Mode → right-click username → Copy ID"
   echo "  Other:    Check your platform's user metadata"
+  echo "  Multiple: e.g. 123456789,987654321 (each is a full owner)"
   echo ""
-  read -rp "Owner ID: " OPT_OWNER_ID
+  read -rp "Owner ID(s): " OPT_OWNER_ID
 fi
 
-[[ -z "$OPT_OWNER_ID" ]] && error "Owner ID is required."
-info "Owner ID: $OPT_OWNER_ID"
+[[ -z "$OPT_OWNER_ID" ]] && error "At least one owner ID is required."
+
+# Parse comma-separated owner IDs into a YAML inline list: [id1, id2, ...]
+OWNER_IDS_YAML="["
+OWNER_ID_COUNT=0
+IFS=',' read -ra _OWNER_IDS <<< "$OPT_OWNER_ID"
+for _oid in "${_OWNER_IDS[@]}"; do
+  _oid="${_oid// /}"   # trim spaces
+  [[ -z "$_oid" ]] && continue
+  if [[ $OWNER_ID_COUNT -gt 0 ]]; then OWNER_IDS_YAML+=", "; fi
+  OWNER_IDS_YAML+="$_oid"
+  OWNER_ID_COUNT=$((OWNER_ID_COUNT + 1))
+done
+OWNER_IDS_YAML+="]"
+[[ $OWNER_ID_COUNT -eq 0 ]] && error "At least one valid owner ID is required."
+if [[ $OWNER_ID_COUNT -eq 1 ]]; then
+  info "Owner ID: ${OWNER_IDS_YAML}"
+else
+  info "Owner IDs ($OWNER_ID_COUNT owners): ${OWNER_IDS_YAML}"
+  warn "Multiple owners = multiple full-access accounts. Each is a trust surface; if any one is compromised, the agent is fully exposed."
+fi
 
 # ── Step 4: Profile preset ────────────────────────────────────────────────────
 if [[ -z "$OPT_PROFILE" ]]; then
@@ -274,7 +294,7 @@ esac
 # ── Step 7: Build injection block ─────────────────────────────────────────────
 # Read template and fill placeholders
 RULES_CONTENT=$(cat "$RULES_TEMPLATE")
-RULES_CONTENT="${RULES_CONTENT//DINOTRUST_OWNER_ID/$OPT_OWNER_ID}"
+RULES_CONTENT="${RULES_CONTENT//DINOTRUST_OWNER_IDS/$OWNER_IDS_YAML}"
 RULES_CONTENT="${RULES_CONTENT//DINOTRUST_DEFLECTION_MESSAGE/$DEFLECTION_MSG}"
 RULES_CONTENT="${RULES_CONTENT//DINOTRUST_PROTECTED_RESOURCES/$PROTECTED_YAML}"
 RULES_CONTENT="${RULES_CONTENT//DINOTRUST_ALLOWED_ACTIONS/$ALLOWED_ACTIONS}"
@@ -353,7 +373,7 @@ success "dinotrust v${VERSION} installed"
 echo ""
 echo "  Platform : $OPT_PLATFORM"
 echo "  Config   : $CONFIG_FILE"
-echo "  Owner ID : $OPT_OWNER_ID"
+echo "  Owner ID(s) : $OWNER_IDS_YAML"
 echo "  Profile  : $OPT_PROFILE"
 echo ""
 echo "Next: restart your agent for the rules to take effect."
