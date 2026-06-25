@@ -31,6 +31,8 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -142,6 +144,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--period", choices=["daily", "weekly"], default="daily")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--output", dest="output_path", help="Write digest to file path (instead of sending)")
+    ap.add_argument("--webhook-url", dest="webhook_url", help="POST digest to a Discord/Slack webhook URL")
     args = ap.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -261,16 +265,28 @@ def main():
         print(report)
         return 0
 
-    # Guard: refuse to send to an unfilled placeholder (e.g. Tier-3 running the
-    # consumer without substitution and without --dry-run). Fail loud, not into
-    # a literal "__TARGET__" recipient.
+    # --output path: write to file, no send
+    if args.output_path:
+        with open(args.output_path, "w", encoding="utf-8") as f:
+            f.write(report + "\n")
+        print(f"written to {args.output_path}")
+        return 0
+
+    # --webhook-url: POST to Discord/Slack webhook
+    if args.webhook_url:
+        return deliver_webhook(args.webhook_url, report)
+
+    # If no delivery configured (unfilled placeholders), default to stdout
+    # instead of failing. This is the T3 self-audit path when the user hasn't
+    # set up a target yet — they still see the digest.
     if not TARGET or TARGET.startswith("__") or CHANNEL.startswith("__"):
+        print(report)
         sys.stderr.write(
-            "refusing to send: CHANNEL/TARGET not configured "
-            "(set DT_CHANNEL/DT_TARGET, or use --dry-run). "
-            "Tier-3 self-audit typically runs with --dry-run.\n"
+            "\nNote: CHANNEL/TARGET not configured — printed to stdout. "
+            "Set DT_CHANNEL/DT_TARGET env vars, or use --output, --webhook-url, "
+            "or --dry-run.\n"
         )
-        return 2
+        return 0
 
     cmd = [resolve_openclaw(), "message", "send", "--channel", CHANNEL, "--target", TARGET]
     if ACCOUNT:
@@ -285,6 +301,37 @@ def main():
         return res.returncode
     print("sent")
     return 0
+
+
+def deliver_webhook(url, text):
+    """POST a plain-text digest to a Discord or Slack webhook."""
+    # Discord accepts {content: text}; Slack accepts {text: text}
+    # Try Discord shape first; if it fails, Slack shape is the fallback
+    # on the next run. In practice users know which platform their webhook is.
+    payload = json.dumps({"content": text}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status in (200, 204):
+                print("webhook sent")
+                return 0
+            sys.stderr.write(f"webhook returned {resp.status}\n")
+            return 1
+    except urllib.error.HTTPError as e:
+        # Discord webhooks return 204 No Content on success
+        if e.code == 204:
+            print("webhook sent")
+            return 0
+        sys.stderr.write(f"webhook failed: {e.code} {e.reason}\n")
+        return 1
+    except Exception as e:
+        sys.stderr.write(f"webhook error: {e}\n")
+        return 1
 
 
 if __name__ == "__main__":

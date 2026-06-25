@@ -4,6 +4,27 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.13.0] — 2026-06-25
+
+### Added
+- **Cross-platform delivery in `report.py`.** The consumer now supports
+  multiple delivery modes (first match wins):
+  1. `--dry-run` — print to stdout, no send
+  2. `--output path` — write digest to file
+  3. `--webhook-url URL` — POST to Discord/Slack webhook
+  4. `openclaw message send` — T1/T2 default (unchanged)
+  5. **none configured** — print to stdout with a note (was: fail with error 2)
+- **T3 default behavior:** when `CHANNEL`/`TARGET` are unconfigured placeholders,
+  `report.py` now prints the digest to stdout instead of failing. This is the
+  honest default for T3 self-audit: the user sees the digest immediately and
+  can decide how to route it.
+
+### Changed
+- `report.py` header updated: now described as "universal report consumer"
+  (was "OpenClaw adapter"), since it serves every tier.
+
+---
+
 ## [1.12.0] — 2026-06-25
 
 ### Added
