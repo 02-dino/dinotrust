@@ -49,6 +49,23 @@ The injected block is clearly marked with `# --- dinotrust begin ---` / `# --- d
 
 ---
 
+## Observability (audit layer)
+
+dinotrust core *enforces*. The optional [`observability/`](observability/) module
+*observes and reports* — an independent record of agent traffic and which
+reject-patterns (R1/R3/R4/R6/R7/S0) fired, delivered as a daily/weekly digest.
+Same zero-infra ethos: regex, no LLM; a language-neutral taxonomy
+(`patterns.json`) plus thin per-platform adapters.
+
+```bash
+bash observability/install.sh --report-target <chat-id>
+```
+
+See [`observability/README.md`](observability/README.md) for tiers, install
+flags, and the adapter contract.
+
+---
+
 ## Identity model
 
 dinotrust is an **authorization** framework, not an authentication framework.

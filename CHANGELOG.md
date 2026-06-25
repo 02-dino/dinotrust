@@ -4,6 +4,46 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.6.0] — 2026-06-25
+
+### Added
+- **`observability/` module — the audit layer.** dinotrust core enforces; this
+  optional module observes and reports. Zero-infra (regex, no LLM); core is
+  language-neutral data + spec, plugged in via thin per-platform adapters.
+  - **`patterns.json`** — universal taxonomy: each regex → a dinotrust `rule_id`
+    (R1/R3/R4/R6/R7/S0) + severity (critical/high/medium/low, calibrated).
+    `R2_external_instructions` + `T1_config_conflict` are agent-judged, declared
+    under `_meta.agent_judged_only`.
+  - **`audit-schema.json`** — JSONL event contract (schema v2).
+  - **`validate.py`** — drift guard; fails closed if `patterns.json` rule_ids
+    leave `security_rules.md`.
+  - **`adapters/openclaw/handler.ts`** — producer hook: taps inbound/outbound,
+    detects, logs all traffic + flagged attempts. Privacy-aware
+    (patterns-only/truncated/full).
+  - **`adapters/openclaw/report.py`** — consumer: deterministic daily/weekly
+    digest grouped by rule_id + severity, worst-severity headline,
+    privacy-aware samples. Delivered via `openclaw message send`.
+  - **First-class per-channel mentions** (`render_mention`): every
+    dinotrust-listed delivery channel renders its native by-id mention —
+    telegram `tg://` link, discord/slack `<@id>` ping (tolerating a `user:`
+    prefix), whatsapp `name (+e164)`, signal/other plain name. Bound to the
+    verified platform id, matching dinotrust's identity model.
+  - **`install.sh`** — OpenClaw installer. AUTO-detects platform/workspace/
+    agent-id/log paths/openclaw binary (Homebrew PATH fallback). Owner-input
+    `--report-target` is required (never silently defaulted — leak vector).
+    Substitutes placeholders, installs hook/report/patterns, wires idempotent
+    cron (merged, tagged, Homebrew PATH), `--dry-run`/`--force`, `validate.py`
+    preflight.
+  - **`ADAPTER.md` / `DIGEST.md` / `README.md`** — 5-function adapter contract,
+    digest output spec, module overview + 3 tiers (T1 OpenClaw, T2 daemon bots,
+    T3 no-daemon CLIs self-audit best-effort).
+- **`security_rules.md`: `audit.A1_reject_pattern_audit` clause.** On a reject-
+  pattern match, append one audit line naming the `rule_id`. Recorded
+  independently where an observability adapter exists; self-audit best-effort on
+  no-daemon CLIs.
+
+---
+
 ## [1.5.0] — 2026-06-25
 
 ### Changed

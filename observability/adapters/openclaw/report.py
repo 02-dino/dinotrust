@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""
+dinotrust observability — OpenClaw adapter (report / consumer).
+
+NO LLM. Pure parse + format + send. Reads the activity + jailbreak JSONL logs
+written by handler.ts, builds a deterministic digest, and delivers it via
+`openclaw message send`.
+
+The DIGEST LOGIC (windowing, grouping by rule_id + severity, counts) is the
+universal part — identical across every platform. Only delivery + mention
+rendering are channel-specific (the adapter's job). Mentions are first-class
+for every dinotrust-listed channel: telegram (tg:// link), discord/slack
+(native <@id> ping), whatsapp (name +e164), signal (name). See render_mention.
+
+Installer placeholders (filled by install.sh):
+  __ACTIVITY_LOG__   absolute path to the activity log
+  __JAILBREAK_LOG__  absolute path to the jailbreak log
+  __CHANNEL__        e.g. "telegram"
+  __TARGET__         chat/channel destination id (owner-supplied, REQUIRED)
+  __THREAD_ID__      forum topic/thread id, or empty
+  __ACCOUNT__        sending account id, or empty (uses platform default)
+
+Usage:
+  report.py --period daily
+  report.py --period weekly
+  report.py --period daily --dry-run
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+
+# === FILLED BY install.sh ===
+ACTIVITY_LOG = "__ACTIVITY_LOG__"
+JAILBREAK_LOG = "__JAILBREAK_LOG__"
+CHANNEL = "__CHANNEL__"
+TARGET = "__TARGET__"
+THREAD_ID = "__THREAD_ID__"   # may be empty
+ACCOUNT = "__ACCOUNT__"       # may be empty
+# ============================
+
+
+def resolve_openclaw():
+    """Find the openclaw binary. cron PATH often lacks Homebrew bin."""
+    found = shutil.which("openclaw")
+    if found:
+        return found
+    for cand in (
+        "/home/linuxbrew/.linuxbrew/bin/openclaw",
+        "/opt/homebrew/bin/openclaw",
+        "/usr/local/bin/openclaw",
+    ):
+        if os.path.exists(cand):
+            return cand
+    return "openclaw"  # last resort; raises if truly missing
+
+
+def render_mention(name, sender_id):
+    """Per-channel sender mention. First-class for every dinotrust-listed
+    delivery channel; each uses that platform's native by-id mention syntax
+    where one exists in a plain text send, else a clean plain-name fallback.
+
+    The log carries the platform's verified id (no @username), so id-based
+    forms are the reliable path — matching dinotrust's identity model
+    (attribution bound to the platform id, never to a chat-claimed handle).
+
+      telegram : [name](tg://user?id=<numeric>)   Markdown inline link
+      discord  : <@<numeric>>                       native ping
+      slack    : <@<UID>>                            native ping (U/W ids)
+      whatsapp : name (+<e164>)                      no inline-id mention in text
+      signal   : name                               no inline-id mention in text
+      <other>  : name                               safe generic fallback
+    """
+    safe = str(name).replace("[", "").replace("]", "").replace("<", "").replace(">", "").strip() or "user"
+    sid = str(sender_id).strip()
+    ch = (CHANNEL or "").lower()
+
+    if not sid or sid == "unknown":
+        return safe
+
+    if ch == "telegram":
+        return f"[{safe}](tg://user?id={sid})" if sid.isdigit() else safe
+    if ch == "discord":
+        # senderId may arrive bare (123) or prefixed (user:123) per --target shape.
+        did = sid.split(":", 1)[1] if sid.startswith("user:") else sid
+        return f"<@{did}>" if did.isdigit() else safe
+    if ch == "slack":
+        # Slack user ids start with U or W; tolerate a user: prefix.
+        uid = sid.split(":", 1)[1] if sid.startswith("user:") else sid
+        return f"<@{uid}>" if (uid[:1] in ("U", "W") and uid[1:].isalnum()) else safe
+    if ch == "whatsapp":
+        # No inline id-mention in a plain text body; show e164 for traceability.
+        e164 = sid if sid.startswith("+") else ("+" + sid if sid.isdigit() else "")
+        return f"{safe} ({e164})" if e164 else safe
+    if ch == "signal":
+        # Signal sender is a UUID; no text-body mention form. Plain name.
+        return safe
+    return safe
+
+
+def load_jsonl(path):
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path, "r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rows.append(json.loads(ln))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def parse_ts(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--period", choices=["daily", "weekly"], default="daily")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    now = datetime.now(timezone.utc)
+    if args.period == "daily":
+        since = now - timedelta(days=1)
+        label = "Daily"
+    else:
+        since = now - timedelta(days=7)
+        label = "Weekly"
+
+    activity = load_jsonl(ACTIVITY_LOG)
+    jailbreaks = load_jsonl(JAILBREAK_LOG)
+
+    def in_window(r):
+        ts = parse_ts(r.get("timestamp"))
+        return ts is not None and ts >= since
+
+    act = [r for r in activity if in_window(r)]
+    jb = [r for r in jailbreaks if in_window(r)]
+
+    inbound = [r for r in act if r.get("direction") == "in"]
+    outbound = [r for r in act if r.get("direction") == "out"]
+
+    # Skip slash/system noise in user-facing counts (e.g. /new, /status)
+    real_in = [
+        r for r in inbound
+        if not str(r.get("content", "")).strip().startswith("/")
+    ]
+
+    # Unique users — keyed by senderId so we can build mention links
+    users = Counter(str(r.get("senderId") or "unknown") for r in real_in)
+    id_to_name = {}
+    for r in real_in:
+        sid = str(r.get("senderId") or "unknown")
+        id_to_name[sid] = r.get("senderName") or sid
+
+    out_lens = [len(str(r.get("content", ""))) for r in outbound]
+    avg_out = round(sum(out_lens) / len(out_lens)) if out_lens else 0
+    fails = [r for r in outbound if r.get("success") is False]
+
+    # --- Security breakdown: group by rule_id + severity (schema v2) ---
+    SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    SEV_EMOJI = {"critical": "\U0001f534", "high": "\U0001f7e0", "medium": "\U0001f7e1", "low": "\u26aa"}
+    jb_rules = Counter()
+    jb_sev = Counter()
+    for r in jb:
+        rids = r.get("rule_ids")
+        if rids:
+            for rid in rids:
+                jb_rules[rid] += 1
+        else:
+            for p in r.get("patterns", []):  # legacy fallback
+                jb_rules[p] += 1
+        sev = r.get("severity")
+        if sev:
+            jb_sev[sev] += 1
+    jb_users = Counter(str(r.get("senderId") or "unknown") for r in jb)
+    jb_id_to_name = {}
+    for r in jb:
+        sid = str(r.get("senderId") or "unknown")
+        jb_id_to_name[sid] = r.get("senderName") or sid
+    worst_sev = max(jb_sev, key=lambda s: SEV_RANK.get(s, 0)) if jb_sev else None
+
+    win = since.strftime("%Y-%m-%d %H:%M") + " \u2192 " + now.strftime("%Y-%m-%d %H:%M") + " UTC"
+
+    lines = []
+    lines.append(f"\U0001f4ca Security {label} Report")
+    lines.append(win)
+    lines.append("")
+    lines.append("\u2014 Activity \u2014")
+    lines.append(f"Queries (real): {len(real_in)}  |  Replies: {len(outbound)}")
+    lines.append(f"Unique users: {len(users)}")
+    if users:
+        top = ", ".join(
+            f"{render_mention(id_to_name.get(uid, uid), uid)}:{c}"
+            for uid, c in users.most_common(5)
+        )
+        lines.append(f"Top: {top}")
+    lines.append(f"Avg reply length: {avg_out} chars")
+    if fails:
+        lines.append(f"\u26a0\ufe0f Failed sends: {len(fails)}")
+    lines.append("")
+    lines.append("\u2014 Security (jailbreak / injection) \u2014")
+    if not jb:
+        lines.append("\u2705 No flagged attempts.")
+    else:
+        head = f"\U0001f6a8 Flagged attempts: {len(jb)}"
+        if worst_sev:
+            head += f"  (worst: {SEV_EMOJI.get(worst_sev,'')}{worst_sev})"
+        lines.append(head)
+        if jb_sev:
+            sevline = "  ".join(
+                f"{SEV_EMOJI.get(s,'')}{s}:{jb_sev[s]}"
+                for s in sorted(jb_sev, key=lambda s: -SEV_RANK.get(s, 0))
+            )
+            lines.append(f"Severity: {sevline}")
+        rl = ", ".join(f"{rid}:{c}" for rid, c in jb_rules.most_common())
+        lines.append(f"Rules: {rl}")
+        usr = ", ".join(
+            f"{render_mention(jb_id_to_name.get(uid, uid), uid)}:{c}"
+            for uid, c in jb_users.most_common(5)
+        )
+        lines.append(f"By sender: {usr}")
+        # Samples honor the producer's privacy level: 'content' may be null
+        # (patterns-only) or truncated. We render what's present, nothing more.
+        sample_rows = [r for r in jb if r.get("content")]
+        if sample_rows:
+            lines.append("Samples:")
+            for r in sample_rows[:3]:
+                who = r.get("senderName") or r.get("senderId") or "?"
+                snip = str(r.get("content", "")).replace("\n", " ")[:120]
+                lines.append(f"  \u2022 [{who}] {snip}")
+
+    report = "\n".join(lines)
+
+    if args.dry_run:
+        print(report)
+        return 0
+
+    cmd = [resolve_openclaw(), "message", "send", "--channel", CHANNEL, "--target", TARGET]
+    if ACCOUNT:
+        cmd += ["--account", ACCOUNT]
+    if THREAD_ID:
+        cmd += ["--thread-id", THREAD_ID]
+    cmd += ["--message", report]
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.stderr.write(res.stderr or "send failed\n")
+        return res.returncode
+    print("sent")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

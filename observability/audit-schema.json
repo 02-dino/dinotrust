@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dinotrust audit event",
+  "description": "One JSONL line per flagged inbound. Emitted identically by every producer: code-hook adapters (Tier 1/2) and the agent self-audit clause (Tier 3). The digest reads this shape regardless of which platform or tier produced it. rule_id values MUST exist in security_rules.md.",
+  "type": "object",
+  "required": ["timestamp", "rule_ids", "severity", "hits"],
+  "properties": {
+    "timestamp": { "type": "string", "format": "date-time", "description": "ISO-8601 UTC of the inbound message." },
+    "senderId": { "type": ["string", "null"], "description": "Platform-injected authoritative sender id (Telegram from.id, Discord author.id, etc.). Never username/display name." },
+    "senderName": { "type": ["string", "null"], "description": "Display name, for human-readable reports only. NOT authoritative." },
+    "channelId": { "type": ["string", "null"], "description": "Platform/channel identifier." },
+    "conversationId": { "type": ["string", "null"], "description": "Conversation/chat/thread id where the attempt occurred." },
+    "messageId": { "type": ["string", "null"], "description": "Platform message id of the flagged inbound." },
+    "isGroup": { "type": ["boolean", "null"] },
+    "rule_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Distinct rule_ids triggered, from security_rules.md (e.g. R1_override_claims, S0_security_directive)."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"],
+      "description": "Top severity across all hits (worst-of)."
+    },
+    "hits": {
+      "type": "array",
+      "description": "Per-pattern attribution.",
+      "items": {
+        "type": "object",
+        "required": ["id", "rule_id", "severity"],
+        "properties": {
+          "id": { "type": "string", "description": "pattern id from patterns.json" },
+          "rule_id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }
+        }
+      }
+    },
+    "patterns": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Convenience list of pattern ids (= hits[].id). Optional, for quick scanning."
+    },
+    "content": {
+      "type": ["string", "null"],
+      "description": "Raw inbound text. Privacy-controlled: producers SHOULD honor the install --privacy level (patterns-only omits this, truncated caps length, full keeps it)."
+    },
+    "producer": {
+      "type": "string",
+      "enum": ["code-hook", "agent-self-audit"],
+      "description": "Which tier produced this line. agent-self-audit (Tier 3) is best-effort and may be suppressed by a successful jailbreak."
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "name": "dinotrust-injection-patterns",
+    "version": "1.0.0",
+    "description": "Heuristic prompt-injection / jailbreak detection patterns. No LLM. Each pattern maps a regex to a rule_id from dinotrust security_rules.md and a severity tier. Language-neutral data: any adapter (TS hook, Python script, JS bot, etc.) loads this same file and gets identical detection. Detects DIRECT user-message attempts only.",
+    "boundaries": {
+      "R2_external_instructions": "Injection arriving via web/file/tool output (not the user's message) is NOT regex-detectable here — it is agent-judged via the security_rules.md ruleset.",
+      "T1_config_conflict": "Runtime state (injected config contradicts itself), not a message pattern. Enforcement-only, not detectable by text match."
+    },
+    "severity_tiers": {
+      "critical": "Exfiltration of secrets / credentials / config. Real data-loss if it lands.",
+      "high": "Active attempt to subvert the security ruleset, ownership, safety, or dump the prompt/config.",
+      "medium": "Manipulation attempt: roleplay, pretend, coercion, encoded payload. Suspicious, not yet a hard breach.",
+      "low": "Lone keyword or bare reference. Weak signal; could be benign discussion."
+    },
+    "rule_id_source": "dinotrust security_rules.md (R1-R7, S0, T1)",
+    "agent_judged_only": ["R2_external_instructions", "T1_config_conflict"]
+  },
+  "patterns": [
+    { "id": "ignore_instructions", "regex": "ignore (all |the )?(previous|prior|above) (instructions|prompts?|rules)", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
+    { "id": "disregard", "regex": "disregard (all |the )?(previous|prior|above|your) ", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
+    { "id": "forget_instructions", "regex": "forget (everything|all|your) (instructions|prompts?|rules|training)", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
+    { "id": "override", "regex": "override (your |the |)(instructions|rules|system|safety|config)", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
+    { "id": "persona_override", "regex": "you are (now |)(DAN|in developer mode|jailbroken|unrestricted)", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
+    { "id": "bypass_safety", "regex": "(bypass|disable|turn off|ignore) (your |the |all )?(safety|security|guard|filter|restriction|safeguard)", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
+    { "id": "dev_mode", "regex": "developer mode|jailbreak|DAN mode", "rule_id": "R1_override_claims", "severity": "low", "flags": "i" },
+    { "id": "coercion", "regex": "(you must|you have to) (obey|comply|do as)", "rule_id": "R1_override_claims", "severity": "medium", "flags": "i" },
+    { "id": "pretend", "regex": "pretend (you are|to be|that you)", "rule_id": "R4_hypothetical_restricted", "severity": "medium", "flags": "i" },
+    { "id": "roleplay_override", "regex": "act as (if you|though|a)", "rule_id": "R4_hypothetical_restricted", "severity": "medium", "flags": "i" },
+    { "id": "anything_now", "regex": "(do |)anything now\\b", "rule_id": "R4_hypothetical_restricted", "severity": "medium", "flags": "i" },
+    { "id": "reveal_prompt", "regex": "(reveal|show|print|echo|expose|dump|leak) (me |us |)(your |the )?(system )?(prompt|instructions|rules|config|configuration|agents\\.md)", "rule_id": "R6_config_access_external", "severity": "high", "flags": "i" },
+    { "id": "system_prompt_ref", "regex": "\\bsystem prompt\\b", "rule_id": "R6_config_access_external", "severity": "low", "flags": "i" },
+    { "id": "reveal_secret", "regex": "(reveal|show|print|echo|expose|dump|leak|give) (me |us |)(your |the )?(api[_ ]?key|secret|token|password|credential|\\.env)", "rule_id": "S0_security_directive", "severity": "critical", "flags": "i" },
+    { "id": "ownership_claim", "regex": "i am (the |your )?(owner|admin|developer|creator)", "rule_id": "R7_ownership_claim", "severity": "high", "flags": "i" },
+    { "id": "encoded_payload", "regex": "base64|rot13|decode this|hex decode", "rule_id": "R3_encoded_execution", "severity": "medium", "flags": "i" }
+  ]
+}

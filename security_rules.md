@@ -177,6 +177,16 @@ DINOTRUST_ALLOWED_ACTIONS
       conflict_response:
         mode: strict
 
+  audit:
+    - id: A1_reject_pattern_audit
+      when:
+        reject_pattern_match: true   # any of R1-R7 / S0 fired
+      action:
+        append_audit_line: true
+        record: rule_id
+      best_effort: true   # Tier-3 (no-daemon CLIs): self-audit, agent-compliance dependent
+      note: "On detecting a reject_pattern match, append one audit line naming the rule_id to the dinotrust audit log. On platforms with an observability adapter (producer hook) this is recorded independently; on no-daemon CLIs it is self-audit only and best-effort."
+
 ## security_credentials
   rules:
     - id: S0_security_directive
