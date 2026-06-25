@@ -4,6 +4,27 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.14.0] — 2026-06-25
+
+### Added
+- **Per-platform ID discovery hints (headless-friendly).** `scripts/install.sh`
+  now surfaces platform-specific instructions when `--owner-id` or
+  `--report-target` is missing in non-interactive mode:
+  - **Telegram**: "send /start to @userinfobot, or check Settings → Advanced →
+    copy numeric ID"
+  - **Discord**: "enable Developer Mode (Settings → Advanced), then right-click
+    your username anywhere → Copy ID"
+  - **Slack**: "open your profile → click 'More' → Copy member ID (starts with U)"
+  - **CLI agents**: "your owner ID is typically your platform user ID (check the
+    agent's config or the platform's account settings)"
+- New function `id_discovery_hint(platform, what)` returns actionable
+  instructions the AI agent can surface to the human owner.
+- Updated `need_input()` to include discovery hints in error messages.
+- Interactive prompts for owner ID and report target now show per-platform
+  discovery instructions.
+
+---
+
 ## [1.13.0] — 2026-06-25
 
 ### Added

@@ -109,8 +109,10 @@ need_input() {
   if [[ "$OPT_NONINTERACTIVE" == "true" ]]; then
     local _src="${3:-self}"
     local _guide
+    local _hint=""
     if [[ "$_src" == "owner" ]]; then
-      _guide="ACTION[agent]: ask the OWNER for this (identity/security policy — do not guess), then re-run with the flag."
+      _hint=$(id_discovery_hint "$OPT_PLATFORM" owner)
+      _guide="ACTION[agent]: ask the OWNER for this (identity/security policy — do not guess). Hint: $_hint. Then re-run with the flag."
     else
       _guide="ACTION[agent]: resolve this from your own host/workspace context and re-run with the flag."
     fi
@@ -285,15 +287,54 @@ fi
 
 info "Config file: $CONFIG_FILE"
 
-# ── Step 3: Owner ID ──────────────────────────────────────────────────────────
+# Per-platform ID discovery instructions for headless AI agents.
+# Returns a string the agent can surface to the human owner, or use to auto-resolve.
+id_discovery_hint() {
+  local _platform="$1"
+  local _what="$2"  # "owner" or "target"
+  case "$_platform" in
+    openclaw|telegram)
+      if [[ "$_what" == "owner" ]]; then
+        echo "Telegram: send /start to @userinfobot, or check Settings → Advanced → copy numeric ID"
+      else
+        echo "Telegram: your chat ID is the number @userinfobot replies with, or the channel ID (starts with -100)"
+      fi
+      ;;
+    discord)
+      if [[ "$_what" == "owner" ]]; then
+        echo "Discord: enable Developer Mode (Settings → Advanced), then right-click your username anywhere → Copy ID"
+      else
+        echo "Discord: right-click the channel/server → Copy ID. For DMs, use your own user ID."
+      fi
+      ;;
+    slack)
+      if [[ "$_what" == "owner" ]]; then
+        echo "Slack: open your profile → click 'More' → Copy member ID (starts with U)"
+      else
+        echo "Slack: right-click the channel → Copy link → extract the channel ID (starts with C)"
+      fi
+      ;;
+    hermes)
+      echo "Hermes: check your platform's user metadata or auth.test response for the verified user id"
+      ;;
+    claude-code|codex-cli|cursor|windsurf|continue|aider|goose)
+      if [[ "$_what" == "owner" ]]; then
+        echo "CLI agent: your owner ID is typically your platform user ID (check the agent's config or the platform's account settings)"
+      else
+        echo "CLI agent: for report delivery, use a Telegram/Discord/Slack ID (see --report-channel) or a webhook URL"
+      fi
+      ;;
+    *)
+      echo "Check your platform's user settings or developer tools for the verified user ID"
+      ;;
+  esac
+}
 if [[ -z "$OPT_OWNER_ID" ]]; then
   need_input "owner ID(s)" "--owner-id ID[,ID...]" owner
   echo ""
   ask "Your platform user ID(s) (numeric/UUID; comma-separated for multiple owners):"
-  echo "  Telegram: Settings → Advanced → copy numeric ID"
-  echo "  Discord:  Developer Mode → right-click username → Copy ID"
-  echo "  Other:    Check your platform's user metadata"
-  echo "  Multiple: e.g. 123456789,987654321 (each is a full owner)"
+  echo "  $(id_discovery_hint "$OPT_PLATFORM" owner)"
+  echo "  Multiple owners: e.g. 123456789,987654321 (each is a full owner)"
   echo ""
   read -rp "Owner ID(s): " OPT_OWNER_ID
 fi
@@ -684,6 +725,7 @@ chain_observability() {
         esac
         if [[ "$OPT_REPORT_CHANNEL" != "file" ]]; then
           ask "Target ID (chat/channel ID) — this is where digests go:"
+          echo "  $(id_discovery_hint "$OPT_REPORT_CHANNEL" target)"
           read -rp "> " OPT_REPORT_TARGET
         fi
       fi
