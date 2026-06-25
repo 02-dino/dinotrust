@@ -96,6 +96,10 @@ while [[ $# -gt 0 ]]; do
       echo "Headless/agent use: pass all OWNER-INPUT flags (at least --report-target) plus"
       echo "--non-interactive. Missing input fails fast with the exact flag, plus a self|owner"
       echo "hint, instead of hanging on a prompt."
+      echo ""
+      echo "Note: this is the AUDIT layer only. dinotrust ENFORCEMENT (security_rules.md)"
+      echo "installs separately via scripts/install.sh. Observability is most useful with"
+      echo "core present — it audits the very reject-patterns core defines."
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -129,16 +133,46 @@ need_input() {
 echo ""
 echo -e "${BOLD}🦖 dinotrust observability v${VERSION}${NC} — activity + injection audit layer"
 echo "────────────────────────────────────────────────────────"
+echo "This is the AUDIT layer. Enforcement (security_rules.md) installs separately"
+echo "via scripts/install.sh."
 echo ""
 
-# ── AUTO-detect: platform ─────────────────────────────────────────────────────
-# Reference adapter is OpenClaw-only; refuse early on anything else.
+# ── AUTO-detect: runtime class + route ────────────────────────────────────
+# This installer wires the Tier-1 OpenClaw hook (the independent producer). For
+# other runtimes it does NOT dead-end — it routes you to the right tier:
+#   Tier-1 OpenClaw  -> installed here (hook + cron).
+#   Tier-2 daemon    -> Hermes/Discord/Slack: copy adapters/_template (or
+#                       adapters/discord) into your bot; in-proc, no installer.
+#   Tier-3 CLI       -> Claude Code/Cursor/Aider/...: no producer possible;
+#                       use adapters/cli-selfaudit (self-audit clause + on-demand
+#                       digest). Honestly weaker, documented as such.
 if [[ ! -f "$HOME/.openclaw/openclaw.json" ]]; then
-  warn "No ~/.openclaw/openclaw.json found — this reference adapter targets OpenClaw."
-  warn "  For other platforms, load the same patterns.json with that platform's adapter (see ADAPTER.md)."
-  error "OpenClaw not detected. Run on an OpenClaw host, or install manually per ADAPTER.md."
+  warn "No ~/.openclaw/openclaw.json — this installer wires the Tier-1 OpenClaw hook."
+  echo ""
+  info "Detecting your runtime to point you at the right tier..."
+  _detected=""
+  [[ -f "$HOME/.hermes/SOUL.md" ]] && _detected="hermes (Tier-2 daemon)"
+  [[ -f "$HOME/.claude/CLAUDE.md" || -f "./CLAUDE.md" ]] && _detected="${_detected:+$_detected, }claude-code (Tier-3 CLI)"
+  [[ -f "$HOME/.codex/AGENTS.md" ]] && _detected="${_detected:+$_detected, }codex-cli (Tier-3 CLI)"
+  [[ -d "$HOME/.cursor" ]] && _detected="${_detected:+$_detected, }cursor (Tier-3 CLI)"
+  [[ -f "./.windsurfrules" ]] && _detected="${_detected:+$_detected, }windsurf (Tier-3 CLI)"
+  [[ -f "./.continuerules" ]] && _detected="${_detected:+$_detected, }continue (Tier-3 CLI)"
+  [[ -f "./CONVENTIONS.md" || -f "./.aider.conf.yml" ]] && _detected="${_detected:+$_detected, }aider (Tier-3 CLI)"
+  [[ -n "$_detected" ]] && info "Detected: $_detected"
+  echo ""
+  echo "Next steps by tier:"
+  echo "  • Tier-2 (Hermes, Discord, Slack — long-lived bot):"
+  echo "      Reuse the shared core. Copy $SCRIPT_DIR/adapters/_template/daemon-adapter.ts"
+  echo "      (or the working $SCRIPT_DIR/adapters/discord/tap.ts) into your bot and wire"
+  echo "      the 4 TODO taps. In-process timer, no installer. Same schema as Tier-1."
+  echo "  • Tier-3 (Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose):"
+  echo "      No independent producer is possible (no daemon, no hook). Use"
+  echo "      $SCRIPT_DIR/adapters/cli-selfaudit/README.md — self-audit clause +"
+  echo "      on-demand digest. Honestly best-effort; depends on agent compliance."
+  echo ""
+  error "Not an OpenClaw host — see the per-tier guidance above (this installer only wires Tier-1)."
 fi
-success "Platform: openclaw (openclaw.json found)"
+success "Platform: openclaw (openclaw.json found) — Tier-1 (independent hook producer)"
 
 # ── AUTO-detect: workspace ────────────────────────────────────────────────────
 # Explicit --workspace wins. Otherwise: single workspace auto, multiple -> menu,
@@ -182,6 +216,20 @@ if [[ -z "$OPT_WORKSPACE" ]]; then
 fi
 [[ -d "$OPT_WORKSPACE" ]] || error "Workspace dir not found: $OPT_WORKSPACE"
 info "Workspace: $OPT_WORKSPACE"
+
+# ── Soft dependency: is dinotrust core (enforcement) injected here? ──────────
+# Observability AUDITS the reject-patterns that core's security_rules.md DEFINES.
+# It works without core, but auditing rules nothing enforces is half the value.
+# Warn (never block) if the core block isn't present in this workspace's AGENTS.md.
+_CORE_CONFIG="$OPT_WORKSPACE/AGENTS.md"
+if [[ -f "$_CORE_CONFIG" ]] && grep -q "dinotrust begin" "$_CORE_CONFIG" 2>/dev/null; then
+  success "dinotrust core (enforcement) detected in $_CORE_CONFIG."
+else
+  warn "dinotrust core (enforcement) not detected in $_CORE_CONFIG."
+  warn "  Observability audits the reject-patterns core defines — it is most useful WITH core."
+  warn "  Install enforcement separately:  bash scripts/install.sh --owner-id <id>"
+  warn "  (Continuing anyway — audit-only is a valid setup.)"
+fi
 
 # ── AUTO-detect: agent id (from workspace dir name) ───────────────────────────
 # workspace-analyst -> analyst. Override with --agent for non-standard layouts.

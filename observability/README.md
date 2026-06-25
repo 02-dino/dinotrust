@@ -44,15 +44,24 @@ under `_meta.agent_judged_only`:
 
 ## Tiers
 
-| Tier | Platforms | Producer | Schedule | Strength |
-|------|-----------|----------|----------|----------|
-| **T1** | OpenClaw *(implemented)* | code hook | host cron | full |
-| **T2** | Discord, Slack *(later)* | daemon, in-proc | in-process timer | full |
-| **T3** | Claude Code, Cursor, Aider | none (self-audit clause) | on-demand | best-effort, honestly weaker |
+| Tier | Runtimes | Producer | Schedule | Strength |
+|------|----------|----------|----------|----------|
+| **T1** | OpenClaw | code hook (`adapters/openclaw`) | host cron | independent, full |
+| **T2** | Hermes, Discord, Slack | daemon, reuses `core/` (`adapters/_template`, `adapters/discord`) | in-process timer | independent, full |
+| **T3** | Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose | none — self-audit clause (`adapters/cli-selfaudit`) | on-demand | best-effort, honestly weaker |
 
-T3 has no place to run a code adapter, so `security_rules.md` carries a
-self-audit clause asking the agent to append one audit line per reject-pattern
-match. Same schema, but it depends on the agent's own compliance.
+The tier is decided by **physics, not effort**: does the runtime expose a
+programmatic message hook / long-lived process?
+
+- **T1/T2** run an **independent producer** — code that observes traffic the
+  agent can't suppress. T2 reuses the shared `core/` library verbatim; only the
+  platform tap differs (OpenClaw inlines the same logic due to its single-file
+  hook constraint — see `core/PARITY.md`).
+- **T3** no-daemon CLIs have nowhere to run a producer, so the only observer is
+  the agent itself. `security_rules.md` carries a self-audit clause; the agent
+  appends one audit line per reject-pattern match, same schema, read on demand.
+  Depends on agent compliance — marked `producer: "self-audit"`,
+  `independent: false`.
 
 ---
 
@@ -92,9 +101,14 @@ never clobbered) with a PATH that includes Homebrew bin.
 | `patterns.json` | Universal taxonomy: regex → rule_id + severity. |
 | `audit-schema.json` | JSONL event contract. |
 | `validate.py` | Drift guard (patterns ⊆ `security_rules.md`). |
-| `install.sh` | OpenClaw installer (substitute + install + cron). |
-| `adapters/openclaw/handler.ts` | Producer hook (taps traffic, detects, logs). |
-| `adapters/openclaw/report.py` | Consumer (builds + delivers the digest). |
+| `install.sh` | OpenClaw (Tier-1) installer; routes other runtimes to their tier. |
+| `core/` | Shared TS detection + event library (Tier-2 daemons import it). |
+| `core/PARITY.md` | Why OpenClaw inlines core; what must stay identical. |
+| `adapters/openclaw/handler.ts` | Tier-1 producer hook (self-contained). |
+| `adapters/openclaw/report.py` | Consumer (digest + delivery; env-overridable, serves all tiers). |
+| `adapters/_template/daemon-adapter.ts` | Tier-2 daemon adapter template. |
+| `adapters/discord/tap.ts` | Tier-2 working Discord reference adapter. |
+| `adapters/cli-selfaudit/README.md` | Tier-3 no-daemon CLI self-audit path. |
 | `ADAPTER.md` | The 5-function contract + how to add a platform. |
 | `DIGEST.md` | Digest output spec. |
 

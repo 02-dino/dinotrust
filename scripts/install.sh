@@ -29,6 +29,12 @@ OPT_DRY_RUN=false
 OPT_PROTECTED_FILES=""
 OPT_CONFIG=""
 OPT_NONINTERACTIVE=false
+# Observability chaining (OpenClaw only). After core installs, optionally chain
+# observability/install.sh. Opt-out by default for humans; never forced in
+# headless (it needs a leak-sensitive --report-target we must not guess).
+OPT_NO_OBSERVABILITY=false   # --no-observability: skip the chain entirely
+OPT_WITH_OBSERVABILITY=false # --with-observability: force the chain (e.g. headless)
+OPT_REPORT_TARGET=""         # forwarded to observability/install.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +49,9 @@ while [[ $# -gt 0 ]]; do
     # file path as-is; --workspace is sugar for <dir>/AGENTS.md (OpenClaw style).
     --config)     OPT_CONFIG="$2"; shift 2 ;;
     --workspace)  OPT_CONFIG="${2%/}/AGENTS.md"; shift 2 ;;
+    --no-observability)   OPT_NO_OBSERVABILITY=true; shift ;;
+    --with-observability) OPT_WITH_OBSERVABILITY=true; shift ;;
+    --report-target)      OPT_REPORT_TARGET="$2"; shift 2 ;;
     --non-interactive|--yes|-y) OPT_NONINTERACTIVE=true; shift ;;
     -h|--help)
       echo "Usage: bash scripts/install.sh [options]"
@@ -59,9 +68,17 @@ while [[ $# -gt 0 ]]; do
       echo "  --dry-run           Preview injection, no changes"
       echo "  --protected FILES   Comma-separated extra protected files"
       echo ""
+      echo "Observability (audit layer; OpenClaw only):"
+      echo "  After a successful OpenClaw install, you are offered the observability"
+      echo "  audit layer (interactive: default Yes). It is separate from enforcement."
+      echo "  --with-observability  Force-chain it (needs --report-target). Use headless."
+      echo "  --no-observability    Skip the chain entirely."
+      echo "  --report-target ID    Digest destination, forwarded to observability/install.sh."
+      echo ""
       echo "Headless/agent use: pass --platform, --owner-id, --profile, and --config (or"
       echo "--workspace), plus --non-interactive and --force. Missing input then fails fast"
-      echo "with the exact flag to add, instead of hanging on a prompt."
+      echo "with the exact flag to add, instead of hanging on a prompt. Observability is"
+      echo "skipped headless unless you pass --with-observability --report-target <id>."
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -542,3 +559,60 @@ echo ""
 echo "Verify:"
 echo "  grep 'dinotrust begin' \"$CONFIG_FILE\""
 echo ""
+
+# ── Optional chain: observability audit layer (OpenClaw only) ────────────────
+# Core (enforcement) is now installed. Observability (the audit layer) is a
+# SEPARATE, opt-out step. We chain it by default for interactive humans, never
+# force it headless (it needs a leak-sensitive --report-target we must not
+# guess). The observability installer itself is OpenClaw-only.
+OBS_INSTALLER="$REPO_DIR/observability/install.sh"
+
+chain_observability() {
+  [[ "$OPT_PLATFORM" == "openclaw" ]] || return 0          # obs is OpenClaw-only
+  [[ "$OPT_NO_OBSERVABILITY" == "true" ]] && { info "Skipping observability (--no-observability)."; return 0; }
+  if [[ ! -f "$OBS_INSTALLER" ]]; then
+    warn "Observability installer not found at $OBS_INSTALLER — skipping. (Install core only.)"
+    return 0
+  fi
+
+  # Decide whether to run.
+  local _run=false
+  if [[ "$OPT_WITH_OBSERVABILITY" == "true" ]]; then
+    _run=true
+  elif [[ "$OPT_NONINTERACTIVE" == "true" ]]; then
+    # Headless: do NOT demand a report-target that wasn't given. Skip with a hint.
+    info "Observability not installed (headless). To include it, re-run with:"
+    info "  --with-observability --report-target <chat-id>"
+    return 0
+  else
+    echo ""
+    ask "Also install the observability audit layer now? It reports injection attempts to a target you choose. [Y/n]"
+    local _ans
+    read -rp "> " _ans
+    [[ -z "$_ans" || "$_ans" =~ ^[Yy]$ ]] && _run=true
+  fi
+  [[ "$_run" == "true" ]] || { info "Skipped observability. Install later: bash observability/install.sh --report-target <id>"; return 0; }
+
+  # Build the forwarded arg list. Pass the workspace we just targeted so obs
+  # doesn't re-detect/prompt. --report-target is required by obs; if missing in
+  # interactive mode, obs will prompt for it (its own need_input owner guard).
+  local _obs_args=()
+  local _ws_dir
+  _ws_dir="$(dirname "$CONFIG_FILE")"
+  [[ -d "$_ws_dir" ]] && _obs_args+=(--workspace "$_ws_dir")
+  [[ -n "$OPT_REPORT_TARGET" ]] && _obs_args+=(--report-target "$OPT_REPORT_TARGET")
+  [[ "$OPT_FORCE" == "true" ]] && _obs_args+=(--force)
+  [[ "$OPT_DRY_RUN" == "true" ]] && _obs_args+=(--dry-run)
+  # Forward non-interactive ONLY when we have a target (else obs must prompt).
+  if [[ "$OPT_NONINTERACTIVE" == "true" && -n "$OPT_REPORT_TARGET" ]]; then
+    _obs_args+=(--non-interactive)
+  fi
+
+  echo ""
+  info "Chaining observability: bash $OBS_INSTALLER ${_obs_args[*]}"
+  bash "$OBS_INSTALLER" "${_obs_args[@]}" || warn "Observability install did not complete — core enforcement is unaffected. Re-run observability/install.sh manually."
+}
+
+# Note: core --dry-run exits earlier (Step 8), so the chain only runs on a real
+# install — dry-run never reaches here, by design.
+chain_observability

@@ -43,6 +43,17 @@ THREAD_ID = "__THREAD_ID__"   # may be empty
 ACCOUNT = "__ACCOUNT__"       # may be empty
 # ============================
 
+# Env overrides — lets one consumer serve every tier without re-substitution.
+# Tier-3 (no-daemon CLI self-audit) has no installer; it points the consumer at
+# the agent's self-audit log via DT_SELFAUDIT_LOG (mapped onto JAILBREAK_LOG).
+# Tier-2 daemons may set these from their own env. Unset -> installed defaults.
+ACTIVITY_LOG = os.environ.get("DT_ACTIVITY_LOG", ACTIVITY_LOG)
+JAILBREAK_LOG = os.environ.get("DT_SELFAUDIT_LOG", os.environ.get("DT_JAILBREAK_LOG", JAILBREAK_LOG))
+CHANNEL = os.environ.get("DT_CHANNEL", CHANNEL)
+TARGET = os.environ.get("DT_TARGET", TARGET)
+THREAD_ID = os.environ.get("DT_THREAD_ID", THREAD_ID)
+ACCOUNT = os.environ.get("DT_ACCOUNT", ACCOUNT)
+
 
 def resolve_openclaw():
     """Find the openclaw binary. cron PATH often lacks Homebrew bin."""
@@ -249,6 +260,17 @@ def main():
     if args.dry_run:
         print(report)
         return 0
+
+    # Guard: refuse to send to an unfilled placeholder (e.g. Tier-3 running the
+    # consumer without substitution and without --dry-run). Fail loud, not into
+    # a literal "__TARGET__" recipient.
+    if not TARGET or TARGET.startswith("__") or CHANNEL.startswith("__"):
+        sys.stderr.write(
+            "refusing to send: CHANNEL/TARGET not configured "
+            "(set DT_CHANNEL/DT_TARGET, or use --dry-run). "
+            "Tier-3 self-audit typically runs with --dry-run.\n"
+        )
+        return 2
 
     cmd = [resolve_openclaw(), "message", "send", "--channel", CHANNEL, "--target", TARGET]
     if ACCOUNT:

@@ -4,6 +4,51 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.7.0] — 2026-06-25
+
+### Added
+- **Runtime generalization — observability is now multi-runtime, tiered by
+  physics, not OpenClaw-only.** The tier a runtime gets is decided by whether it
+  exposes a programmatic message hook / long-lived process; each runtime gets
+  the strongest audit its architecture permits, declared honestly.
+  - **`observability/core/`** — shared, runtime-neutral TS library:
+    `detector.ts` (load patterns.json, detect, severity, privacy — fail-open),
+    `event.ts` (canonical `audit-schema.json` line builders), `sink.ts` (silent
+    append). Daemon-class adapters import it verbatim; detection stays in
+    lockstep via the shared `patterns.json`. `core/PARITY.md` documents why
+    OpenClaw's hook inlines the same logic (single-file hook constraint) and
+    what must stay identical.
+  - **Tier-2 (daemon) made real:** `adapters/_template/daemon-adapter.ts`
+    (template with the 4 tap TODOs) + `adapters/discord/tap.ts` (working
+    discord.js reference). Independent producer, in-process timer, same schema
+    as Tier-1. Hermes/Slack follow the same template.
+  - **Tier-3 (no-daemon CLI) made real:** `adapters/cli-selfaudit/` — self-audit
+    path for Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose.
+    No independent producer is physically possible; the agent self-reports
+    reject-pattern hits via the `security_rules.md` `audit.A1` clause in the
+    same schema, read on demand by `report.py`. Honestly marked
+    `producer: "self-audit"`, best-effort, agent-compliance-dependent.
+
+### Changed
+- **Installers cross-linked (opt-out chain).** `scripts/install.sh` (core/
+  enforcement) now offers the observability audit layer after a successful
+  OpenClaw install — interactive default-Yes, `--no-observability` to skip,
+  `--with-observability --report-target <id>` to force headless (never demands a
+  leak-sensitive report target it wasn't given). `observability/install.sh`
+  states it is the audit layer (banner + `-h`) and warns if core enforcement
+  (`dinotrust begin` block) isn't present in the target config — warn, never
+  block; audit-only remains valid.
+- **`report.py` serves every tier** via env overrides (`DT_SELFAUDIT_LOG`,
+  `DT_ACTIVITY_LOG`, `DT_CHANNEL`, `DT_TARGET`, …) — no re-substitution needed.
+  Added a send guard: refuses to deliver to an unfilled `__TARGET__`/`__CHANNEL__`
+  placeholder (Tier-3 typically runs `--dry-run`).
+- **`install.sh` routes instead of dead-ending.** Non-OpenClaw hosts no longer
+  hit a flat refuse; the installer detects the runtime and prints per-tier next
+  steps (T2 template/Discord, T3 self-audit), then exits explaining it only
+  wires Tier-1.
+
+---
+
 ## [1.6.0] — 2026-06-25
 
 ### Added

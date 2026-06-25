@@ -49,20 +49,29 @@ The contract is identical across tiers; only `schedule` (and honesty about
 guarantees) changes.
 
 - **T1 — OpenClaw** *(reference, implemented)*
-  Code hook produces events (`adapters/openclaw/handler.ts`); a consumer script
-  (`adapters/openclaw/report.py`) builds + delivers the digest. `schedule` =
-  host cron (wired by `install.sh`).
+  Code hook produces events (`adapters/openclaw/handler.ts`, self-contained by
+  OpenClaw's single-file hook constraint — see `core/PARITY.md`); a consumer
+  script (`adapters/openclaw/report.py`) builds + delivers the digest.
+  `schedule` = host cron (wired by `install.sh`). Independent producer.
 
-- **T2 — Daemon bots (Discord, Slack, …)** *(later)*
-  Long-lived process taps the gateway events directly. `schedule` = in-process
-  timer (no external cron). Same `patterns.json`, same schema.
+- **T2 — Daemon bots (Hermes, Discord, Slack, …)** *(implemented: shared core +
+  template + Discord reference)*
+  Long-lived process taps its own message pipeline. Reuses `core/` **verbatim**
+  (`makeDetector` + `buildInbound`/`buildOutbound` + `appendLine`); the adapter
+  is just the platform glue. `schedule` = in-process timer (no cron). Start from
+  `adapters/_template/daemon-adapter.ts`; `adapters/discord/tap.ts` is a working
+  reference. Same independence as T1.
 
-- **T3 — No-daemon CLIs (Claude Code, Cursor, Aider, …)**
-  No place to run a code adapter. Instead, a **self-audit clause** in
-  `security_rules.md` asks the agent to append one audit line (naming the
-  `rule_id`) on each reject-pattern match, plus an **on-demand** digest. Same
-  schema, but honestly marked **best-effort / weaker** — there is no independent
-  producer, so it depends on the agent's own compliance.
+- **T3 — No-daemon CLIs (Claude Code, Codex CLI, Cursor, Windsurf, Continue,
+  Aider, Goose)** *(implemented: self-audit path)*
+  No persistent process and no message hook → **no independent producer is
+  physically possible**. The only observer is the agent itself. A **self-audit
+  clause** in `security_rules.md` (`audit.A1_reject_pattern_audit`) has the agent
+  append one audit line (naming the `rule_id`) per reject-pattern match, in the
+  **same schema**; `report.py` reads it on demand (`DT_SELFAUDIT_LOG`). Honestly
+  marked **best-effort / weaker** (`producer: "self-audit"`, `independent:
+  false`) — it depends on the agent's own compliance. See
+  `adapters/cli-selfaudit/README.md`.
 
 ---
 
