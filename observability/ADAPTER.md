@@ -59,13 +59,13 @@ guarantees) changes.
     `install.sh --platform hermes`** (since v1.9.0); manual install with `DT_*`
     env overrides still supported. `schedule` = host cron (wired by installer).
 
-- **T2 — Daemon bots, no hook API (Discord, Slack, …)** *(implemented: shared
-  core + template + Discord reference)*
+- **T2 — Daemon bots, no hook API (Discord, Slack, …)** *(both implemented)*
   Long-lived process taps its own message pipeline. Reuses `core/` **verbatim**
   (`makeDetector` + `buildInbound`/`buildOutbound` + `appendLine`); the adapter
   is just the platform glue. `schedule` = in-process timer (no cron). Start from
-  `adapters/_template/daemon-adapter.ts`; `adapters/discord/tap.ts` is a working
-  reference. Same independence as T1.
+  `adapters/_template/daemon-adapter.ts`; working references:
+  `adapters/discord/tap.ts` (discord.js) + `adapters/slack/tap.ts` (Bolt SDK).
+  Same independence as T1.
 
 - **T3 — No-daemon CLIs (Claude Code, Codex CLI, Cursor, Windsurf, Continue,
   Aider, Goose)** *(implemented: self-audit path)*

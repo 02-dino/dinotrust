@@ -119,6 +119,7 @@ never clobbered) with a PATH that includes Homebrew bin.
 | `adapters/openclaw/report.py` | Consumer (digest + delivery; env-overridable, serves all tiers). |
 | `adapters/_template/daemon-adapter.ts` | Tier-2 daemon adapter template. |
 | `adapters/discord/tap.ts` | Tier-2 working Discord reference adapter. |
+| `adapters/slack/tap.ts` | Tier-2 working Slack reference adapter (Bolt SDK). |
 | `adapters/cli-selfaudit/README.md` | Tier-3 no-daemon CLI self-audit path. |
 | `ADAPTER.md` | The 5-function contract + how to add a platform. |
 | `DIGEST.md` | Digest output spec. |

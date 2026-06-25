@@ -4,6 +4,26 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.10.0] — 2026-06-25
+
+### Added
+- **Slack adapter — Tier-2 daemon-class reference.** `adapters/slack/tap.ts` mirrors
+  the Discord adapter line-for-line: `attach(app, botUserId)` wires `app.message()`,
+  `handle()` processes inbound/outbound, `scheduleDigest()` runs in-proc timer.
+  Duck-types the Bolt SDK message event shape (no Bolt import), `identityField = user`
+  (U-prefixed Slack user id), `scopeKey = slack:${team}:${channel}`. Filters
+  system subtypes (joins, leaves, topic changes) and messages without text. Documents
+  the Bolt `ignoreSelf: false` requirement for outbound observation (honest degrade
+  if not set: inbound-only still works). Same `core/` imports, same `patterns.json`,
+  same `audit-schema.json` output as every other adapter.
+
+### Changed
+- **ADAPTER.md + README**: T2 tier now lists both Discord and Slack as working
+  references (was "Discord reference + template"). `adapters/slack/tap.ts` added
+  to the files table.
+
+---
+
 ## [1.9.0] — 2026-06-25
 
 ### Added
