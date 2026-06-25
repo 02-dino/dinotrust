@@ -4,6 +4,27 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.12.0] — 2026-06-25
+
+### Added
+- **Unified observability chain for ALL platforms.** `scripts/install.sh` now
+  chains the audit layer for every supported platform, not just OpenClaw:
+  - **T1 (OpenClaw, Hermes)** — chains to `observability/install.sh` with
+    auto-routing (`--platform hermes` for Hermes).
+  - **T3 (claude-code, codex-cli, cursor, windsurf, continue, aider, goose)** —
+    sets up self-audit: creates `~/.dinotrust/logs/<platform>-selfaudit.jsonl`,
+    writes `~/.dinotrust/env` with `DT_SELFAUDIT_LOG`, `DT_CHANNEL`, `DT_TARGET`,
+    prints usage instructions. Interactive mode prompts for delivery channel
+    (Telegram/Discord/Slack/File) and target ID.
+- **New install.sh flags:** `--report-channel` (telegram|discord|slack|file) and
+  `--report-thread` (forum topic ID).
+
+### Changed
+- `scripts/install.sh` help text updated: observability is now "all platforms"
+  (was "OpenClaw only").
+
+---
+
 ## [1.11.0] — 2026-06-25
 
 ### Added

@@ -81,6 +81,23 @@ bash observability/install.sh --report-target <chat-id>
 bash observability/install.sh --platform hermes --report-target <chat-id>
 ```
 
+### T3 — No-daemon CLIs (Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose)
+
+Observability is set up automatically by `scripts/install.sh` when you pass
+`--with-observability`. It creates `~/.dinotrust/env` and a self-audit log:
+
+```bash
+bash scripts/install.sh --platform claude-code --owner-id <id> --profile <preset> \
+  --with-observability --report-target <chat-id> --report-channel telegram
+```
+
+Then source the env and run the digest:
+
+```bash
+source ~/.dinotrust/env
+python3 observability/adapters/openclaw/report.py --period daily
+```
+
 Auto-detects platform, workspace (OpenClaw), agent-id, log paths, and the
 openclaw binary (with Homebrew PATH fallback). You must supply
 `--report-target` — it is a leak vector, so it is never silently defaulted.
