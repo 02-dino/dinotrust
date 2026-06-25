@@ -4,6 +4,37 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.9.0] — 2026-06-25
+
+### Added
+- **Automated Hermes installer.** `observability/install.sh` now supports
+  `--platform hermes` (auto-detected when `~/.hermes` exists). Mirrors every
+  OpenClaw convention:
+  - sentinel detection (`~/.hermes`), `--platform hermes` override
+  - placeholder substitution in `handler.py` (`__ACTIVITY_LOG__`,
+    `__JAILBREAK_LOG__`, `__PATTERNS_FILE__`, `__PRIVACY__`)
+  - `HOOK.yaml` placed alongside `handler.py` in
+    `~/.hermes/hooks/dinotrust-observability/`
+  - `report.py` placed in `~/.hermes/scripts/`
+  - same `need_input` leak-guard, idempotency/overwrite guard, residual-
+    placeholder guard, `validate.py` preflight, cron wiring (tagged, PATH-prefixed,
+    `CRON_TZ=`), `--dry-run` plan, touch-logs
+  - defaults agent to `hermes` (override with `--agent`)
+
+### Changed
+- **`install.sh` — platform as first-class dimension.** Replaced the flat
+  OpenClaw-only install with a platform-aware structure: `OPT_PLATFORM`
+  (`openclaw` | `hermes`, auto-detected), shared owner-input validation,
+  platform-specific auto-detect blocks (workspace for OpenClaw, agent-id default
+  for Hermes), unified file install + cron + summary. Non-T1 runtimes still get
+  per-tier routing guidance. OpenClaw path regression-tested.
+- **Hermes README** (`adapters/hermes/README.md`): manual copy steps replaced
+  with one-command install; env overrides still documented for hand-installers.
+- **ADAPTER.md** + **observability README**: Hermes install now listed as
+  automated (was manual).
+
+---
+
 ## [1.8.0] — 2026-06-25
 
 ### Added

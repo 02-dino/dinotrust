@@ -67,15 +67,23 @@ programmatic message hook / long-lived process?
 
 ---
 
-## Install (OpenClaw)
+## Install
+
+### OpenClaw (auto-detected)
 
 ```bash
 bash observability/install.sh --report-target <chat-id>
 ```
 
-Auto-detects platform, workspace, agent-id, log paths, and the openclaw binary
-(with Homebrew PATH fallback). You must supply `--report-target` — it is a leak
-vector, so it is never silently defaulted.
+### Hermes (auto-detected when `~/.hermes` exists)
+
+```bash
+bash observability/install.sh --platform hermes --report-target <chat-id>
+```
+
+Auto-detects platform, workspace (OpenClaw), agent-id, log paths, and the
+openclaw binary (with Homebrew PATH fallback). You must supply
+`--report-target` — it is a leak vector, so it is never silently defaulted.
 
 Key flags:
 

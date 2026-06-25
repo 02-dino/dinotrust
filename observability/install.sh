@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # dinotrust observability installer
 # Installs the activity + jailbreak/injection audit layer (hook producer + digest
-# consumer + patterns taxonomy) into an OpenClaw agent. Zero-infra: regex + thin
-# adapters, no LLM. Reference adapter = OpenClaw (this script).
+# consumer + patterns taxonomy) into an OpenClaw or Hermes agent. Zero-infra:
+# regex + thin adapters, no LLM.
 # Usage: bash observability/install.sh [options]
 
 set -euo pipefail
@@ -10,8 +10,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 PATTERNS_SRC="$SCRIPT_DIR/patterns.json"
-HANDLER_SRC="$SCRIPT_DIR/adapters/openclaw/handler.ts"
-REPORT_SRC="$SCRIPT_DIR/adapters/openclaw/report.py"
 VALIDATE_SRC="$SCRIPT_DIR/validate.py"
 SECURITY_RULES="$REPO_DIR/security_rules.md"
 VERSION_FILE="$REPO_DIR/VERSION"
@@ -34,6 +32,7 @@ ask()     { echo -e "${BOLD}?${NC} $*"; }
 
 # ── Args ──────────────────────────────────────────────────────────────────────
 # AUTO vars (forced detection; overridable by flag for edge cases / testing).
+OPT_PLATFORM=""         # openclaw | hermes (auto-detected)
 OPT_WORKSPACE=""        # ~/.openclaw/workspace-<agent>
 OPT_AGENT=""            # derived from workspace dir name
 OPT_OPENCLAW_BIN=""     # openclaw binary path
@@ -54,6 +53,7 @@ OPT_NONINTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --platform)        OPT_PLATFORM="$2"; shift 2 ;;
     --workspace)       OPT_WORKSPACE="${2%/}"; shift 2 ;;
     --agent)           OPT_AGENT="$2"; shift 2 ;;
     --openclaw-bin)    OPT_OPENCLAW_BIN="$2"; shift 2 ;;
@@ -73,11 +73,12 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: bash observability/install.sh [options]"
       echo ""
       echo "AUTO (detected; override only for edge cases):"
+      echo "  --platform NAME       Target platform: openclaw | hermes (default: auto-detect)"
       echo "  --workspace DIR       OpenClaw workspace dir (~/.openclaw/workspace-<agent>)"
-      echo "  --agent ID            Agent id (default: derived from workspace dir name)"
+      echo "  --agent ID            Agent id (default: derived from workspace dir name, or 'hermes')"
       echo "  --openclaw-bin PATH   openclaw binary (default: PATH, then Homebrew fallback)"
-      echo "  --activity-log PATH   Activity log (default: ~/.openclaw/logs/<agent>-activity.log)"
-      echo "  --jailbreak-log PATH  Jailbreak log (default: ~/.openclaw/logs/<agent>-jailbreak.log)"
+      echo "  --activity-log PATH   Activity log (default: platform-dependent)"
+      echo "  --jailbreak-log PATH  Jailbreak log (default: platform-dependent)"
       echo ""
       echo "OWNER-INPUT (confirmed; never silently defaulted):"
       echo "  --report-target ID    REQUIRED. Where the digest is delivered (chat/channel id)."
@@ -137,21 +138,21 @@ echo "This is the AUDIT layer. Enforcement (security_rules.md) installs separate
 echo "via scripts/install.sh."
 echo ""
 
-# ── AUTO-detect: runtime class + route ────────────────────────────────────
-# This installer wires the Tier-1 OpenClaw hook (the independent producer). For
-# other runtimes it does NOT dead-end — it routes you to the right tier:
-#   Tier-1 OpenClaw  -> installed here (hook + cron).
-#   Tier-2 daemon    -> Hermes/Discord/Slack: copy adapters/_template (or
-#                       adapters/discord) into your bot; in-proc, no installer.
-#   Tier-3 CLI       -> Claude Code/Cursor/Aider/...: no producer possible;
-#                       use adapters/cli-selfaudit (self-audit clause + on-demand
-#                       digest). Honestly weaker, documented as such.
-if [[ ! -f "$HOME/.openclaw/openclaw.json" ]]; then
-  warn "No ~/.openclaw/openclaw.json — this installer wires the Tier-1 OpenClaw hook."
+# ── AUTO-detect: platform ───────────────────────────────────────────────────
+# Detect OpenClaw or Hermes. If neither, route to the right tier.
+if [[ -z "$OPT_PLATFORM" ]]; then
+  if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
+    OPT_PLATFORM="openclaw"
+  elif [[ -d "$HOME/.hermes" ]]; then
+    OPT_PLATFORM="hermes"
+  fi
+fi
+
+if [[ -z "$OPT_PLATFORM" ]]; then
+  warn "No OpenClaw or Hermes detected — this installer wires Tier-1 hooks."
   echo ""
   info "Detecting your runtime to point you at the right tier..."
   _detected=""
-  [[ -d "$HOME/.hermes" ]] && _detected="hermes (Tier-1 gateway hook)"
   [[ -f "$HOME/.claude/CLAUDE.md" || -f "./CLAUDE.md" ]] && _detected="${_detected:+$_detected, }claude-code (Tier-3 CLI)"
   [[ -f "$HOME/.codex/AGENTS.md" ]] && _detected="${_detected:+$_detected, }codex-cli (Tier-3 CLI)"
   [[ -d "$HOME/.cursor" ]] && _detected="${_detected:+$_detected, }cursor (Tier-3 CLI)"
@@ -161,10 +162,10 @@ if [[ ! -f "$HOME/.openclaw/openclaw.json" ]]; then
   [[ -n "$_detected" ]] && info "Detected: $_detected"
   echo ""
   echo "Next steps by tier:"
+  echo "  • Tier-1 (OpenClaw — already covered by this installer):"
+  echo "      Run this script on an OpenClaw host (where ~/.openclaw/openclaw.json exists)."
   echo "  • Tier-1 (Hermes — gateway hook, independent producer):"
-  echo "      Hermes has a real hook API (HOOK.yaml + handler.py in ~/.hermes/hooks/)."
-  echo "      Copy $SCRIPT_DIR/adapters/hermes/ there + patterns.json; set the DT_* env."
-  echo "      Same schema + independence as OpenClaw. See adapters/hermes/README.md."
+  echo "      Run this script on a Hermes host (where ~/.hermes exists), or pass --platform hermes."
   echo "  • Tier-2 (Discord, Slack — long-lived bot, no hook API):"
   echo "      Reuse the shared core. Copy $SCRIPT_DIR/adapters/_template/daemon-adapter.ts"
   echo "      (or the working $SCRIPT_DIR/adapters/discord/tap.ts) into your bot and wire"
@@ -174,91 +175,130 @@ if [[ ! -f "$HOME/.openclaw/openclaw.json" ]]; then
   echo "      $SCRIPT_DIR/adapters/cli-selfaudit/README.md — self-audit clause +"
   echo "      on-demand digest. Honestly best-effort; depends on agent compliance."
   echo ""
-  error "Not an OpenClaw host — see the per-tier guidance above (this installer only wires Tier-1)."
+  error "No Tier-1 host detected — see the per-tier guidance above."
 fi
-success "Platform: openclaw (openclaw.json found) — Tier-1 (independent hook producer)"
 
-# ── AUTO-detect: workspace ────────────────────────────────────────────────────
-# Explicit --workspace wins. Otherwise: single workspace auto, multiple -> menu,
-# zero -> say so and ask. Mirrors dinotrust install.sh sentinel pattern.
-if [[ -z "$OPT_WORKSPACE" ]]; then
-  _ws_glob=$(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
-  _ws_count=$(echo "$_ws_glob" | grep -c . || true)
-  if [[ "$_ws_count" -eq 1 ]]; then
-    OPT_WORKSPACE="${_ws_glob%/}"
-    OPT_WORKSPACE="${OPT_WORKSPACE%$'\n'}"
-  elif [[ "$_ws_count" -gt 1 ]]; then
-    need_input "which OpenClaw workspace to target (multiple detected)" "--workspace DIR" self
-    echo ""
-    ask "Multiple OpenClaw workspaces detected — pick one:"
-    mapfile -t _WS_LIST < <(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
-    _i=1
-    for _ws in "${_WS_LIST[@]}"; do
-      echo "  $_i) ${_ws%/}"
-      _i=$((_i + 1))
-    done
-    echo "  0) Enter a custom path"
-    echo ""
-    read -rp "Enter number [0-${#_WS_LIST[@]}]: " _WS_NUM
-    if [[ "$_WS_NUM" == "0" ]]; then
+success "Platform: $OPT_PLATFORM — Tier-1 (independent hook producer)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Platform-specific setup: paths, sources, auto-detect.
+# ═══════════════════════════════════════════════════════════════════════════
+
+if [[ "$OPT_PLATFORM" == "openclaw" ]]; then
+  # ── OpenClaw: workspace auto-detect ─────────────────────────────────────
+  if [[ -z "$OPT_WORKSPACE" ]]; then
+    _ws_glob=$(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
+    _ws_count=$(echo "$_ws_glob" | grep -c . || true)
+    if [[ "$_ws_count" -eq 1 ]]; then
+      OPT_WORKSPACE="${_ws_glob%/}"
+      OPT_WORKSPACE="${OPT_WORKSPACE%$'\n'}"
+    elif [[ "$_ws_count" -gt 1 ]]; then
+      need_input "which OpenClaw workspace to target (multiple detected)" "--workspace DIR" self
+      echo ""
+      ask "Multiple OpenClaw workspaces detected — pick one:"
+      mapfile -t _WS_LIST < <(ls -d "$HOME/.openclaw/workspace-"*/ 2>/dev/null || true)
+      _i=1
+      for _ws in "${_WS_LIST[@]}"; do
+        echo "  $_i) ${_ws%/}"
+        _i=$((_i + 1))
+      done
+      echo "  0) Enter a custom path"
+      echo ""
+      read -rp "Enter number [0-${#_WS_LIST[@]}]: " _WS_NUM
+      if [[ "$_WS_NUM" == "0" ]]; then
+        ask "Path to your OpenClaw workspace dir:"
+        read -rp "> " OPT_WORKSPACE
+        OPT_WORKSPACE="${OPT_WORKSPACE%/}"
+      elif [[ "$_WS_NUM" =~ ^[0-9]+$ ]] && (( _WS_NUM >= 1 && _WS_NUM <= ${#_WS_LIST[@]} )); then
+        OPT_WORKSPACE="${_WS_LIST[$((_WS_NUM - 1))]%/}"
+      else
+        error "Invalid selection."
+      fi
+    else
+      need_input "target workspace (no OpenClaw workspace detected)" "--workspace DIR" self
+      echo ""
+      warn "No OpenClaw workspaces under $HOME/.openclaw/workspace-*/"
       ask "Path to your OpenClaw workspace dir:"
       read -rp "> " OPT_WORKSPACE
       OPT_WORKSPACE="${OPT_WORKSPACE%/}"
-    elif [[ "$_WS_NUM" =~ ^[0-9]+$ ]] && (( _WS_NUM >= 1 && _WS_NUM <= ${#_WS_LIST[@]} )); then
-      OPT_WORKSPACE="${_WS_LIST[$((_WS_NUM - 1))]%/}"
-    else
-      error "Invalid selection."
     fi
+  fi
+  [[ -d "$OPT_WORKSPACE" ]] || error "Workspace dir not found: $OPT_WORKSPACE"
+  info "Workspace: $OPT_WORKSPACE"
+
+  # ── Soft dependency: is dinotrust core (enforcement) injected here? ──────────
+  _CORE_CONFIG="$OPT_WORKSPACE/AGENTS.md"
+  if [[ -f "$_CORE_CONFIG" ]] && grep -q "dinotrust begin" "$_CORE_CONFIG" 2>/dev/null; then
+    success "dinotrust core (enforcement) detected in $_CORE_CONFIG."
   else
-    need_input "target workspace (no OpenClaw workspace detected)" "--workspace DIR" self
-    echo ""
-    warn "No OpenClaw workspaces under $HOME/.openclaw/workspace-*/"
-    ask "Path to your OpenClaw workspace dir:"
-    read -rp "> " OPT_WORKSPACE
-    OPT_WORKSPACE="${OPT_WORKSPACE%/}"
+    warn "dinotrust core (enforcement) not detected in $_CORE_CONFIG."
+    warn "  Observability audits the reject-patterns core defines — it is most useful WITH core."
+    warn "  Install enforcement separately:  bash scripts/install.sh --owner-id <id>"
+    warn "  (Continuing anyway — audit-only is a valid setup.)"
   fi
-fi
-[[ -d "$OPT_WORKSPACE" ]] || error "Workspace dir not found: $OPT_WORKSPACE"
-info "Workspace: $OPT_WORKSPACE"
 
-# ── Soft dependency: is dinotrust core (enforcement) injected here? ──────────
-# Observability AUDITS the reject-patterns that core's security_rules.md DEFINES.
-# It works without core, but auditing rules nothing enforces is half the value.
-# Warn (never block) if the core block isn't present in this workspace's AGENTS.md.
-_CORE_CONFIG="$OPT_WORKSPACE/AGENTS.md"
-if [[ -f "$_CORE_CONFIG" ]] && grep -q "dinotrust begin" "$_CORE_CONFIG" 2>/dev/null; then
-  success "dinotrust core (enforcement) detected in $_CORE_CONFIG."
+  # ── OpenClaw: agent id (from workspace dir name) ───────────────────────────
+  if [[ -z "$OPT_AGENT" ]]; then
+    _ws_base="$(basename "$OPT_WORKSPACE")"
+    OPT_AGENT="${_ws_base#workspace-}"
+    if [[ -z "$OPT_AGENT" || "$OPT_AGENT" == "$_ws_base" ]]; then
+      need_input "agent id (could not derive from workspace dir name '$_ws_base')" "--agent ID" self
+      ask "Agent id:"
+      read -rp "> " OPT_AGENT
+    fi
+  fi
+  [[ -n "$OPT_AGENT" ]] || error "Agent id is required."
+  info "Agent: $OPT_AGENT"
+
+  # ── OpenClaw: log paths ────────────────────────────────────────────────────
+  _LOG_DIR="$HOME/.openclaw/logs"
+  [[ -n "$OPT_ACTIVITY_LOG" ]]  || OPT_ACTIVITY_LOG="$_LOG_DIR/${OPT_AGENT}-activity.log"
+  [[ -n "$OPT_JAILBREAK_LOG" ]] || OPT_JAILBREAK_LOG="$_LOG_DIR/${OPT_AGENT}-jailbreak.log"
+
+  # ── OpenClaw: sources + install targets ────────────────────────────────────
+  HANDLER_SRC="$SCRIPT_DIR/adapters/openclaw/handler.ts"
+  REPORT_SRC="$SCRIPT_DIR/adapters/openclaw/report.py"
+  HOOK_DIR="$HOME/.openclaw/hooks/${OPT_AGENT}-dinotrust-observability"
+  HOOK_DEST="$HOOK_DIR/handler.ts"
+  PATTERNS_DEST="$HOOK_DIR/patterns.json"
+  REPORT_DEST="$HOME/.openclaw/scripts/${OPT_AGENT}-dinotrust-report.py"
+  AGENT_FILTER_VAL="agent:${OPT_AGENT}"
+
+elif [[ "$OPT_PLATFORM" == "hermes" ]]; then
+  # ── Hermes: agent id ──────────────────────────────────────────────────────
+  # Hermes has no workspace- dirs; agent id comes from --agent or defaults.
+  if [[ -z "$OPT_AGENT" ]]; then
+    OPT_AGENT="hermes"
+    info "Agent: $OPT_AGENT (default for Hermes platform; override with --agent)"
+  else
+    info "Agent: $OPT_AGENT"
+  fi
+
+  # ── Hermes: log paths ─────────────────────────────────────────────────────
+  _LOG_DIR="$HOME/.hermes/logs"
+  [[ -n "$OPT_ACTIVITY_LOG" ]]  || OPT_ACTIVITY_LOG="$_LOG_DIR/${OPT_AGENT}-activity.log"
+  [[ -n "$OPT_JAILBREAK_LOG" ]] || OPT_JAILBREAK_LOG="$_LOG_DIR/${OPT_AGENT}-jailbreak.log"
+
+  # ── Hermes: sources + install targets ─────────────────────────────────────
+  HANDLER_SRC="$SCRIPT_DIR/adapters/hermes/handler.py"
+  HOOK_YAML_SRC="$SCRIPT_DIR/adapters/hermes/HOOK.yaml"
+  REPORT_SRC="$SCRIPT_DIR/adapters/openclaw/report.py"
+  HOOK_DIR="$HOME/.hermes/hooks/dinotrust-observability"
+  HOOK_DEST="$HOOK_DIR/handler.py"
+  HOOK_YAML_DEST="$HOOK_DIR/HOOK.yaml"
+  PATTERNS_DEST="$HOOK_DIR/patterns.json"
+  REPORT_DEST="$HOME/.hermes/scripts/dinotrust-report.py"
+  AGENT_FILTER_VAL=""  # Hermes hook scope is self-scoping via HOOK.yaml events
 else
-  warn "dinotrust core (enforcement) not detected in $_CORE_CONFIG."
-  warn "  Observability audits the reject-patterns core defines — it is most useful WITH core."
-  warn "  Install enforcement separately:  bash scripts/install.sh --owner-id <id>"
-  warn "  (Continuing anyway — audit-only is a valid setup.)"
+  error "Unknown platform: $OPT_PLATFORM (expected: openclaw | hermes)"
 fi
 
-# ── AUTO-detect: agent id (from workspace dir name) ───────────────────────────
-# workspace-analyst -> analyst. Override with --agent for non-standard layouts.
-if [[ -z "$OPT_AGENT" ]]; then
-  _ws_base="$(basename "$OPT_WORKSPACE")"
-  OPT_AGENT="${_ws_base#workspace-}"
-  if [[ -z "$OPT_AGENT" || "$OPT_AGENT" == "$_ws_base" ]]; then
-    need_input "agent id (could not derive from workspace dir name '$_ws_base')" "--agent ID" self
-    ask "Agent id:"
-    read -rp "> " OPT_AGENT
-  fi
-fi
-[[ -n "$OPT_AGENT" ]] || error "Agent id is required."
-info "Agent: $OPT_AGENT"
-
-# ── AUTO-detect: log paths ────────────────────────────────────────────────────
-_LOG_DIR="$HOME/.openclaw/logs"
-[[ -n "$OPT_ACTIVITY_LOG" ]]  || OPT_ACTIVITY_LOG="$_LOG_DIR/${OPT_AGENT}-activity.log"
-[[ -n "$OPT_JAILBREAK_LOG" ]] || OPT_JAILBREAK_LOG="$_LOG_DIR/${OPT_AGENT}-jailbreak.log"
 info "Activity log:  $OPT_ACTIVITY_LOG"
 info "Jailbreak log: $OPT_JAILBREAK_LOG"
 
 # ── AUTO-detect: openclaw binary (PATH, then Homebrew fallback) ───────────────
-# Bare cron/non-login envs often lack Homebrew on PATH — learned bug. Resolve to
-# an absolute path here so the producer hook and any binary calls are env-safe.
+# Needed for report.py delivery on BOTH platforms. Bare cron/non-login envs
+# often lack Homebrew on PATH — resolve to an absolute path here.
 if [[ -z "$OPT_OPENCLAW_BIN" ]]; then
   if command -v openclaw >/dev/null 2>&1; then
     OPT_OPENCLAW_BIN="$(command -v openclaw)"
@@ -291,8 +331,6 @@ if [[ -z "$OPT_REPORT_TZ" ]]; then
 fi
 
 # ── Validate OWNER-INPUT: report target (REQUIRED, never silent default) ──────
-# This is a leak vector: a wrong/auto target sends the audit digest to the wrong
-# place. Require it explicitly. Interactive may suggest, but must be confirmed.
 if [[ -z "$OPT_REPORT_TARGET" ]]; then
   need_input "report target (where the audit digest is delivered)" "--report-target ID" owner
   echo ""
@@ -304,17 +342,13 @@ fi
 info "Report target: $OPT_REPORT_TARGET (channel: $OPT_REPORT_CHANNEL${OPT_REPORT_THREAD:+, thread: $OPT_REPORT_THREAD})"
 info "Schedule: $OPT_SCHEDULE (tz: $OPT_REPORT_TZ) | Privacy: $OPT_PRIVACY"
 
-# ── Install targets ─────────────────────────────────────────────────────
-HOOK_DIR="$HOME/.openclaw/hooks/${OPT_AGENT}-dinotrust-observability"
-HOOK_DEST="$HOOK_DIR/handler.ts"
-PATTERNS_DEST="$HOOK_DIR/patterns.json"
-REPORT_DEST="$HOME/.openclaw/scripts/${OPT_AGENT}-dinotrust-report.py"
-AGENT_FILTER_VAL="agent:${OPT_AGENT}"
-
 # ── Source-file preflight ──────────────────────────────────────────────
 for _src in "$HANDLER_SRC" "$REPORT_SRC" "$PATTERNS_SRC"; do
   [[ -f "$_src" ]] || error "Missing source file: $_src"
 done
+if [[ "$OPT_PLATFORM" == "hermes" ]]; then
+  [[ -f "$HOOK_YAML_SRC" ]] || error "Missing source file: $HOOK_YAML_SRC"
+fi
 
 # ── Idempotency / overwrite guard ──────────────────────────────────────
 ALREADY_INSTALLED=false
@@ -322,7 +356,7 @@ if [[ -f "$HOOK_DEST" || -f "$REPORT_DEST" ]]; then
   ALREADY_INSTALLED=true
   if [[ "$OPT_FORCE" != "true" && "$OPT_DRY_RUN" != "true" ]]; then
     need_input "confirmation to overwrite the existing observability install" "--force" owner
-    warn "dinotrust observability already installed for agent '$OPT_AGENT':"
+    warn "dinotrust observability already installed for platform '$OPT_PLATFORM' / agent '$OPT_AGENT':"
     [[ -f "$HOOK_DEST" ]]   && warn "  hook:   $HOOK_DEST"
     [[ -f "$REPORT_DEST" ]] && warn "  report: $REPORT_DEST"
     echo ""
@@ -332,10 +366,7 @@ if [[ -f "$HOOK_DEST" || -f "$REPORT_DEST" ]]; then
 fi
 
 # ── Placeholder substitution (safe: writes to a tmp copy, never the repo src) ──
-# Uses python for substitution — values contain '/' and ':'; literal replace, no
-# regex surprises. Returns the substituted text on stdout.
 substitute() {
-  # $1 = source file; remaining args = KEY=VALUE pairs
   local _src="$1"; shift
   SUBST_SRC="$_src" SUBST_PAIRS="$*" python3 - "$@" <<'PYEOF'
 import os, sys
@@ -364,20 +395,23 @@ REPORT_OUT="$(substitute "$REPORT_SRC" \
   "__THREAD_ID__=$OPT_REPORT_THREAD" \
   "__ACCOUNT__=$OPT_REPORT_ACCOUNT")"
 
-# Residual-placeholder guard: any un-substituted __FOO__ token left is a bug that
-# would silently break the installed hook/report. Catch it here, not at runtime.
+# Residual-placeholder guard.
 _residual=$(printf '%s\n%s\n' "$HANDLER_OUT" "$REPORT_OUT" | grep -oE '__[A-Z_]+__' | sort -u || true)
 if [[ -n "$_residual" ]]; then
   error "Unsubstituted placeholder(s) remain: $(echo "$_residual" | tr '\n' ' '). Refusing to install a broken hook."
 fi
 
-# ── File install (skipped on --dry-run; cron handled in 1b-ii) ────────────────
+# ── File install (skipped on --dry-run) ───────────────────────────────────────
 install_files() {
   mkdir -p "$HOOK_DIR" "$(dirname "$REPORT_DEST")" "$_LOG_DIR"
   printf '%s' "$HANDLER_OUT" > "$HOOK_DEST"
   printf '%s' "$REPORT_OUT" > "$REPORT_DEST"
   chmod +x "$REPORT_DEST"
   cp "$PATTERNS_SRC" "$PATTERNS_DEST"
+  if [[ "$OPT_PLATFORM" == "hermes" ]]; then
+    cp "$HOOK_YAML_SRC" "$HOOK_YAML_DEST"
+    success "Installed HOOK.yaml: $HOOK_YAML_DEST"
+  fi
   success "Installed hook:    $HOOK_DEST"
   success "Installed patterns:$PATTERNS_DEST"
   success "Installed report:  $REPORT_DEST"
@@ -385,28 +419,20 @@ install_files() {
 
 # ── Cron wiring ─────────────────────────────────────────────────────────
 # Idempotent: tag our line so re-runs replace (not duplicate). PATH prefix is
-# CRITICAL — bare cron env lacks Homebrew, so python3/openclaw vanish. We prepend
-# the Homebrew bin dir (+ the openclaw binary's own dir) to PATH on the cron line.
+# CRITICAL — bare cron env lacks Homebrew, so python3/openclaw vanish.
 CRON_TAG="# dinotrust-observability:${OPT_AGENT}"
 _BREW_BIN="/home/linuxbrew/.linuxbrew/bin"
 _OC_DIR="$(dirname "$OPT_OPENCLAW_BIN")"
-# Build a PATH that puts Homebrew + the openclaw dir first, then the existing PATH.
-# De-dupe when the openclaw binary already lives in the Homebrew dir.
 if [[ "$_OC_DIR" == "$_BREW_BIN" || "$_OC_DIR" == "." ]]; then
   CRON_PATH="${_BREW_BIN}:\$PATH"
 else
   CRON_PATH="${_BREW_BIN}:${_OC_DIR}:\$PATH"
 fi
-# tz: crontab has no per-line TZ field portably; set CRON_TZ= on the line (Vixie/
-# cronie support it). Harmless on crons that ignore it (falls back to host tz).
 CRON_TZ_PREFIX=""
 [[ -n "$OPT_REPORT_TZ" ]] && CRON_TZ_PREFIX="CRON_TZ=${OPT_REPORT_TZ} "
 CRON_CMD="PATH=${CRON_PATH} python3 ${REPORT_DEST} --period daily >> ${_LOG_DIR}/${OPT_AGENT}-dinotrust-report.log 2>&1"
 CRON_LINE="${CRON_TZ_PREFIX}${OPT_SCHEDULE} ${CRON_CMD} ${CRON_TAG}"
 
-# Compute the merged crontab text WITHOUT installing (so --dry-run can show it).
-# Read current crontab (empty if none), strip any prior line carrying our tag,
-# then append the fresh line. Never clobbers unrelated entries.
 _CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
 if [[ -n "$_CURRENT_CRON" ]]; then
   _MERGED_CRON="$(printf '%s\n' "$_CURRENT_CRON" | grep -vF "$CRON_TAG" || true)"
@@ -425,8 +451,6 @@ install_cron() {
 }
 
 # ── Preflight: validate.py taxonomy drift guard ────────────────────────────
-# If patterns.json rule_ids drift out of security_rules.md, the audit layer would
-# report against rules that no longer exist (or miss new ones). Fail closed here.
 if [[ -f "$VALIDATE_SRC" ]]; then
   info "Preflight: validating taxonomy (patterns.json ⊆ security_rules.md)..."
   if ! python3 "$VALIDATE_SRC"; then
@@ -434,22 +458,25 @@ if [[ -f "$VALIDATE_SRC" ]]; then
   fi
   success "Taxonomy valid."
 else
-  warn "validate.py not found at $VALIDATE_SRC — skipping taxonomy preflight (cannot guarantee drift safety)."
+  warn "validate.py not found at $VALIDATE_SRC — skipping taxonomy preflight."
 fi
 
-# ── Plan summary (shown for both dry-run and real apply) ────────────────────
+# ── Plan summary ────────────────────────────────────────────────────────
 print_plan() {
   echo ""
   echo "────────────────────────────────────────────────────────"
-  echo -e "${BOLD}PLAN${NC} — dinotrust observability v${VERSION} for agent '${OPT_AGENT}'"
+  echo -e "${BOLD}PLAN${NC} — dinotrust observability v${VERSION} for platform '${OPT_PLATFORM}' / agent '${OPT_AGENT}'"
   echo "────────────────────────────────────────────────────────"
   echo "Files to write:"
   echo "  hook     : $HOOK_DEST"
   echo "  patterns : $PATTERNS_DEST"
   echo "  report   : $REPORT_DEST  (chmod +x)"
+  if [[ "$OPT_PLATFORM" == "hermes" ]]; then
+    echo "  HOOK.yaml: $HOOK_YAML_DEST"
+  fi
   echo ""
   echo "Substitutions:"
-  echo "  handler.ts  __AGENT_FILTER__=$AGENT_FILTER_VAL"
+  echo "  handler     __AGENT_FILTER__=${AGENT_FILTER_VAL:-(empty)}"
   echo "              __ACTIVITY_LOG__=$OPT_ACTIVITY_LOG"
   echo "              __JAILBREAK_LOG__=$OPT_JAILBREAK_LOG"
   echo "              __PATTERNS_FILE__=$PATTERNS_DEST"
@@ -482,11 +509,10 @@ print_plan
 echo ""
 install_files
 install_cron
-# Ensure log files exist so the first hook write + first digest read don't race.
 touch "$OPT_ACTIVITY_LOG" "$OPT_JAILBREAK_LOG"
 
 echo ""
-success "dinotrust observability v${VERSION} installed for agent '${OPT_AGENT}'."
+success "dinotrust observability v${VERSION} installed for platform '${OPT_PLATFORM}' / agent '${OPT_AGENT}'."
 echo ""
 echo "  Hook     : $HOOK_DEST"
 echo "  Report   : $REPORT_DEST"
@@ -494,11 +520,12 @@ echo "  Patterns : $PATTERNS_DEST"
 echo "  Digest   : $OPT_SCHEDULE (tz ${OPT_REPORT_TZ:-host}) → $OPT_REPORT_CHANNEL:$OPT_REPORT_TARGET"
 echo "  Privacy  : $OPT_PRIVACY"
 echo ""
-echo "Next: restart the agent so OpenClaw loads the new hook."
-echo "Verify cron:  crontab -l | grep '$CRON_TAG'"
+if [[ "$OPT_PLATFORM" == "openclaw" ]]; then
+  echo "Next: restart the agent so OpenClaw loads the new hook."
+  echo "Verify cron:  crontab -l | grep '$CRON_TAG'"
+elif [[ "$OPT_PLATFORM" == "hermes" ]]; then
+  echo "Next: restart the Hermes gateway so the hook loads."
+  echo "Verify cron:  crontab -l | grep '$CRON_TAG'"
+fi
 echo "Test digest:  python3 $REPORT_DEST --period daily --dry-run"
 echo ""
-
-
-
-

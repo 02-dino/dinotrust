@@ -55,8 +55,9 @@ guarantees) changes.
     `adapters/openclaw/report.py`; `schedule` = host cron (wired by `install.sh`).
   - **Hermes** (`adapters/hermes/HOOK.yaml`+`handler.py`, Python; Gateway hook
     in `~/.hermes/hooks/`). Taps `agent:start`/`agent:end`. Loads the same
-    `patterns.json`, emits the same schema; `schedule` = Hermes/any cron. Manual
-    install for now (see `adapters/hermes/README.md`).
+    `patterns.json`, emits the same schema. **Automated install via
+    `install.sh --platform hermes`** (since v1.9.0); manual install with `DT_*`
+    env overrides still supported. `schedule` = host cron (wired by installer).
 
 - **T2 — Daemon bots, no hook API (Discord, Slack, …)** *(implemented: shared
   core + template + Discord reference)*
