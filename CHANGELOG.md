@@ -4,6 +4,25 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.11.0] — 2026-06-25
+
+### Added
+- **GitHub Actions CI workflow** (`.github/workflows/ci.yml`). Runs on every
+  push to `main` and on every pull request:
+  1. `python3 validate.py` — taxonomy drift guard (exits non-zero if any
+     `rule_id` in `patterns.json` is missing from `security_rules.md`).
+  2. Node smoke test — loads `core/detector.ts`, compiles `patterns.json`,
+     detects a test injection string, asserts `R1` rule matches. Confirms
+     TypeScript core compiles and detection mechanics still work.
+  3. `bash -n install.sh` — shell syntax check.
+  4. `python3 -m py_compile` on `report.py`, `handler.py`, `validate.py` —
+     Python syntax check.
+
+### Changed
+- None.
+
+---
+
 ## [1.10.0] — 2026-06-25
 
 ### Added
