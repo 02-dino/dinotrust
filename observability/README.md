@@ -46,13 +46,15 @@ under `_meta.agent_judged_only`:
 
 | Tier | Runtimes | Producer | Schedule | Strength |
 |------|----------|----------|----------|----------|
-| **T1** | OpenClaw | code hook (`adapters/openclaw`) | host cron | independent, full |
-| **T2** | Hermes, Discord, Slack | daemon, reuses `core/` (`adapters/_template`, `adapters/discord`) | in-process timer | independent, full |
+| **T1** | OpenClaw (`adapters/openclaw`), Hermes (`adapters/hermes`) | real hook API | host/Hermes cron | independent, full |
+| **T2** | Discord, Slack | daemon, reuses `core/` (`adapters/_template`, `adapters/discord`) | in-process timer | independent, full |
 | **T3** | Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose | none — self-audit clause (`adapters/cli-selfaudit`) | on-demand | best-effort, honestly weaker |
 
 The tier is decided by **physics, not effort**: does the runtime expose a
 programmatic message hook / long-lived process?
 
+- **T1** runtimes expose a real **hook API** (OpenClaw: TS hook; Hermes:
+  `HOOK.yaml`+`handler.py`, Python). Independent producer, host/Hermes cron.
 - **T1/T2** run an **independent producer** — code that observes traffic the
   agent can't suppress. T2 reuses the shared `core/` library verbatim; only the
   platform tap differs (OpenClaw inlines the same logic due to its single-file
@@ -104,7 +106,8 @@ never clobbered) with a PATH that includes Homebrew bin.
 | `install.sh` | OpenClaw (Tier-1) installer; routes other runtimes to their tier. |
 | `core/` | Shared TS detection + event library (Tier-2 daemons import it). |
 | `core/PARITY.md` | Why OpenClaw inlines core; what must stay identical. |
-| `adapters/openclaw/handler.ts` | Tier-1 producer hook (self-contained). |
+| `adapters/openclaw/handler.ts` | Tier-1 OpenClaw producer hook (self-contained TS). |
+| `adapters/hermes/` | Tier-1 Hermes producer hook (`HOOK.yaml`+`handler.py`, Python). |
 | `adapters/openclaw/report.py` | Consumer (digest + delivery; env-overridable, serves all tiers). |
 | `adapters/_template/daemon-adapter.ts` | Tier-2 daemon adapter template. |
 | `adapters/discord/tap.ts` | Tier-2 working Discord reference adapter. |

@@ -48,14 +48,18 @@ signal dinotrust's `security_rules.md` uses.
 The contract is identical across tiers; only `schedule` (and honesty about
 guarantees) changes.
 
-- **T1 — OpenClaw** *(reference, implemented)*
-  Code hook produces events (`adapters/openclaw/handler.ts`, self-contained by
-  OpenClaw's single-file hook constraint — see `core/PARITY.md`); a consumer
-  script (`adapters/openclaw/report.py`) builds + delivers the digest.
-  `schedule` = host cron (wired by `install.sh`). Independent producer.
+- **T1 — Real hook API (OpenClaw, Hermes)** *(both implemented)*
+  The runtime exposes a hook that fires per message — an independent producer.
+  - **OpenClaw** (`adapters/openclaw/handler.ts`, TS, self-contained per
+    OpenClaw's single-file hook constraint — see `core/PARITY.md`); consumer
+    `adapters/openclaw/report.py`; `schedule` = host cron (wired by `install.sh`).
+  - **Hermes** (`adapters/hermes/HOOK.yaml`+`handler.py`, Python; Gateway hook
+    in `~/.hermes/hooks/`). Taps `agent:start`/`agent:end`. Loads the same
+    `patterns.json`, emits the same schema; `schedule` = Hermes/any cron. Manual
+    install for now (see `adapters/hermes/README.md`).
 
-- **T2 — Daemon bots (Hermes, Discord, Slack, …)** *(implemented: shared core +
-  template + Discord reference)*
+- **T2 — Daemon bots, no hook API (Discord, Slack, …)** *(implemented: shared
+  core + template + Discord reference)*
   Long-lived process taps its own message pipeline. Reuses `core/` **verbatim**
   (`makeDetector` + `buildInbound`/`buildOutbound` + `appendLine`); the adapter
   is just the platform glue. `schedule` = in-process timer (no cron). Start from

@@ -4,6 +4,28 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.8.0] — 2026-06-25
+
+### Added
+- **Hermes adapter — real Tier-1 (gateway hook), not a stub.** Hermes Gateway
+  hooks (`HOOK.yaml`+`handler.py` in `~/.hermes/hooks/`) are a genuine
+  independent producer, same class as OpenClaw — confirmed from Hermes' official
+  docs (Event Hooks). `adapters/hermes/handler.py` taps `agent:start`
+  (inbound + detection) and `agent:end` (outbound), uses `user_id` as the
+  verified `identityField`, loads the **same `patterns.json`**, and emits the
+  **same `audit-schema.json`** lines (verified: identical `rule_ids`/severity/
+  `producer` to the TS path; `report.py` consumes it unchanged). Python, so it
+  inlines detection kept behavior-identical to `core/` per `core/PARITY.md`.
+  Manual install for now (`adapters/hermes/README.md`).
+
+### Changed
+- **Tier reclassification: Hermes moved T2 → T1.** It has a real hook API, so it
+  belongs with OpenClaw as an independent-hook producer, not the daemon-template
+  path. T2 is now Discord/Slack-class only (long-lived bots without a hook API).
+  Installer route hint, README + ADAPTER tier tables updated accordingly.
+
+---
+
 ## [1.7.0] — 2026-06-25
 
 ### Added

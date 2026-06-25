@@ -1,0 +1,10 @@
+name: dinotrust-observability
+description: >-
+  dinotrust observability — activity + prompt-injection audit layer. Taps the
+  Hermes gateway message lifecycle, runs the universal regex taxonomy
+  (patterns.json), logs all traffic + flagged reject-pattern hits (schema v2).
+# agent:start  -> inbound user message (run detection here)
+# agent:end    -> inbound message + outbound response (activity logging)
+events:
+  - agent:start
+  - agent:end
