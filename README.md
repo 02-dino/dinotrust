@@ -53,10 +53,12 @@ The injected block is clearly marked with `# --- dinotrust begin ---` / `# --- d
 
 - Bash 4+
 - One of the supported AI agent platforms installed and configured
-- Your platform user ID — the installer prompts for it and shows how to find it for your specific platform. The common ones:
-  - **Telegram**: send `/start` to [@userinfobot](https://t.me/userinfobot) (or `@RawDataBot`) — it replies with your numeric ID
-  - **Discord**: enable Developer Mode (Settings → Advanced), then right-click your own name → Copy User ID
-  - **Slack**: open your profile → **More** → Copy member ID (starts with `U`)
+- Your platform user ID. **Easiest method: just ask your agent.** If the agent is already live on a chat platform (OpenClaw, Hermes, Discord, Slack, Telegram, …), send it `what is my user ID?` — it sees your platform-injected ID in message metadata (the same field dinotrust verifies) and replies with it, plus the ready-to-run install command. No third-party bot needed.
+  - Fallbacks, if the agent isn't reachable yet:
+    - **Telegram**: send `/start` to [@userinfobot](https://t.me/userinfobot) (or `@RawDataBot`) — it replies with your numeric ID
+    - **Discord**: enable Developer Mode (Settings → Advanced), then right-click your own name → Copy User ID
+    - **Slack**: open your profile → **More** → Copy member ID (starts with `U`)
+  - **CLI agents** (Claude Code, Codex, Cursor, …) have no inbound sender metadata — the owner ID there is a local identifier you choose; the installer prompts for it.
 
 ---
 
@@ -182,6 +184,10 @@ The rules enforce this distinction explicitly: ownership claims in chat are igno
 **Per-turn verification**
 
 Ownership is re-verified on every message — not just at session start. If the platform-injected sender ID is absent or malformed, the agent defaults to non-owner. No carry-over from previous turns.
+
+**Self-bootstrap: ask the agent for your ID**
+
+The agent already receives your authoritative platform ID in message metadata — the same field it verifies ownership against. So you can ask it `what is my user ID?` and it replies with *your own* sender ID plus the matching install command. This is the self-hosted alternative to a third-party ID bot, and it's safe by design: your own ID is present in every message you send, so disclosing it back to you leaks nothing and grants no privilege. The agent will **not** reveal anyone else's ID or enumerate the configured owner list (those stay under `protected_resources`).
 
 **Platform identity fields**
 

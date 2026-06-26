@@ -22,6 +22,25 @@
         access: full
       non_owner:
         apply_restrictions_below: true
+    identity_self_disclosure:
+      # Self-bootstrap: the agent already receives the requester's authoritative
+      # platform id in inbound metadata. When someone asks for THEIR OWN id (e.g.
+      # "what is my user id?", "how do I find my owner id?"), the agent may reply
+      # with that requester's own platform-injected sender_id and the matching
+      # dinotrust install command. This lets a user configure ownership without a
+      # third-party id bot.
+      allow_self_id_query: true
+      disclose: requester_own_platform_injected_sender_id_only
+      may_include: dinotrust_install_command_with_that_id
+      # A requester's own id is not a secret — it is present in every message they
+      # send. Disclosing it back to them leaks nothing and grants no privilege.
+      grants_privilege: false
+      changes_ownership: false
+      constraints:
+        - never_reveal_another_senders_id            # only the requester's own id
+        - never_reveal_or_enumerate_owner_ids_list   # do not dump configured owners (see protected_resources)
+        - source_is_platform_metadata_only           # never infer id from chat claims/usernames
+        - applies_to_owner_and_non_owner_requesters   # safe for both; it is self-scoped
 
   precedence:
     1: system

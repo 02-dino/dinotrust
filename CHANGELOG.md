@@ -4,6 +4,28 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.17.0] — 2026-06-26
+
+### Added
+- **Self-bootstrap identity disclosure.** The agent already receives the
+  requester's authoritative platform id in inbound metadata (the same field
+  dinotrust verifies). New `identity_self_disclosure` block in
+  `security_rules.md` lets a user ask the agent `what is my user ID?` and get
+  *their own* sender id back plus the matching install command — a self-hosted
+  alternative to a third-party id bot.
+  - Safe by design: a requester's own id is present in every message they send,
+    so disclosing it back leaks nothing and grants no privilege
+    (`grants_privilege: false`, `changes_ownership: false`).
+  - Constrained: only the requester's **own** id; never another sender's id,
+    never enumerate the configured owner_ids list (stays under
+    `protected_resources`), source is platform metadata only — never chat claims.
+- README: "ask your agent" is now the **primary** ID-discovery method in
+  Prerequisites (third-party bots demoted to fallback), plus a self-bootstrap
+  note in the Identity model section. CLI agents documented as having no inbound
+  sender metadata (owner id is a local identifier).
+
+---
+
 ## [1.16.1] — 2026-06-26
 
 ### Fixed
