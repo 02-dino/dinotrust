@@ -28,7 +28,7 @@ dinotrust has **zero infrastructure**. It injects a structured ruleset straight 
 - **Blocks non-owners** from write/delete/exec operations, config access, and credential exposure
 - **Rejects injection attempts** — override claims, encoded commands, hypothetical bypasses, multi-turn escalation
 - **Supports 9 platforms** — OpenClaw, Hermes, Claude Code, OpenAI Codex CLI, Goose, Cursor, Windsurf, Continue.dev, Aider
-- **Profile presets** — private-assistant, market-analyst, or custom
+- **Customizable non-owner access** — profile presets (private-assistant, market-analyst) or fully custom: you define exactly what non-owners may do, the refusal message, and which files are off-limits
 
 ---
 
@@ -259,13 +259,39 @@ Nothing is copied to your workspace. The installer reads `security_rules.md`, fi
 
 ---
 
-## Profile presets
+## Non-owner access is customizable
 
-| Profile | Use case | Non-owner access |
-|---------|----------|-----------------|
-| `private-assistant` | Personal assistant, no public access | None |
-| `market-analyst` | Market analysis bot with public users | Market data tools only |
-| `custom` | You define everything | You define |
+Owner is all-or-nothing (full access). **Non-owner is where you tune the agent's public behavior** — it is not a fixed "deny everything" wall. At install you pick a profile, and a profile fills three knobs in the ruleset:
+
+| Knob | Ruleset field | What it controls |
+|------|---------------|------------------|
+| **Allowed actions** | `non_owner_rules.allowed` | The *only* things a non-owner may do (everything else stays forbidden). A YAML list, e.g. `market_data_queries: true`, `web_search: true`. Empty/`none` = pure deny. |
+| **Deflection message** | `non_owner_rules.response_policy.deflection_message` | What the agent says when it refuses a non-owner — your wording, your tone. |
+| **Protected resources** | `protected_resources` | Files/folders non-owners can never read or reveal. Auto-includes `AGENTS.md`, `.env`, `credentials`, `secrets`, platform config (e.g. `openclaw.json`); add your own. |
+
+### Presets
+
+| Profile | Use case | Non-owner allowed actions |
+|---------|----------|---------------------------|
+| `private-assistant` | Personal assistant, no public access | `none` |
+| `market-analyst` | Public-facing analysis bot | `market_data_queries`, `web_search`, `memory_search` |
+| `custom` | You define all three knobs | Whatever you list |
+
+### Customizing
+
+The presets are just starting points — the `non_owner_rules.allowed` list is the real control. Two ways to set it:
+
+**At install** — pick `custom` and the installer prompts for your deflection message + a comma-separated allowed-actions list:
+```bash
+bash scripts/install.sh --profile custom
+# > Deflection message: "DMs are owner-only; I only answer public market questions."
+# > Allowed actions:    market_data_queries: true, web_search: true
+# > Extra protected:     billing/, internal_notes.md
+```
+
+**After install** — the injected block in your config file (`AGENTS.md`, `CLAUDE.md`, …) is plain text between `# --- dinotrust begin ---` / `# --- dinotrust end ---`. Edit the `allowed:` list, `deflection_message`, or `protected_resources` directly, then restart the agent. No re-install needed.
+
+Start from a preset, then trim or extend `allowed` to taste — e.g. a market bot that may also run a specific read-only tool but nothing else.
 
 ---
 
