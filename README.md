@@ -49,20 +49,104 @@ The injected block is clearly marked with `# --- dinotrust begin ---` / `# --- d
 
 ---
 
-## Observability (audit layer)
+## Prerequisites
 
-dinotrust core *enforces*. The optional [`observability/`](observability/) module
-*observes and reports* — an independent record of agent traffic and which
-reject-patterns (R1/R3/R4/R6/R7/S0) fired, delivered as a daily/weekly digest.
-Same zero-infra ethos: regex, no LLM; a language-neutral taxonomy
-(`patterns.json`) plus thin per-platform adapters.
+- Bash 4+
+- One of the supported AI agent platforms installed and configured
+- Your platform user ID (Telegram: Settings → Advanced → copy numeric ID; Discord: Developer Mode → right-click username → Copy ID)
+
+---
+
+## Supported platforms
+
+| Platform | Config file (project) | Config file (global) |
+|----------|----------------------|---------------------|
+| OpenClaw | `<workspace>/AGENTS.md` | — |
+| Hermes | `~/.hermes/SOUL.md` | — |
+| Claude Code | `./CLAUDE.md` | `~/.claude/CLAUDE.md` |
+| OpenAI Codex CLI | `./AGENTS.md` | `~/.codex/AGENTS.md` |
+| Goose | `./AGENTS.md` | — |
+| Cursor | `.cursor/rules/dinotrust.mdc` | — |
+| Windsurf | `.windsurfrules` | `global_rules.md` |
+| Continue.dev | `.continuerules` | — |
+| Aider | `CONVENTIONS.md` + `.aider.conf.yml` | — |
+
+---
+
+## Quick Start
 
 ```bash
-bash observability/install.sh --report-target <chat-id>
+git clone https://github.com/02-dino/dinotrust
+cd dinotrust
+bash scripts/install.sh
 ```
 
-See [`observability/README.md`](observability/README.md) for tiers, install
-flags, and the adapter contract.
+Follow the prompts. Done in under a minute.
+
+---
+
+## Install options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--platform NAME` | Interactive | Skip platform detection prompt |
+| `--owner-id IDS` | Interactive | Your platform user ID(s) — comma-separated for multiple owners (e.g. `123,456`). Scope to specific platform(s) with `id@platform` (e.g. `123@telegram`, `123@telegram+discord`); a bare id is owner on any platform. |
+| `--profile NAME` | Interactive | Preset: `private-assistant`, `market-analyst`, `custom` |
+| `--global` | Project-level | Inject into global config instead of project-level |
+| `--force` | — | Overwrite existing dinotrust block |
+| `--dry-run` | — | Preview what would be injected, no changes |
+
+---
+
+## What gets installed
+
+```
+dinotrust/
+├── scripts/
+│   ├── install.sh       ← main installer
+│   ├── uninstall.sh     ← removes injected block
+│   └── update.sh        ← re-runs install with --force
+├── security_rules.md    ← the ruleset template (filled by installer)
+├── README.md
+├── CHANGELOG.md
+├── VERSION
+└── LICENSE
+```
+
+Nothing is copied to your workspace. The installer reads `security_rules.md`, fills placeholders, and appends the result to your agent's config file.
+
+---
+
+## How do I know it's working?
+
+1. Check the injection landed:
+```bash
+grep "dinotrust begin" <your-agent-config-file>
+```
+
+2. Test as a non-owner: ask the agent to read a config file or run a shell command — it should refuse.
+
+3. Test as owner: send a message from your verified account — full access should work normally.
+
+---
+
+## Using dinotrust
+
+After install, the agent enforces rules automatically. No commands needed.
+
+To verify injection:
+```bash
+# OpenClaw example
+grep -n "dinotrust" ~/.openclaw/workspace-<agent>/AGENTS.md
+
+# Claude Code example
+grep -n "dinotrust" ~/.claude/CLAUDE.md
+```
+
+To update rules (re-run installer):
+```bash
+bash ~/.dinotrust/scripts/install.sh --force
+```
 
 ---
 
@@ -158,107 +242,6 @@ The ruleset matches: *sender is owner IFF (a bare owner_id equals the sender_id)
 
 ---
 
-## Using dinotrust
-
-After install, the agent enforces rules automatically. No commands needed.
-
-To verify injection:
-```bash
-# OpenClaw example
-grep -n "dinotrust" ~/.openclaw/workspace-<agent>/AGENTS.md
-
-# Claude Code example
-grep -n "dinotrust" ~/.claude/CLAUDE.md
-```
-
-To update rules (re-run installer):
-```bash
-bash ~/.dinotrust/scripts/install.sh --force
-```
-
----
-
-## Prerequisites
-
-- Bash 4+
-- One of the supported AI agent platforms installed and configured
-- Your platform user ID (Telegram: Settings → Advanced → copy numeric ID; Discord: Developer Mode → right-click username → Copy ID)
-
----
-
-## Quick Start
-
-```bash
-git clone https://github.com/02-dino/dinotrust
-cd dinotrust
-bash scripts/install.sh
-```
-
-Follow the prompts. Done in under a minute.
-
----
-
-## How do I know it's working?
-
-1. Check the injection landed:
-```bash
-grep "dinotrust begin" <your-agent-config-file>
-```
-
-2. Test as a non-owner: ask the agent to read a config file or run a shell command — it should refuse.
-
-3. Test as owner: send a message from your verified account — full access should work normally.
-
----
-
-## Install options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--platform NAME` | Interactive | Skip platform detection prompt |
-| `--owner-id IDS` | Interactive | Your platform user ID(s) — comma-separated for multiple owners (e.g. `123,456`). Scope to specific platform(s) with `id@platform` (e.g. `123@telegram`, `123@telegram+discord`); a bare id is owner on any platform. |
-| `--profile NAME` | Interactive | Preset: `private-assistant`, `market-analyst`, `custom` |
-| `--global` | Project-level | Inject into global config instead of project-level |
-| `--force` | — | Overwrite existing dinotrust block |
-| `--dry-run` | — | Preview what would be injected, no changes |
-
----
-
-## What gets installed
-
-```
-dinotrust/
-├── scripts/
-│   ├── install.sh       ← main installer
-│   ├── uninstall.sh     ← removes injected block
-│   └── update.sh        ← re-runs install with --force
-├── security_rules.md    ← the ruleset template (filled by installer)
-├── README.md
-├── CHANGELOG.md
-├── VERSION
-└── LICENSE
-```
-
-Nothing is copied to your workspace. The installer reads `security_rules.md`, fills placeholders, and appends the result to your agent's config file.
-
----
-
-## Supported platforms
-
-| Platform | Config file (project) | Config file (global) |
-|----------|----------------------|---------------------|
-| OpenClaw | `<workspace>/AGENTS.md` | — |
-| Hermes | `~/.hermes/SOUL.md` | — |
-| Claude Code | `./CLAUDE.md` | `~/.claude/CLAUDE.md` |
-| OpenAI Codex CLI | `./AGENTS.md` | `~/.codex/AGENTS.md` |
-| Goose | `./AGENTS.md` | — |
-| Cursor | `.cursor/rules/dinotrust.mdc` | — |
-| Windsurf | `.windsurfrules` | `global_rules.md` |
-| Continue.dev | `.continuerules` | — |
-| Aider | `CONVENTIONS.md` + `.aider.conf.yml` | — |
-
----
-
 ## Non-owner access is customizable
 
 Owner is all-or-nothing (full access). **Non-owner is where you tune the agent's public behavior** — it is not a fixed "deny everything" wall. At install you pick a profile, and a profile fills three knobs in the ruleset:
@@ -292,6 +275,23 @@ bash scripts/install.sh --profile custom
 **After install** — the injected block in your config file (`AGENTS.md`, `CLAUDE.md`, …) is plain text between `# --- dinotrust begin ---` / `# --- dinotrust end ---`. Edit the `allowed:` list, `deflection_message`, or `protected_resources` directly, then restart the agent. No re-install needed.
 
 Start from a preset, then trim or extend `allowed` to taste — e.g. a market bot that may also run a specific read-only tool but nothing else.
+
+---
+
+## Observability (audit layer)
+
+dinotrust core *enforces*. The optional [`observability/`](observability/) module
+*observes and reports* — an independent record of agent traffic and which
+reject-patterns (R1/R3/R4/R6/R7/S0) fired, delivered as a daily/weekly digest.
+Same zero-infra ethos: regex, no LLM; a language-neutral taxonomy
+(`patterns.json`) plus thin per-platform adapters.
+
+```bash
+bash observability/install.sh --report-target <chat-id>
+```
+
+See [`observability/README.md`](observability/README.md) for tiers, install
+flags, and the adapter contract.
 
 ---
 
