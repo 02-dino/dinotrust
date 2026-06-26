@@ -122,6 +122,25 @@ bash scripts/install.sh --owner-id "123456789,987654321"
 
 The rules store them as a set (`owner_ids`), and a sender is the owner if and only if their platform-injected ID is an exact member of that set. A single ID behaves exactly like single-owner mode — fully backward-compatible.
 
+**Platform-scoped owners**
+
+By default an owner ID grants owner on **every** platform the agent listens on. To bind an ID to specific platform(s), use `id@platform` (multiple platforms with `+`):
+
+```bash
+# Owner on Telegram only; on WhatsApp/Discord/etc. this same person is non-owner
+bash scripts/install.sh --owner-id "1083618205@telegram"
+
+# You as Telegram+WhatsApp owner, plus a teammate who is Discord-only owner
+bash scripts/install.sh --owner-id "1083618205@telegram+whatsapp, 555@discord"
+
+# Mixed: bare id = owner everywhere, scoped id = owner only where listed
+bash scripts/install.sh --owner-id "1083618205, 628123456789@whatsapp"
+```
+
+The ruleset matches: *sender is owner IFF (a bare owner_id equals the sender_id) OR (a scoped owner_id's id equals sender_id AND the inbound platform is in that entry's `platforms`).* The inbound platform comes from platform-injected metadata, never a chat claim.
+
+**Why this matters:** if you build the agent through one channel (say Telegram) and later connect it to a customer-facing channel (a WhatsApp VIP group), a Telegram-scoped owner ID keeps full owner control on Telegram while making you — and everyone — non-owner on WhatsApp. Without scoping you'd rely on the two platforms' ID formats never colliding, which is luck, not policy.
+
 > **⚠️ Each owner is a full-access account.** More owners means more accounts that, if compromised, grant the agent's full owner privileges. Add only IDs you trust at the same level as your own. There is no partial-owner tier — owner is all-or-nothing (use a profile preset if you need scoped non-owner access instead).
 
 ---
@@ -184,7 +203,7 @@ grep "dinotrust begin" <your-agent-config-file>
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--platform NAME` | Interactive | Skip platform detection prompt |
-| `--owner-id IDS` | Interactive | Your platform user ID(s) — comma-separated for multiple owners (e.g. `123,456`) |
+| `--owner-id IDS` | Interactive | Your platform user ID(s) — comma-separated for multiple owners (e.g. `123,456`). Scope to specific platform(s) with `id@platform` (e.g. `123@telegram`, `123@telegram+discord`); a bare id is owner on any platform. |
 | `--profile NAME` | Interactive | Preset: `private-assistant`, `market-analyst`, `custom` |
 | `--global` | Project-level | Inject into global config instead of project-level |
 | `--force` | — | Overwrite existing dinotrust block |

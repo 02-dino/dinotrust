@@ -62,7 +62,10 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --platform NAME     Platform: openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
-      echo "  --owner-id IDS      Your platform user ID(s); comma-separated for multiple owners"
+      echo "  --owner-id IDS      Your platform user ID(s); comma-separated for multiple owners."
+      echo "                      Scope an owner to specific platform(s) with id@platform"
+      echo "                      (e.g. 1083618205@telegram, or 123@telegram+discord). A bare"
+      echo "                      id is owner on any platform."
       echo "  --profile NAME      Preset: private-assistant|market-analyst|custom"
       echo "  --config PATH       Exact target config file (bypasses workspace auto-detect/prompt)"
       echo "  --workspace DIR     Target an OpenClaw workspace dir (uses DIR/AGENTS.md)"
@@ -341,13 +344,25 @@ fi
 
 [[ -z "$OPT_OWNER_ID" ]] && error "At least one owner ID is required."
 
-# Parse comma-separated owner IDs into a YAML inline list: [id1, id2, ...]
+# Parse comma-separated owner IDs into a YAML inline list.
+# Each entry may be a bare id (e.g. 123456789) → owner on ANY platform, OR a
+# platform-scoped id of the form id@platform[+platform2...] (e.g.
+# 1083618205@telegram) → owner ONLY on the listed platform(s). Scoped entries
+# render as an inline object {id: X, platforms: [a, b]}; bare entries render as
+# the bare id (fully backward-compatible).
 OWNER_IDS_YAML="["
 OWNER_ID_COUNT=0
 IFS=',' read -ra _OWNER_IDS <<< "$OPT_OWNER_ID"
-for _oid in "${_OWNER_IDS[@]}"; do
-  _oid="${_oid// /}"   # trim spaces
-  [[ -z "$_oid" ]] && continue
+for _entry in "${_OWNER_IDS[@]}"; do
+  _entry="${_entry// /}"   # trim spaces
+  [[ -z "$_entry" ]] && continue
+  if [[ "$_entry" == *"@"* ]]; then
+    _oid="${_entry%%@*}"
+    _plats="${_entry#*@}"
+  else
+    _oid="$_entry"
+    _plats=""
+  fi
   # Shape sanity check: most platform IDs are numeric (Telegram/Discord) or
   # UUID-ish (some platforms). Warn — never block — on anything else, since a
   # garbage/typo'd owner id silently grants no one (or the wrong one) access.
@@ -355,7 +370,23 @@ for _oid in "${_OWNER_IDS[@]}"; do
     warn "Owner ID '$_oid' doesn't look numeric or UUID-like — double-check it matches your platform's user ID, or the agent won't recognize you as owner."
   fi
   if [[ $OWNER_ID_COUNT -gt 0 ]]; then OWNER_IDS_YAML+=", "; fi
-  OWNER_IDS_YAML+="$_oid"
+  if [[ -n "$_plats" ]]; then
+    _plats_yaml="["
+    _pc=0
+    IFS='+' read -ra _PLAT_ARR <<< "$_plats"
+    for _p in "${_PLAT_ARR[@]}"; do
+      _p="${_p// /}"
+      [[ -z "$_p" ]] && continue
+      if [[ $_pc -gt 0 ]]; then _plats_yaml+=", "; fi
+      _plats_yaml+="$_p"
+      _pc=$((_pc + 1))
+    done
+    _plats_yaml+="]"
+    OWNER_IDS_YAML+="{id: $_oid, platforms: $_plats_yaml}"
+    info "Owner '$_oid' scoped to platform(s): $_plats_yaml"
+  else
+    OWNER_IDS_YAML+="$_oid"
+  fi
   OWNER_ID_COUNT=$((OWNER_ID_COUNT + 1))
 done
 OWNER_IDS_YAML+="]"

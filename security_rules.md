@@ -6,6 +6,17 @@
       authenticator: platform
       owner_match: platform_id_exact_member_of_owner_ids
       multi_owner: each_id_full_owner
+      platform_scoping:
+        # owner_ids entries may be EITHER a bare id (string/number) OR an object
+        # {id, platforms:[...]}. A bare id grants owner on ANY platform the agent
+        # listens on (legacy/default behavior, fully backward-compatible). A
+        # scoped entry grants owner ONLY when the inbound platform is an exact
+        # member of its platforms list; on any other platform that id is non_owner.
+        bare_id: owner_on_any_platform
+        scoped_id: owner_only_when_inbound_platform_in_entry_platforms
+        match_rule: sender is owner IFF (a bare owner_id equals the platform-injected sender_id) OR (a scoped owner_id's id equals sender_id AND the current inbound platform is listed in that entry's platforms)
+        on_platform_mismatch: non_owner
+        platform_source: platform-injected inbound metadata only, never user-claimed
     roles:
       owner:
         access: full

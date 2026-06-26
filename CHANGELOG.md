@@ -4,6 +4,29 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.15.0] — 2026-06-26
+
+### Added
+- **Platform-scoped owners.** `owner_ids` entries may now be bound to specific
+  platform(s). Pass `--owner-id id@platform` (or `id@platform1+platform2`) and
+  that ID grants owner ONLY when the inbound platform matches; on any other
+  platform it is non-owner. A bare id keeps the previous behavior (owner on any
+  platform) — fully backward-compatible.
+  - Installer parses `id@platform` into an inline YAML object
+    `{id: X, platforms: [...]}`; bare ids still render as bare ids.
+  - Ruleset (`security_rules.md`) gains a `platform_scoping` block under
+    `who_is_owner.detection` defining the match rule: sender is owner IFF a bare
+    owner_id equals the sender_id, OR a scoped owner_id's id equals the sender_id
+    AND the inbound platform is in that entry's `platforms`.
+  - Use case: build the agent on one channel (e.g. Telegram) and connect it to a
+    customer-facing channel (e.g. a WhatsApp VIP group) without granting owner
+    powers there — previously this relied on cross-platform ID formats never
+    colliding rather than explicit policy.
+- README: worked Telegram+WhatsApp scoping examples and updated `--owner-id` flag
+  documentation.
+
+---
+
 ## [1.14.0] — 2026-06-25
 
 ### Added
