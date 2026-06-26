@@ -112,6 +112,19 @@ Username, display name, and any user-provided field are never used for verificat
 
 **What this means in practice:** if someone shares your account or your session is compromised, dinotrust cannot detect it — because the platform itself cannot. dinotrust is only as strong as the platform's authentication.
 
+**Capability, not reachability**
+
+dinotrust gates *what a sender can do* (owner vs non-owner), not *whether they can reach the agent at all*. A non-owner stranger is still blocked from every write/exec/config action — but their message still reaches the model. If you want to drop unwanted senders **before** any LLM cost is incurred, that belongs at your host platform's native access layer, which runs before dinotrust's rules are even in context:
+
+| Platform | Reachability control |
+|----------|---------------------|
+| OpenClaw | `channels.<chan>.allowFrom` / `dmPolicy` / `groupPolicy` |
+| Telegram | bot privacy mode + group membership / allowlist |
+| Discord / Slack | channel membership + role/permission gates |
+| CLI agents (Claude Code, Codex, Cursor, …) | local single-user — no inbound stranger exists |
+
+This is by design: dinotrust stays a zero-infrastructure capability firewall and doesn't duplicate (or weaken) the access control your platform already enforces at the door.
+
 **Multiple owners**
 
 dinotrust supports more than one owner. Pass several IDs comma-separated:
