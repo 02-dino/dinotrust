@@ -4,6 +4,31 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.16.0] — 2026-06-26
+
+### Added
+- **Post-install feature discovery.** The installer's success output was purely
+  operational (platform / config / owner / profile / restart) and never told the
+  user about the advanced surface they just gained — a real UX gap given how fast
+  and seamless install is. `scripts/install.sh` now prints, after a successful
+  install:
+  - A short "you can tune this anytime" block naming the three customizable knobs
+    (`non_owner_rules.allowed`, `deflection_message`, `protected_resources`),
+    where they live (between the `# --- dinotrust begin/end ---` markers), and
+    that `--profile custom` sets them interactively.
+  - A profile-aware nudge: if the chosen profile is `private-assistant`, it notes
+    non-owners get no access and suggests `market-analyst`/`custom` for
+    public/group channels.
+
+### Changed
+- **Observability skip message is now self-explaining.** Declining the optional
+  observability step previously printed a terse one-liner. It now briefly says
+  what observability is (daily/weekly digest of injection attempts + which
+  reject-patterns fired), confirms core enforcement is fully active without it,
+  and shows the exact re-run command.
+
+---
+
 ## [1.15.0] — 2026-06-26
 
 ### Added

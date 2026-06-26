@@ -639,6 +639,23 @@ echo "Verify:"
 echo "  grep 'dinotrust begin' \"$CONFIG_FILE\""
 echo ""
 
+# ── Post-install feature discovery ───────────────────────────────────
+# Install is intentionally fast/seamless — but that means users often never
+# learn the advanced surface. Surface it here, briefly, without adding friction.
+echo "You can tune this anytime — the rules are plain text in your config file:"
+echo "  • What non-owners may do  — edit the 'allowed:' list under non_owner_rules"
+echo "  • The refusal message     — edit 'deflection_message'"
+echo "  • Off-limits files        — edit 'protected_resources'"
+echo "  Edit between the '# --- dinotrust begin/end ---' markers, then restart."
+echo "  Or re-run with --profile custom to set them interactively."
+echo ""
+if [[ "$OPT_PROFILE" == "private-assistant" ]]; then
+  echo "  (Current profile 'private-assistant': non-owners get NO access. If this"
+  echo "   agent will face a public/group channel, consider 'market-analyst' or"
+  echo "   'custom' so non-owners get a scoped, useful surface.)"
+  echo ""
+fi
+
 # ── Optional chain: observability audit layer ────────────────────────────────
 # Core (enforcement) is now installed. Observability (the audit layer) is a
 # SEPARATE, opt-out step. We chain it by default for interactive humans, never
@@ -708,7 +725,13 @@ chain_observability() {
     read -rp "> " _ans
     [[ -z "$_ans" || "$_ans" =~ ^[Yy]$ ]] && _run=true
   fi
-  [[ "$_run" == "true" ]] || { info "Skipped observability. Install later: bash scripts/install.sh --with-observability --report-target <id>"; return 0; }
+  if [[ "$_run" != "true" ]]; then
+    info "Skipped observability (the optional audit layer — a daily/weekly digest"
+    info "of injection attempts + which reject-patterns fired). Core enforcement is"
+    info "fully active without it. Add it anytime:"
+    info "  bash scripts/install.sh --with-observability --report-target <chat-id>"
+    return 0
+  fi
 
   # ── Platform routing ──
   case "$OPT_PLATFORM" in
