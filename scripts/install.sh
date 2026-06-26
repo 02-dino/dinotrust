@@ -298,7 +298,7 @@ id_discovery_hint() {
   case "$_platform" in
     openclaw|telegram)
       if [[ "$_what" == "owner" ]]; then
-        echo "Telegram: send /start to @userinfobot, or check Settings → Advanced → copy numeric ID"
+        echo "Telegram: send /start to @userinfobot (it replies with your numeric ID), or use @RawDataBot"
       else
         echo "Telegram: your chat ID is the number @userinfobot replies with, or the channel ID (starts with -100)"
       fi

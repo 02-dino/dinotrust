@@ -4,6 +4,21 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.16.1] — 2026-06-26
+
+### Fixed
+- **Wrong Telegram ID-discovery instructions.** Both the installer hint
+  (`id_discovery_hint`) and the README Prerequisites told users to find their
+  numeric ID via "Settings → Advanced → copy numeric ID" — a path that does not
+  exist in stock Telegram. Corrected to the reliable method: message
+  `@userinfobot` (or `@RawDataBot`), which replies with the numeric ID.
+- **README Prerequisites only covered 2 platforms** and drifted from the
+  installer's own per-platform hints. Now lists correct Telegram/Discord/Slack
+  methods and points to the installer's interactive, platform-specific prompt as
+  the source of truth (so the README no longer maintains a drift-prone copy).
+
+---
+
 ## [1.16.0] — 2026-06-26
 
 ### Added

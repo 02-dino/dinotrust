@@ -53,7 +53,10 @@ The injected block is clearly marked with `# --- dinotrust begin ---` / `# --- d
 
 - Bash 4+
 - One of the supported AI agent platforms installed and configured
-- Your platform user ID (Telegram: Settings → Advanced → copy numeric ID; Discord: Developer Mode → right-click username → Copy ID)
+- Your platform user ID — the installer prompts for it and shows how to find it for your specific platform. The common ones:
+  - **Telegram**: send `/start` to [@userinfobot](https://t.me/userinfobot) (or `@RawDataBot`) — it replies with your numeric ID
+  - **Discord**: enable Developer Mode (Settings → Advanced), then right-click your own name → Copy User ID
+  - **Slack**: open your profile → **More** → Copy member ID (starts with `U`)
 
 ---
 
