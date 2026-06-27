@@ -21,9 +21,10 @@
 
 import fs from "node:fs/promises";
 
-export type Pattern = { id: string; regex: string; rule_id: string; severity: string; flags?: string };
-export type CompiledPattern = { id: string; re: RegExp; rule_id: string; severity: string };
+export type Pattern = { id: string; regex: string; rule_id: string; severity: string; flags?: string; direction?: string };
+export type CompiledPattern = { id: string; re: RegExp; rule_id: string; severity: string; direction: "in" | "out" };
 export type Hit = { id: string; rule_id: string; severity: string };
+export type Direction = "in" | "out";
 export type Privacy = "patterns-only" | "truncated" | "full";
 
 export const SEV_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
@@ -40,7 +41,10 @@ export function topSeverity(hits: Hit[]): string {
 }
 
 export interface Detector {
-  detect(content: string): Promise<Hit[]>;
+  // direction defaults to "in" (inbound) for backward compatibility. Outbound
+  // (secret-shape) detection: pass "out". Patterns are scoped by direction and
+  // never cross-applied.
+  detect(content: string, direction?: Direction): Promise<Hit[]>;
   privacyContent(content: string): string | null;
   topSeverity(hits: Hit[]): string;
 }
@@ -62,6 +66,8 @@ export function makeDetector(patternsFile: string, privacy: Privacy, truncateLen
         re: new RegExp(p.regex, p.flags ?? "i"),
         rule_id: p.rule_id,
         severity: p.severity,
+        // No 'direction' field => inbound (historic default). 'out' => outbound only.
+        direction: (p.direction === "out" ? "out" : "in") as Direction,
       }));
     } catch {
       compiled = []; // fail open
@@ -70,10 +76,11 @@ export function makeDetector(patternsFile: string, privacy: Privacy, truncateLen
   }
 
   return {
-    async detect(content: string): Promise<Hit[]> {
+    async detect(content: string, direction: Direction = "in"): Promise<Hit[]> {
       const pats = await loadPatterns();
       const hits: Hit[] = [];
       for (const p of pats) {
+        if (p.direction !== direction) continue;
         if (p.re.test(content)) hits.push({ id: p.id, rule_id: p.rule_id, severity: p.severity });
       }
       return hits;

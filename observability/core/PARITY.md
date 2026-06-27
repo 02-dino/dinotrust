@@ -12,8 +12,11 @@ rather than importing `core/`. This is deliberate, not a fork.
 ## What MUST stay identical between `core/` and the OpenClaw hook
 
 - Pattern loading: read `patterns.json`, compile `{id, regex, rule_id,
-  severity, flags?}`, default flag `i`, **fail open** (empty set) on error.
-- `detect`: substring/regex test, return hits with `{id, rule_id, severity}`.
+  severity, flags?, direction?}`, default flag `i`, **fail open** (empty set) on
+  error. A missing `direction` field compiles to `"in"`; `"out"` stays `"out"`.
+- `detect`: substring/regex test **scoped by direction** (inbound patterns only
+  on inbound content, outbound only on outbound content — never cross-applied),
+  return hits with `{id, rule_id, severity}`.
 - `topSeverity`: rank `critical=4, high=3, medium=2, low=1`, default `low`.
 - `privacyContent`: `patterns-only -> null`, `truncated -> slice(0,200)`,
   `full -> raw`.

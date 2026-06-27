@@ -34,8 +34,8 @@ const PRIVACY = "__PRIVACY__"; // patterns-only | truncated | full
 
 const TRUNCATE_LEN = 200;
 
-type Pattern = { id: string; regex: string; rule_id: string; severity: string; flags?: string };
-type CompiledPattern = { id: string; re: RegExp; rule_id: string; severity: string };
+type Pattern = { id: string; regex: string; rule_id: string; severity: string; flags?: string; direction?: string };
+type CompiledPattern = { id: string; re: RegExp; rule_id: string; severity: string; direction: "in" | "out" };
 type Hit = { id: string; rule_id: string; severity: string };
 
 let COMPILED: CompiledPattern[] | null = null;
@@ -51,6 +51,8 @@ async function loadPatterns(): Promise<CompiledPattern[]> {
       re: new RegExp(p.regex, p.flags ?? "i"),
       rule_id: p.rule_id,
       severity: p.severity,
+      // No 'direction' field => inbound (historic default). 'out' => outbound only.
+      direction: (p.direction === "out" ? "out" : "in") as "in" | "out",
     }));
   } catch {
     COMPILED = []; // fail open: never disrupt message flow if patterns missing
@@ -58,10 +60,13 @@ async function loadPatterns(): Promise<CompiledPattern[]> {
   return COMPILED;
 }
 
-async function detect(content: string): Promise<Hit[]> {
+// Direction-scoped detection: inbound patterns run on user messages, outbound
+// (secret-shape) patterns run on the agent's own sent messages. Never cross-applied.
+async function detect(content: string, direction: "in" | "out"): Promise<Hit[]> {
   const compiled = await loadPatterns();
   const hits: Hit[] = [];
   for (const p of compiled) {
+    if (p.direction !== direction) continue;
     if (p.re.test(content)) hits.push({ id: p.id, rule_id: p.rule_id, severity: p.severity });
   }
   return hits;
@@ -118,8 +123,8 @@ const handler = async (event: any) => {
       content,
     });
 
-    // Injection heuristic check on inbound only (no LLM).
-    const hits = await detect(content);
+    // Injection heuristic check on inbound (no LLM).
+    const hits = await detect(content, "in");
     if (hits.length > 0) {
       const jbLine = JSON.stringify({
         timestamp: ts,
@@ -146,15 +151,46 @@ const handler = async (event: any) => {
   } else if (event?.type === "message" && event?.action === "sent") {
     const content = String(ctx.content ?? "");
     if (!content) return;
+    const ts = new Date().toISOString();
     line = JSON.stringify({
       direction: "out",
-      timestamp: new Date().toISOString(),
+      timestamp: ts,
       channelId: ctx.channelId ?? "unknown",
       to: ctx.to ?? null,
       sessionKey,
       content,
       success: ctx.success ?? null,
     });
+
+    // Outbound secret-shape check (verifier for S0_OUT self-gate). This hook is a
+    // producer/observer: 'sent' fires post-delivery, so it ALERTS, it does not
+    // redact. A critical hit here means a secret-shaped value left the channel
+    // despite the composition-time self-gate — evidence-backed, agent-independent.
+    const outHits = await detect(content, "out");
+    if (outHits.length > 0) {
+      const jbLine = JSON.stringify({
+        timestamp: ts,
+        senderId: null,
+        senderName: null,
+        channelId: ctx.channelId ?? "unknown",
+        isGroup: null,
+        conversationId: ctx.conversationId ?? null,
+        messageId: ctx.messageId ?? null,
+        patterns: outHits.map((h) => h.id),
+        rule_ids: [...new Set(outHits.map((h) => h.rule_id))],
+        severity: topSeverity(outHits),
+        hits: outHits,
+        content: privacyContent(content),
+        producer: "code-hook",
+        direction: "out",
+      });
+      try {
+        await fs.mkdir(path.dirname(JAILBREAK_LOG), { recursive: true });
+        await fs.appendFile(JAILBREAK_LOG, jbLine + "\n");
+      } catch {
+        // Silent: never disrupt message flow
+      }
+    }
   }
 
   if (!line) return;

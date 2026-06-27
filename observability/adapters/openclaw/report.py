@@ -244,19 +244,37 @@ def main():
             lines.append(f"Severity: {sevline}")
         rl = ", ".join(f"{rid}:{c}" for rid, c in jb_rules.most_common())
         lines.append(f"Rules: {rl}")
+        # Outbound secret-egress is the agent's own message leaking a secret-shaped
+        # value (verifier for the S0_outbound_self_gate self-redaction clause), not
+        # a user attack. Call it out separately so it is not mislabeled by-sender.
+        egress = [r for r in jb if r.get("direction") == "out"]
+        if egress:
+            lines.append(
+                f"\U0001f534 Outbound secret-egress: {len(egress)} — "
+                "secret-shaped value left the channel despite the S0 self-gate (investigate)"
+            )
         usr = ", ".join(
             f"{render_mention(jb_id_to_name.get(uid, uid), uid)}:{c}"
             for uid, c in jb_users.most_common(5)
         )
         lines.append(f"By sender: {usr}")
         # Samples honor the producer's privacy level: 'content' may be null
-        # (patterns-only) or truncated. We render what's present, nothing more.
-        sample_rows = [r for r in jb if r.get("content")]
+        # (patterns-only) or truncated. We further gate by severity: only
+        # high/critical hits are worth quoting back into a digest that may land
+        # in a shared channel. Low/medium are usually keyword false-positives
+        # (e.g. someone discussing the ruleset), so echoing their raw content is
+        # noise and a needless privacy leak — we show the count, not the text.
+        SAMPLE_SEV = {"critical", "high"}
+        sample_rows = [
+            r for r in jb
+            if r.get("content") and r.get("severity") in SAMPLE_SEV
+        ]
         if sample_rows:
-            lines.append("Samples:")
+            lines.append("Samples (high/critical only):")
             for r in sample_rows[:3]:
                 who = r.get("senderName") or r.get("senderId") or "?"
-                snip = str(r.get("content", "")).replace("\n", " ")[:120]
+                raw = str(r.get("content", "")).replace("\n", " ").strip()
+                snip = raw[:120] + ("\u2026" if len(raw) > 120 else "")
                 lines.append(f"  \u2022 [{who}] {snip}")
 
     report = "\n".join(lines)

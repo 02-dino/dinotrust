@@ -19,8 +19,9 @@ schema**, so the digest tooling is identical.
 ## How it works
 
 1. **`security_rules.md` carries the audit clause** (`audit.A1_reject_pattern_audit`,
-   shipped in dinotrust core): on detecting any reject-pattern (R1–R7 / S0)
-   match, the agent appends one audit line naming the `rule_id` to its audit log.
+   shipped in dinotrust core): on detecting any reject-pattern (R1–R7 / S0 /
+   S0_outbound_self_gate) match, the agent appends one audit line naming the
+   `rule_id` to its audit log.
 2. The agent writes that line in `audit-schema.json` shape with
    `producer: "self-audit"`.
 3. **`report.py` (Tier-1 consumer) reads it unchanged** — same schema, same
@@ -37,6 +38,13 @@ schema**, so the digest tooling is identical.
   none*.
 - ⚠️ **Outbound + full traffic telemetry is not available** (no tap). Tier-3
   digests cover flagged reject-pattern self-reports only.
+- ℹ️ **Outbound secret protection still applies here — as prevention, not
+  verification.** The `S0_outbound_self_gate` clause runs at composition time
+  (it is `.md`, not a hook), so on T3 the agent self-redacts secret-shaped
+  output *before* sending. There is no independent hook to verify the gate held
+  (that is the T1/T2 verifier), so the same compliance caveat applies: redaction
+  happens iff the agent complies. T3 gets the prevention layer for free, not the
+  verification layer.
 
 ## Setup
 

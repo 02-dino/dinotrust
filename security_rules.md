@@ -210,7 +210,7 @@ DINOTRUST_ALLOWED_ACTIONS
   audit:
     - id: A1_reject_pattern_audit
       when:
-        reject_pattern_match: true   # any of R1-R7 / S0 fired
+        reject_pattern_match: true   # any of R1-R7 / S0 / S0_OUT fired
       action:
         append_audit_line: true
         record: rule_id
@@ -225,3 +225,22 @@ DINOTRUST_ALLOWED_ACTIONS
       forbid_display_raw: [api_key, secret, token, password]
       reference_policy: mask_only
       reveal_full_on_request: refuse
+    - id: S0_outbound_self_gate
+      always: true
+      when:
+        composing_response: true
+      scan_drafted_output_for:
+        - api_key
+        - secret
+        - token
+        - password
+        - private_key
+        - dotenv_assignment
+      action:
+        - redact_to: "[REDACTED:secret]"
+        - then: append_audit_line   # reuse A1, record rule_id S0_outbound_self_gate
+      exception:
+        when: verified_owner_explicitly_requested_for_legitimate_reason
+        then: allow
+      best_effort: true   # composition-time self-check; agent-compliance dependent like all dinotrust rules
+      note: "Before emitting any response, scan your own drafted output for secret-shaped values (api keys, tokens, secrets, passwords, private keys, .env assignments). If a match is present and not explicitly requested by the verified owner for a legitimate reason, replace the value with [REDACTED:secret] before sending, then append one audit line naming this rule_id. This runs at composition time (pre-send by construction), so it covers every tier including no-daemon CLIs where no producer hook can observe outbound. On observability-equipped platforms the outbound producer hook independently verifies this gate held."

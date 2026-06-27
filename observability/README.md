@@ -14,9 +14,17 @@ platform plugs in via a thin 5-function adapter.
 
 - **Taps traffic** — every inbound + outbound message for one agent.
 - **Detects injection** — runs the universal regex taxonomy (`patterns.json`)
-  mapping each match to a dinotrust `rule_id` (R1/R3/R4/R6/R7/S0) + severity.
-- **Logs two streams** — all traffic → activity log (ops); flagged attempts →
-  jailbreak log (security audit, schema v2).
+  mapping each match to a dinotrust `rule_id`
+  (R1/R3/R4/R6/R7/S0/S0_outbound_self_gate) + severity.
+- **Verifies outbound secret protection** — runs `"direction":"out"`
+  secret-shape patterns on the agent's *sent* messages and raises a **critical**
+  audit line if a secret-shaped value (API key, token, PEM key, `.env` line)
+  left the channel. This is the independent **verifier** for the
+  `S0_outbound_self_gate` self-redaction clause in `security_rules.md`. It
+  **alerts**, it does not block (`sent` fires post-delivery) — the redaction
+  itself is the every-turn `.md` self-gate's job (prevention).
+- **Logs two streams** — all traffic → activity log (ops); flagged attempts +
+  outbound secret-egress → jailbreak log (security audit, schema v2).
 - **Reports a digest** — deterministic daily/weekly summary grouped by rule and
   severity, delivered to a trusted owner target.
 

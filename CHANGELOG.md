@@ -4,6 +4,45 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.18.0] — 2026-06-27
+
+### Added
+- **Outbound secret protection (S0_outbound_self_gate).** Extends S0 from
+  refuse-to-reveal (inbound requests) to actually catching secret-shaped
+  *values* leaving the channel. Two complementary layers, one rule:
+  - **Prevention — every-turn `.md` (all tiers, incl. no-daemon CLIs).** New
+    `S0_outbound_self_gate` clause in `security_rules.md` has the agent scan its
+    own drafted output *at composition time* and replace secret-shaped values
+    (`sk-`, `ghp_`/`github_pat_`, AWS `AKIA`/`ASIA`, Slack `xox*`, PEM private
+    keys, `.env` `KEY=value` lines) with `[REDACTED:secret]` **before** the
+    message is sent. Pre-send by construction, so it is the only layer that can
+    truly redact and the only one that reaches T3 CLIs. Best-effort
+    (agent-compliance-dependent) like every dinotrust rule. Owner may still
+    request a secret explicitly for a legitimate reason.
+  - **Verification — observability producer hook (T1/T2).** `patterns.json`
+    gains six `"direction":"out"` critical secret-shape patterns; the OpenClaw
+    adapter runs them on the `sent` event and emits a **critical**,
+    evidence-backed audit line if a secret-shaped value still left — an
+    independent, agent-compliance-*independent* check that the self-gate held.
+    The hook is a producer/observer (`sent` fires post-delivery): it **alerts**,
+    it does not mutate or block. Digest now surfaces an **Outbound
+    secret-egress** callout distinct from user attacks.
+- **Direction-scoped detection.** Patterns without a `direction` field are
+  inbound (historic default); `"out"` is outbound. Inbound and outbound patterns
+  are never cross-applied. Applied in lockstep to `core/detector.ts` (T2) and
+  the inlined OpenClaw hook (parity preserved; `core/PARITY.md` updated).
+
+### Notes
+- **Roadmap, not claimed:** hook-layer *hard pre-send block/redact* requires the
+  host to expose a mutating/blocking pre-send hook. OpenClaw currently exposes
+  only a post-delivery `sent` event, so hook-level redaction is an upstream
+  dependency. README/ADAPTER docs scope the claim honestly: `.md` self-gate
+  redacts (prevention), the hook alerts (verification).
+- No installer/seamlessness change: detection stays fail-open and observe-only;
+  the `.md` self-gate is injected text, no message-flow mutation.
+
+---
+
 ## [1.17.0] — 2026-06-26
 
 ### Added

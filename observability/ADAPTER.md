@@ -30,13 +30,43 @@ signal dinotrust's `security_rules.md` uses.
 ## Core vs adapter (what you may NOT change)
 
 - **`patterns.json` is the spine.** Each regex maps to a `rule_id` (exact IDs
-  from `security_rules.md`: R1, R3, R4, R6, R7, S0) + a severity tier. Adapters
-  load it as-is; they never redefine patterns or severities.
+  from `security_rules.md`: R1, R3, R4, R6, R7, S0, S0_outbound_self_gate) + a
+  severity tier + an optional `direction` (`out` = outbound; absent = inbound).
+  Adapters load it as-is; they never redefine patterns, severities, or direction.
 - **`audit-schema.json` is the event contract.** Every adapter emits the same
   JSONL line shape so digests and downstream tooling are platform-agnostic.
 - **`R2_external_instructions` and `T1_config_conflict` are agent-judged, not
   regex-detectable** by design — declared under `_meta.agent_judged_only` in
   `patterns.json`. Adapters do not attempt to regex these.
+- **Direction is part of the spine.** A pattern with no `direction` field is
+  **inbound** (user message — the historic default); `"direction":"out"` is
+  **outbound** (the agent's own sent message). Adapters run inbound patterns on
+  the inbound tap and outbound patterns on the outbound tap, and **never**
+  cross-apply. Outbound patterns detect secret-shaped *values* leaving the
+  channel (`S0_outbound_self_gate`), not requests.
+
+## Secret protection: prevention vs verification (two layers, one rule)
+
+`S0_outbound_self_gate` is enforced in **two complementary places**, by design:
+
+- **Prevention — the every-turn `.md` (all tiers, incl. T3 CLIs).** The
+  `security_rules.md` clause `S0_outbound_self_gate` has the agent scan its own
+  drafted output *at composition time* and replace secret-shaped values with
+  `[REDACTED:secret]` **before** the message exists. This is pre-send by
+  construction, so it is the only layer that can actually *redact*, and the only
+  one that reaches no-daemon CLIs. Like every dinotrust rule it is
+  agent-compliance-dependent (best-effort).
+- **Verification — the producer hook (T1/T2 only).** The adapter runs the
+  outbound patterns on the *sent* event and emits a **critical** audit line if a
+  secret-shaped value still left. The hook is a **producer/observer**: `sent`
+  fires post-delivery, so it **alerts** (evidence-backed, agent-independent) —
+  it does **not** mutate or block. It is the independent check that the
+  composition-time self-gate held.
+
+**Roadmap (not claimed today):** a hard *pre-send block/redact* at the hook
+layer requires the host to expose a **mutating/blocking pre-send hook**.
+OpenClaw's current hook only exposes a post-delivery `sent` event, so hook-level
+redaction is an upstream dependency, not shipped. Do not document it as present.
 - **Digest logic is universal** (windowing, grouping by `rule_id` + severity,
   counts, worst-severity headline). Only `deliver` + `renderMention` are
   platform-specific. See `DIGEST.md`.

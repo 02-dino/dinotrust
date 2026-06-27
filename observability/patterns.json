@@ -13,8 +13,9 @@
       "medium": "Manipulation attempt: roleplay, pretend, coercion, encoded payload. Suspicious, not yet a hard breach.",
       "low": "Lone keyword or bare reference. Weak signal; could be benign discussion."
     },
-    "rule_id_source": "dinotrust security_rules.md (R1-R7, S0, T1)",
-    "agent_judged_only": ["R2_external_instructions", "T1_config_conflict"]
+    "rule_id_source": "dinotrust security_rules.md (R1-R7, S0, S0_OUT, T1)",
+    "agent_judged_only": ["R2_external_instructions", "T1_config_conflict"],
+    "direction": "Patterns omitting a 'direction' field match INBOUND (user message) only — the historic default. Patterns with 'direction':'out' match OUTBOUND (the agent's own sent message) and detect secret-shaped VALUES leaving the channel, not requests. The OpenClaw/daemon hook runs inbound patterns on preprocessed events and outbound patterns on sent events; it never cross-applies. Outbound hits are a VERIFIER for the S0_outbound_self_gate clause in security_rules.md — they alert (evidence-backed, agent-compliance-independent) if a secret-shaped value still left after the agent's composition-time self-redaction. The hook does not mutate or block (sent fires post-delivery); redaction is the .md self-gate's job."
   },
   "patterns": [
     { "id": "ignore_instructions", "regex": "ignore (all |the )?(previous|prior|above) (instructions|prompts?|rules)", "rule_id": "R1_override_claims", "severity": "high", "flags": "i" },
@@ -32,6 +33,13 @@
     { "id": "system_prompt_ref", "regex": "\\bsystem prompt\\b", "rule_id": "R6_config_access_external", "severity": "low", "flags": "i" },
     { "id": "reveal_secret", "regex": "(reveal|show|print|echo|expose|dump|leak|give) (me |us |)(your |the )?(api[_ ]?key|secret|token|password|credential|\\.env)", "rule_id": "S0_security_directive", "severity": "critical", "flags": "i" },
     { "id": "ownership_claim", "regex": "i am (the |your )?(owner|admin|developer|creator)", "rule_id": "R7_ownership_claim", "severity": "high", "flags": "i" },
-    { "id": "encoded_payload", "regex": "base64|rot13|decode this|hex decode", "rule_id": "R3_encoded_execution", "severity": "medium", "flags": "i" }
+    { "id": "encoded_payload", "regex": "base64|rot13|decode this|hex decode", "rule_id": "R3_encoded_execution", "severity": "medium", "flags": "i" },
+
+    { "id": "out_openai_key", "regex": "\\bsk-(proj-)?[A-Za-z0-9_-]{20,}", "rule_id": "S0_outbound_self_gate", "severity": "critical", "flags": "", "direction": "out" },
+    { "id": "out_github_pat", "regex": "\\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\\b|\\bgithub_pat_[A-Za-z0-9_]{22,}", "rule_id": "S0_outbound_self_gate", "severity": "critical", "flags": "", "direction": "out" },
+    { "id": "out_aws_akid", "regex": "\\b(AKIA|ASIA)[A-Z0-9]{16}\\b", "rule_id": "S0_outbound_self_gate", "severity": "critical", "flags": "", "direction": "out" },
+    { "id": "out_slack_token", "regex": "\\bxox[baprs]-[A-Za-z0-9-]{10,}", "rule_id": "S0_outbound_self_gate", "severity": "critical", "flags": "", "direction": "out" },
+    { "id": "out_private_key_block", "regex": "-----BEGIN [A-Z ]*PRIVATE KEY-----", "rule_id": "S0_outbound_self_gate", "severity": "critical", "flags": "", "direction": "out" },
+    { "id": "out_dotenv_secret", "regex": "^\\s*[A-Za-z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|PASSWD|API)[A-Za-z0-9_]*\\s*=\\s*\\S{8,}", "rule_id": "S0_outbound_self_gate", "severity": "critical", "flags": "im", "direction": "out" }
   ]
 }
