@@ -223,6 +223,11 @@ def main():
             f"{render_mention(id_to_name.get(uid, uid), uid)}:{c}"
             for uid, c in users.most_common(5)
         )
+        # Named list is capped at top-5; reconcile with the Unique count so the
+        # line doesn't silently look like the whole population at scale.
+        extra = len(users) - 5
+        if extra > 0:
+            top += f" (+{extra} more)"
         lines.append(f"Top: {top}")
     lines.append(f"Avg reply length: {avg_out} chars")
     if fails:
@@ -257,6 +262,9 @@ def main():
             f"{render_mention(jb_id_to_name.get(uid, uid), uid)}:{c}"
             for uid, c in jb_users.most_common(5)
         )
+        jb_extra = len(jb_users) - 5
+        if jb_extra > 0:
+            usr += f" (+{jb_extra} more)"
         lines.append(f"By sender: {usr}")
         # Samples honor the producer's privacy level: 'content' may be null
         # (patterns-only) or truncated. We further gate by severity: only
@@ -278,6 +286,21 @@ def main():
                 lines.append(f"  \u2022 [{who}] {snip}")
 
     report = "\n".join(lines)
+
+    # Belt-and-suspenders: the digest is structurally bounded well under common
+    # channel limits (~4096 on Telegram) — every section aggregates, nothing
+    # enumerates per-event (Top/By-sender capped at 5, Samples at 3, Rules bounded
+    # by the finite taxonomy). This is a final safety net only: hard-cap before
+    # send so an unforeseen long field can never bounce the whole report. Cuts on
+    # a line boundary when possible.
+    MAX_CHARS = 4000
+    if len(report) > MAX_CHARS:
+        marker = "\n…[truncated]"
+        cut = report[: MAX_CHARS - len(marker)]
+        nl = cut.rfind("\n")
+        if nl > MAX_CHARS // 2:
+            cut = cut[:nl]
+        report = cut + marker
 
     if args.dry_run:
         print(report)

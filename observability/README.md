@@ -142,6 +142,7 @@ never clobbered) with a PATH that includes Homebrew bin.
 | `adapters/openclaw/handler.ts` | Tier-1 OpenClaw producer hook (self-contained TS). |
 | `adapters/hermes/` | Tier-1 Hermes producer hook (`HOOK.yaml`+`handler.py`, Python). |
 | `adapters/openclaw/report.py` | Consumer (digest + delivery; env-overridable, serves all tiers). |
+| `adapters/openclaw/log-rotate.sh` | Optional bounded log rotation (cap + gzip-archive + prune); run before the report cron at scale. |
 | `adapters/_template/daemon-adapter.ts` | Tier-2 daemon adapter template. |
 | `adapters/discord/tap.ts` | Tier-2 working Discord reference adapter. |
 | `adapters/slack/tap.ts` | Tier-2 working Slack reference adapter (Bolt SDK). |

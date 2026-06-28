@@ -4,6 +4,35 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.18.1] — 2026-06-28
+
+### Added
+- **Digest scale-safety (report.py).** The daily/weekly digest is now bounded by
+  design *and* by backstop:
+  - **`+N more` users.** `Top:` and `By sender:` are capped at top-5; they now
+    append `(+N more)` when more senders exist, so the named list reconciles with
+    the `Unique users` count instead of silently looking like the whole
+    population at scale.
+  - **4000-char hard cap.** Final safety net before send — the digest is already
+    structurally bounded (every section aggregates; nothing enumerates per-event;
+    Samples capped at 3, Rules bounded by the finite 9-id taxonomy), but an
+    unforeseen long field can no longer bounce the whole report. Cuts on a line
+    boundary and appends `…[truncated]`.
+- **Optional log rotation** (`adapters/openclaw/log-rotate.sh`). Caps each
+  activity/jailbreak log at `MAX_BYTES` (default 10 MB); when exceeded it
+  gzip-archives with a timestamp, truncates the live file in place (producer
+  keeps writing — same inode), and keeps the newest `KEEP` archives. Deployment
+  convenience for hooked installs (report.py reads the whole log then
+  window-filters, so unbounded logs slow reports + grow disk at scale). Run it
+  before the report cron. T3 self-audit logs are tiny and usually don't need it.
+
+### Notes
+- These were running on a live deployment since 2026-06-27; this release ports
+  them back into the shipped generic adapter so every install gets scale-safety,
+  not just the customized deployment.
+
+---
+
 ## [1.18.0] — 2026-06-27
 
 ### Added
