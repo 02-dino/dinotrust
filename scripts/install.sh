@@ -539,6 +539,7 @@ else
     warn "  Verify your agent actually reads the full 'dinotrust begin..end' block (ask it to quote a rule near the end), and trim the file if it doesn't."
   else
     success "Instruction file: ~${PROJECTED_CHARS} chars after injection — reasonable size."
+    info "  Note: $OPT_PLATFORM has no configurable per-file cap to auto-raise (unlike OpenClaw). If this file grows large later, verify the agent still sees the end by asking it to quote the last dinotrust rule."
   fi
 fi
 
