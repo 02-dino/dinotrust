@@ -622,7 +622,7 @@ try:
 except Exception as e:
     print(f"SKIP could not parse openclaw.json: {e}"); sys.exit(0)
 d = cfg.setdefault("agents", {}).setdefault("defaults", {})
-FILE_DEFAULT, TOTAL_DEFAULT, FILE_BUF, TOTAL_BUF = 20000, 60000, 5000, 4000
+FILE_DEFAULT, TOTAL_DEFAULT, FILE_BUF, TOTAL_BUF = 20000, 60000, 10000, 10000
 root_files = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "MEMORY.md"]
 sizes = {}
 for rf in root_files:
