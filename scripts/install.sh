@@ -597,6 +597,71 @@ mkdir -p "$(dirname "$CONFIG_FILE")"
 echo "" >> "$CONFIG_FILE"
 echo "$INJECTION_BLOCK" >> "$CONFIG_FILE"
 
+# ── OpenClaw bootstrap cap auto-raise ─────────────────────────────────────────
+# dinotrust is a SECURITY ruleset injected into AGENTS.md every turn. If AGENTS.md
+# now exceeds OpenClaw's per-file bootstrap cap (default 20000), OpenClaw silently
+# TRUNCATES — and a half-injected security ruleset enforces with holes and no
+# error. The Step 7b check above only WARNS; here we actually fix it on OpenClaw:
+# raise agents.defaults.bootstrapMaxChars (and total, if needed) to fit the file,
+# so the whole ruleset always reaches the model. Measured against the just-written
+# file, raise-only (never lowers, never clobbers a higher user value), and skipped
+# cleanly if python3 is missing (falls back to the Step 7b warning). OpenClaw-only:
+# other platforms have different/undocumented caps we must not guess at.
+if [[ "$OPT_PLATFORM" == "openclaw" ]]; then
+  OPENCLAW_JSON="${OPENCLAW_CONFIG:-$HOME/.openclaw/openclaw.json}"
+  if [[ -f "$OPENCLAW_JSON" ]] && command -v python3 &>/dev/null; then
+    # Workspace dir = parent of the AGENTS.md we just wrote (measure sibling root files for the total cap).
+    WS_DIR="$(dirname "$CONFIG_FILE")"
+    cp "$OPENCLAW_JSON" "${OPENCLAW_JSON}.dinotrust-bak.$(date -u +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    CAP_RESULT=$(WS_DIR="$WS_DIR" OPENCLAW_JSON="$OPENCLAW_JSON" python3 - <<'PYCAP'
+import json, os, sys
+path = os.environ["OPENCLAW_JSON"]
+ws = os.environ["WS_DIR"]
+try:
+    cfg = json.load(open(path))
+except Exception as e:
+    print(f"SKIP could not parse openclaw.json: {e}"); sys.exit(0)
+d = cfg.setdefault("agents", {}).setdefault("defaults", {})
+FILE_DEFAULT, TOTAL_DEFAULT, FILE_BUF, TOTAL_BUF = 20000, 60000, 2000, 4000
+root_files = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "MEMORY.md"]
+sizes = {}
+for rf in root_files:
+    p = os.path.join(ws, rf)
+    if os.path.isfile(p):
+        sizes[rf] = os.path.getsize(p)
+if not sizes:
+    print("SKIP no root bootstrap files found"); sys.exit(0)
+max_file = max(sizes.values()); total = sum(sizes.values())
+biggest = max(sizes, key=sizes.get)
+cur_file = d.get("bootstrapMaxChars", FILE_DEFAULT)
+cur_total = d.get("bootstrapTotalMaxChars", TOTAL_DEFAULT)
+new_file = max(cur_file, FILE_DEFAULT, max_file + FILE_BUF)
+new_total = max(cur_total, TOTAL_DEFAULT, total + TOTAL_BUF)
+msgs = []
+if new_file != d.get("bootstrapMaxChars"):
+    d["bootstrapMaxChars"] = new_file
+    msgs.append(f"bootstrapMaxChars -> {new_file} (fits {biggest}={max_file} + {FILE_BUF})")
+if new_total != d.get("bootstrapTotalMaxChars"):
+    d["bootstrapTotalMaxChars"] = new_total
+    msgs.append(f"bootstrapTotalMaxChars -> {new_total} (fits all root {total} + {TOTAL_BUF})")
+if msgs:
+    json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
+    json.load(open(path))  # validate
+    print("RAISED " + "; ".join(msgs))
+else:
+    print("OK caps already fit AGENTS.md ruleset")
+PYCAP
+)
+    case "$CAP_RESULT" in
+      RAISED*) success "OpenClaw bootstrap caps raised so the full ruleset injects: ${CAP_RESULT#RAISED }" ;;
+      OK*)     info "OpenClaw bootstrap caps already fit the ruleset" ;;
+      SKIP*)   warn "Bootstrap cap auto-raise skipped: ${CAP_RESULT#SKIP } — see Step 7b note above" ;;
+    esac
+  elif [[ -f "$OPENCLAW_JSON" ]]; then
+    warn "python3 not found — cannot auto-raise bootstrapMaxChars. If Step 7b warned about the cap, raise agents.defaults.bootstrapMaxChars manually so the ruleset isn't truncated."
+  fi
+fi
+
 # Aider: also patch .aider.conf.yml
 if [[ "$OPT_PLATFORM" == "aider" ]]; then
   AIDER_CONF=".aider.conf.yml"
