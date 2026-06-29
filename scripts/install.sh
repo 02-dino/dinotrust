@@ -645,12 +645,24 @@ if new_file != d.get("bootstrapMaxChars"):
 if new_total != d.get("bootstrapTotalMaxChars"):
     d["bootstrapTotalMaxChars"] = new_total
     msgs.append(f"bootstrapTotalMaxChars -> {new_total} (fits all root {total} + {TOTAL_BUF})")
+# Pin contextInjection=always so the SECURITY ruleset is injected EVERY turn, not
+# dropped on continuation turns. Default is already 'always', but it is a
+# user-changeable knob — if a user set it to skip-on-continuation, dinotrust's
+# rules would silently stop enforcing mid-conversation with no error. For a
+# security ruleset that is the exact failure to prevent, so we pin it defensively.
+# (Valid key is contextInjection, NOT workspaceBootstrap; strip that legacy key if
+# an older install left it — it is not in the OpenClaw schema and crashes the gateway.)
+if d.pop("workspaceBootstrap", None) is not None:
+    msgs.append("removed legacy invalid key workspaceBootstrap")
+if d.get("contextInjection") != "always":
+    d["contextInjection"] = "always"
+    msgs.append("contextInjection -> always (ruleset injected every turn, not skipped on continuation)")
 if msgs:
     json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
     json.load(open(path))  # validate
     print("RAISED " + "; ".join(msgs))
 else:
-    print("OK caps already fit AGENTS.md ruleset")
+    print("OK caps + contextInjection already correct")
 PYCAP
 )
     case "$CAP_RESULT" in
