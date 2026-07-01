@@ -17,7 +17,7 @@ dinotrust has **zero infrastructure**. It injects a structured ruleset straight 
 - **9 platforms, one ruleset** — OpenClaw, Hermes, Claude Code, Codex CLI, Goose, Cursor, Windsurf, Continue.dev, Aider — each via its native config mechanism (AGENTS.md, CLAUDE.md, .windsurfrules, …).
 - **Authorization, not authentication** — ownership is bound to the platform's verified identity signal (numeric/UUID), never to chat claims. Re-checked every turn.
 
-**This tracks model capability.** Enforcement is the agent's own instruction-following, not a static regex or proxy filter. As models get better at following instructions, they enforce the rules more reliably and resist manipulation better — while a fixed filter stays exactly as good (or as brittle) as the day it shipped. It cuts both ways: stronger models also mean stronger adversaries, so this raises reliability, not absolute guarantees (see the Identity model note).
+**This tracks model capability.** Enforcement is the agent's own instruction-following, not a static regex or proxy filter. As models get better at following instructions, they enforce the rules more reliably and resist manipulation better — while a fixed filter stays exactly as good (or as brittle) as the day it shipped. It cuts both ways: stronger models also mean stronger adversaries, so this raises reliability, not absolute guarantees (see [Identity model](#identity-model)).
 
 ---
 
@@ -308,9 +308,6 @@ flags, and the adapter contract.
 
 **Agent ignores the rules**
 Some platforms only read config files at startup. Restart the agent after install.
-
-**Agent acknowledges the rules but doesn't reliably follow them (OpenClaw)**
-The installer sets `agents.defaults.thinkingDefault` to `medium` — a minimum thinking floor that ensures the agent genuinely internalizes and acts on injected instructions rather than skimming past them. If you changed this to `off` or `minimal`, the security rules may be read but not reliably enforced. Raise it back to at least `medium`.
 
 **Injection not found**
 ```bash
