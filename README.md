@@ -309,6 +309,9 @@ flags, and the adapter contract.
 **Agent ignores the rules**
 Some platforms only read config files at startup. Restart the agent after install.
 
+**Agent acknowledges the rules but doesn't reliably follow them (OpenClaw)**
+The installer sets `agents.defaults.thinkingDefault` to `medium` — a minimum thinking floor that ensures the agent genuinely internalizes and acts on injected instructions rather than skimming past them. If you changed this to `off` or `minimal`, the security rules may be read but not reliably enforced. Raise it back to at least `medium`.
+
 **Injection not found**
 ```bash
 bash scripts/install.sh --force

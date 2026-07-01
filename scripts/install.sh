@@ -657,12 +657,20 @@ if d.pop("workspaceBootstrap", None) is not None:
 if d.get("contextInjection") != "always":
     d["contextInjection"] = "always"
     msgs.append("contextInjection -> always (ruleset injected every turn, not skipped on continuation)")
+# thinkingDefault -> medium: dinotrust is a security ruleset injected into root
+# files. Without a minimum thinking floor, the agent may acknowledge the rules
+# but not reliably internalize and act on them — especially the injection-defense
+# patterns which require genuine reasoning to apply correctly. medium is the
+# safe floor. Skip if user already has a non-default value set.
+if d.get("thinkingDefault") in (None, "adaptive"):
+    d["thinkingDefault"] = "medium"
+    msgs.append("thinkingDefault -> medium (ensures security rules are internalized, not just acknowledged)")
 if msgs:
     json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
     json.load(open(path))  # validate
     print("RAISED " + "; ".join(msgs))
 else:
-    print("OK caps + contextInjection already correct")
+    print("OK caps + contextInjection + thinkingDefault already correct")
 PYCAP
 )
     case "$CAP_RESULT" in
