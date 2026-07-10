@@ -62,9 +62,10 @@ Options:
                          approval); no primary/secondary. To add/remove an owner
                          LATER (post-install), prefer ../scripts/manage-owner.sh
                          instead of re-running this installer — it edits only the
-                         owner_ids line (instruction layer) and can optionally sync
-                         this hook's ownerIds too via --oc-json/--dt-conf, without
-                         resetting any other customization. See README.md 'Adding
+                         owner_ids line (instruction layer) and auto-syncs this
+                         hook's ownerIds too (same default path this installer
+                         uses), without resetting any other customization. See
+                         README.md 'Adding
                          or removing an owner after install'.
   --allow-scripts LIST   Non-owner exec allowlist (comma-separated script names,
                          e.g. exchange_data,semantic_search). Default: none.
@@ -101,8 +102,9 @@ if [[ -z "$OPT_OWNER_ID" && "$OPT_NONINTERACTIVE" != "true" ]]; then
   echo "Enter one or more, comma-separated (e.g. 111111,222222) — no primary/secondary,"
   echo "every id listed gets identical owner tier."
   echo "To add/remove an owner LATER: use ../scripts/manage-owner.sh instead of"
-  echo "re-running this installer — it's a surgical single-line edit that won't"
-  echo "reset other customizations. See README.md 'Adding or removing an owner'."
+  echo "re-running this installer — it's a surgical single-line edit that syncs"
+  echo "both this hook's config and the instruction layer automatically, without"
+  echo "resetting other customizations. See README.md 'Adding or removing an owner'."
   read -rp "Owner id(s) (comma-separated): " OPT_OWNER_ID
 fi
 [[ -z "$OPT_OWNER_ID" ]] && { err "--owner-id required"; exit 2; }

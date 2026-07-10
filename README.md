@@ -301,13 +301,14 @@ The ruleset matches: *sender is owner IFF (a bare owner_id equals the sender_id)
 **Adding or removing an owner after install**
 
 Use `scripts/manage-owner.sh` — it's a small, surgical tool built specifically
-for this, and the recommended way to add/remove an owner post-install:
+for this, and the recommended way to add/remove an owner post-install. One
+command updates **both** owner-id stores (see below) automatically:
 
 ```bash
-bash scripts/manage-owner.sh list                      # show current owners
-bash scripts/manage-owner.sh add    987654321           # add a bare (any-platform) owner
-bash scripts/manage-owner.sh add    555@telegram         # add a platform-scoped owner
-bash scripts/manage-owner.sh remove 987654321            # remove an owner
+bash scripts/manage-owner.sh list                       # show current owners
+bash scripts/manage-owner.sh add    987654321            # add a bare (any-platform) owner
+bash scripts/manage-owner.sh add    555@telegram          # add a platform-scoped owner
+bash scripts/manage-owner.sh remove 987654321             # remove an owner
 ```
 
 Why this instead of re-running the full installer: `scripts/install.sh --force`
@@ -322,19 +323,21 @@ your config file (or take `--config PATH` to point at one explicitly), backs
 it up before editing, and refuses to remove the last remaining owner.
 
 There are actually **two** owner-id stores — `security_rules.md`'s `owner_ids`
-(instruction layer, the file `manage-owner.sh` edits by default) and the
-enforce hook's own `ownerIds` config (`openclaw.json` plugin entry, or
-`~/.dinotrust/enforce.json` on CLI runtimes). By default `manage-owner.sh`
-edits **only** the instruction layer and prints the exact manual steps for the
-enforce side — it deliberately does NOT auto-discover "the" openclaw.json on
-your host, since guessing wrong could silently mutate a *different* agent's
-live config than the one you meant. To have it also apply the enforce-side
-update (same key-scoped merge `enforce/install.sh` itself uses — backed up,
-other config untouched), pass the config path explicitly:
+(instruction layer) and the enforce hook's own `ownerIds` config (`openclaw.json`
+plugin entry, or `~/.dinotrust/enforce.json` on CLI runtimes). By default
+`manage-owner.sh` updates **both in one command**: it looks in the exact same
+two hardcoded locations `enforce/install.sh` itself always writes to
+(`~/.openclaw/openclaw.json`, `~/.dinotrust/enforce.json` — that installer has
+no path-override flag either, since there's only ever one of each per host) and
+syncs whichever one exists, same key-scoped merge `enforce/install.sh` itself
+uses, backed up first, other config in that file untouched. If neither exists
+it just skips the sync with a note (instruction-layer-only setups are fine).
+To point at a nonstandard path instead, or to skip the enforce side entirely:
 
 ```bash
-bash scripts/manage-owner.sh add 987654321 --oc-json ~/.openclaw/openclaw.json   # OpenClaw
-bash scripts/manage-owner.sh add 987654321 --dt-conf ~/.dinotrust/enforce.json  # Hermes/Claude Code/Codex
+bash scripts/manage-owner.sh add 987654321 --oc-json /path/to/openclaw.json   # nonstandard OpenClaw path
+bash scripts/manage-owner.sh add 987654321 --dt-conf /path/to/enforce.json   # nonstandard CLI-runtime path
+bash scripts/manage-owner.sh add 987654321 --no-sync-enforce                 # instruction layer only
 ```
 
 OpenClaw requires a gateway restart afterward for the enforce hook to pick up
@@ -344,10 +347,10 @@ fresh on each call, no restart needed.
 **Editing `AGENTS.md` / `security_rules.md` alone does not change enforce-layer
 ownership** — the enforce hook reads its own config file, not the instruction
 file, precisely so a prompt injection or a confused model editing that file
-can't grant itself owner status at the code-enforcement level. If you only run
-`manage-owner.sh` without `--oc-json`/`--dt-conf`, the two layers will
-disagree (instruction layer recognizes someone the hook still blocks, or vice
-versa) until you sync the enforce side too.
+can't grant itself owner status at the code-enforcement level. `manage-owner.sh`
+syncs both by default so this normally isn't something you have to think about;
+it only comes up if you passed `--no-sync-enforce` or the enforce config lives
+somewhere `--oc-json`/`--dt-conf` needs to point at explicitly.
 
 **Limitation:** platform-scoped owners (`id@platform`) are an
 instruction-layer-only concept — the enforce hook's `ownerIds` is a flat array

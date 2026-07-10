@@ -13,29 +13,29 @@
 # (profile, protected_resources, deflection message, allowed_actions, and any
 # hand-edits) is left byte-for-byte untouched.
 #
-# ENFORCE HOOK SYNC IS OPT-IN, EXPLICIT-PATH ONLY: by default this script does
-# NOT touch any openclaw.json or ~/.dinotrust/enforce.json — it only edits the
-# one instruction-layer file you point it at, and prints the new value plus
-# manual sync instructions. Pass --oc-json <path> or --dt-conf <path> (or the
-# bare --sync-enforce flag alongside one of those) to have it ALSO apply a
-# key-scoped update to that specific enforce config (via the same
-# merge_config.py install.sh uses, backed up first, other config in that file
-# untouched). There is deliberately no auto-discovery of "the" openclaw.json —
-# on a host running multiple agents/installs, guessing which one you meant
-# risks silently mutating a DIFFERENT install's live config than the one this
-# command was actually about.
+# ENFORCE HOOK SYNC IS AUTOMATIC BY DEFAULT: this script also updates the
+# separate enforce-hook config (openclaw.json plugin entry, or
+# ~/.dinotrust/enforce.json on CLI runtimes) so both layers stay in sync in one
+# command. It looks in the exact same two hardcoded locations enforce/install.sh
+# itself always writes to (${HOME}/.openclaw/openclaw.json,
+# ${HOME}/.dinotrust/enforce.json — that installer has no path-override flag
+# either, there's only ever one of each per host). Pass --oc-json/--dt-conf to
+# point at a nonstandard path instead, or --no-sync-enforce to skip the enforce
+# side entirely (instruction layer only). The update is key-scoped (via the
+# same merge_config.py install.sh uses for OpenClaw), backed up first, and
+# never touches any other config key.
 #
 # LIMITATION: platform-scoped owner entries ({id, platforms:[...]}) are an
 # instruction-layer-only concept. The enforce hook's ownerIds is a flat array
-# with no scoping support — if you add a scoped entry and DO sync the enforce
-# config, it goes in as its bare id (unscoped there), and this script WARNS you
+# with no scoping support — if you add a scoped entry, it goes into the synced
+# enforce config as its bare id (unscoped there), and this script WARNS you
 # that the two layers will disagree on that entry's platform restriction until
 # the enforce hook itself supports scoping.
 #
 # Usage:
 #   bash scripts/manage-owner.sh list   [--config PATH]
-#   bash scripts/manage-owner.sh add    <id[@platform[+platform2]]> [--config PATH] [--oc-json PATH | --dt-conf PATH]
-#   bash scripts/manage-owner.sh remove <id> [--config PATH] [--oc-json PATH | --dt-conf PATH]
+#   bash scripts/manage-owner.sh add    <id[@platform[+platform2]]> [--config PATH] [--oc-json PATH] [--dt-conf PATH] [--no-sync-enforce]
+#   bash scripts/manage-owner.sh remove <id> [--config PATH] [--oc-json PATH] [--dt-conf PATH] [--no-sync-enforce]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,7 +51,7 @@ error()   { err "$*"; exit 1; }
 
 ACTION="${1:-}"; shift || true
 [[ "$ACTION" != "list" && "$ACTION" != "add" && "$ACTION" != "remove" ]] && \
-  error "Usage: manage-owner.sh <list|add|remove> [id[@platform]] [--config PATH] [--oc-json PATH | --dt-conf PATH]"
+  error "Usage: manage-owner.sh <list|add|remove> [id[@platform]] [--config PATH] [--oc-json PATH] [--dt-conf PATH] [--no-sync-enforce]"
 
 ARG_ID=""
 if [[ "$ACTION" != "list" ]]; then
@@ -59,13 +59,13 @@ if [[ "$ACTION" != "list" ]]; then
   [[ -z "$ARG_ID" ]] && error "manage-owner.sh $ACTION requires an id (e.g. 123456789 or 123456789@telegram)."
 fi
 
-OPT_CONFIG=""; OPT_SYNC_ENFORCE=false; OPT_OC_JSON=""; OPT_DT_CONF=""
+OPT_CONFIG=""; OPT_SYNC_ENFORCE=true; OPT_OC_JSON=""; OPT_DT_CONF=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --config)       OPT_CONFIG="$2"; shift 2 ;;
-    --sync-enforce) OPT_SYNC_ENFORCE=true; shift ;;
-    --oc-json)      OPT_OC_JSON="$2"; OPT_SYNC_ENFORCE=true; shift 2 ;;
-    --dt-conf)      OPT_DT_CONF="$2"; OPT_SYNC_ENFORCE=true; shift 2 ;;
+    --config)           OPT_CONFIG="$2"; shift 2 ;;
+    --no-sync-enforce)  OPT_SYNC_ENFORCE=false; shift ;;
+    --oc-json)          OPT_OC_JSON="$2"; shift 2 ;;
+    --dt-conf)          OPT_DT_CONF="$2"; shift 2 ;;
     *) error "Unknown option: $1" ;;
   esac
 done
@@ -170,10 +170,9 @@ if action == "add":
         if plat_list:
             sys.stderr.write(f"SCOPED_WARN: owner '{oid}' scoped to platform(s) {plat_list}. "
                               f"NOTE: the enforce hook's own ownerIds config does NOT support platform "
-                              f"scoping (flat array only) -- if you sync it (--oc-json/--dt-conf), this "
-                              f"id goes in UNSCOPED there, so on the enforce layer it's owner on ANY "
-                              f"platform, not just {plat_list}. Only the instruction layer honors the "
-                              f"scope restriction.\n")
+                              f"scoping (flat array only) -- this id goes in UNSCOPED there, so on the "
+                              f"enforce layer it's owner on ANY platform, not just {plat_list}. Only the "
+                              f"instruction layer honors the scope restriction.\n")
     else:
         new_entry = arg.strip()
     existing_ids = {entry_id(e) for e in arr}
@@ -234,13 +233,13 @@ echo ""
 echo "  Nothing else in the file was touched (profile, protected_resources,"
 echo "  deflection message, allowed_actions, and any hand-edits are preserved)."
 
-# ── Enforce hook's own ownerIds config — OPT-IN ONLY, EXPLICIT PATH REQUIRED ──
-# This script never auto-discovers or silently touches a real openclaw.json /
-# ~/.dinotrust/enforce.json just because one happens to exist on the host —
-# that risks mutating a DIFFERENT install's live config than the one you meant
-# to edit. Sync only fires with an explicit --oc-json or --dt-conf path.
-# Default: print the value + exact manual instructions, touch nothing beyond
-# $CONFIG_FILE.
+# ── Enforce hook's own ownerIds config — auto-synced by default ─────────────
+# enforce/install.sh itself hardcodes these exact two paths with no override
+# flag at all (${HOME}/.openclaw/openclaw.json, ${HOME}/.dinotrust/enforce.json)
+# -- there's only ever one of each per host, same convention the rest of
+# dinotrust already assumes. Auto-syncing whichever one exists here isn't a
+# guess, it's matching that same default. --oc-json/--dt-conf remain as
+# overrides for a nonstandard path; --no-sync-enforce opts out entirely.
 
 # Build a flat unscoped array for the enforce hook (it has no platform-scoping
 # concept). Extract just the bare ids from NEW_ARR.
@@ -267,28 +266,30 @@ print(json.dumps(flat))
 PY
 )
 
-if [[ "$OPT_SYNC_ENFORCE" != "true" ]]; then
+if [[ "$OPT_SYNC_ENFORCE" == "false" ]]; then
   echo ""
-  info "Enforce hook NOT synced (no --oc-json/--dt-conf passed — default is safe/manual)."
+  info "Enforce hook NOT synced (--no-sync-enforce passed)."
   echo "  If you run the enforce layer, update it to match:"
   echo "    OpenClaw:     plugins.entries.\"dinotrust-enforce\".config.ownerIds = $ENFORCE_OWNERS"
   echo "                  in your openclaw.json, then: openclaw gateway restart"
   echo "    CLI runtime:  ownerIds in ~/.dinotrust/enforce.json = $ENFORCE_OWNERS"
-  echo "  Or re-run this command with --oc-json <path-to-openclaw.json> or"
-  echo "  --dt-conf <path-to-enforce.json> to have it applied for you (key-scoped,"
-  echo "  backed up first, other config in that file untouched)."
   echo ""
   success "Done. $ACTION applied for owner: $ARG_ID (instruction layer only)"
   exit 0
 fi
 
-info "Syncing enforce hook config (ownerIds only — no other keys touched)..."
-SYNCED_ENFORCE=false
+# Resolve paths: explicit --oc-json/--dt-conf override, else the same defaults
+# enforce/install.sh itself hardcodes.
+[[ -z "$OPT_OC_JSON" ]] && OPT_OC_JSON="${HOME}/.openclaw/openclaw.json"
+[[ -z "$OPT_DT_CONF" ]] && OPT_DT_CONF="${HOME}/.dinotrust/enforce.json"
 
-if [[ -n "$OPT_OC_JSON" ]]; then
+SYNCED_ENFORCE=false
+FOUND_ANY_ENFORCE_CONFIG=false
+
+if [[ -f "$OPT_OC_JSON" ]] && grep -q '"dinotrust-enforce"' "$OPT_OC_JSON" 2>/dev/null; then
+  FOUND_ANY_ENFORCE_CONFIG=true
+  info "Syncing enforce hook config (ownerIds only — no other keys touched)..."
   OC_JSON="$OPT_OC_JSON"
-  [[ -f "$OC_JSON" ]] || error "--oc-json path does not exist: $OC_JSON"
-  grep -q '"dinotrust-enforce"' "$OC_JSON" 2>/dev/null || error "No dinotrust-enforce plugin entry found in $OC_JSON. Wrong file, or enforce not installed there yet (run enforce/install.sh first)."
   # Read existing nonOwnerAllowedScripts/module/agentFilter/enforce so merge_config.py
   # (which requires them as env) doesn't reset them.
   EXIST=$(python3 - "$OC_JSON" <<'PY'
@@ -321,9 +322,10 @@ PY
   fi
 fi
 
-if [[ -n "$OPT_DT_CONF" ]]; then
+if [[ -f "$OPT_DT_CONF" ]]; then
+  FOUND_ANY_ENFORCE_CONFIG=true
+  info "Syncing enforce hook config (ownerIds only — no other keys touched)..."
   DT_CONF="$OPT_DT_CONF"
-  [[ -f "$DT_CONF" ]] || error "--dt-conf path does not exist: $DT_CONF"
   DT_BACKUP="${DT_CONF}.dinotrust-bak.$(date -u +%Y%m%d-%H%M%S)"
   cp "$DT_CONF" "$DT_BACKUP"
   if python3 - "$DT_CONF" "$ENFORCE_OWNERS" <<'PY'
@@ -344,12 +346,15 @@ PY
   fi
 fi
 
-if [[ "$OPT_SYNC_ENFORCE" == "true" && -z "$OPT_OC_JSON" && -z "$OPT_DT_CONF" ]]; then
-  error "--sync-enforce requires an explicit --oc-json PATH or --dt-conf PATH (no auto-discovery, to avoid touching the wrong install's config)."
+if [[ "$FOUND_ANY_ENFORCE_CONFIG" == "false" ]]; then
+  echo ""
+  info "No enforce hook config found at ${OPT_OC_JSON} or ${OPT_DT_CONF} — nothing to sync."
+  echo "  If you haven't installed the enforce layer, this is expected (instruction layer only)."
+  echo "  If it lives somewhere nonstandard, pass --oc-json PATH or --dt-conf PATH."
 fi
 
-if [[ "$SYNCED_ENFORCE" == "false" ]]; then
-  warn "Enforce hook sync did not run (see errors above, if any). New value if you need it manually: $ENFORCE_OWNERS"
+if [[ "$SYNCED_ENFORCE" == "false" && "$FOUND_ANY_ENFORCE_CONFIG" == "true" ]]; then
+  warn "Enforce hook sync did not complete (see errors above). New value if you need it manually: $ENFORCE_OWNERS"
 fi
 
 echo ""

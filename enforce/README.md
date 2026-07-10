@@ -98,14 +98,15 @@ That's fine if you're intentionally running enforce standalone (e.g.
 use `../scripts/manage-owner.sh` instead:
 
 ```bash
-bash scripts/manage-owner.sh add 987654321 --oc-json ~/.openclaw/openclaw.json
-bash scripts/manage-owner.sh add 987654321 --dt-conf ~/.dinotrust/enforce.json
+bash scripts/manage-owner.sh add 987654321
 ```
 
 It's a surgical single-line edit (via the same `merge_config.py` key-scoped
-merge this installer uses) that keeps the instruction layer and enforce config
-in sync WITHOUT resetting any other customization — unlike re-running an
-installer with `--force`, which regenerates from scratch.
+merge this installer uses) that keeps the instruction layer AND this enforce
+config in sync automatically, in one command — it looks in the same hardcoded
+path this installer itself always writes to (`~/.openclaw/openclaw.json` or
+`~/.dinotrust/enforce.json`), WITHOUT resetting any other customization,
+unlike re-running an installer with `--force`, which regenerates from scratch.
 
 See the main [README's Identity model](../README.md#identity-model) section
 ("Multiple owners" / "Adding or removing an owner after install") for the full
