@@ -80,3 +80,45 @@ bash enforce/install.sh --platform openclaw --owner-id <id> \
   Code; equivalent for Codex).
 
 `enforce:false` first to shadow-test (log only), then flip to `true`.
+
+## Owners: multiple, and adding/removing after install
+
+`ownerIds` is an **array**, not a single id — pass one or many at install time
+as a comma-separated list:
+
+```bash
+bash enforce/install.sh --platform openclaw --owner-id "111111,222222,333333"
+```
+
+Every id in the list gets identical owner tier (warn-only + critical-approval);
+everyone else falls under the strict non-owner rules. There is no primary/
+secondary distinction between owners.
+
+**Important: editing `AGENTS.md` / `security_rules.md` does NOT change who is
+an owner.** Those are the instruction layer (model-compliance-dependent) —
+the enforce hook deliberately never reads them, precisely so a prompt
+injection or a confused model editing that file can't grant itself owner
+status. `ownerIds` is read only from the hook's own config, never from a
+`.md` file.
+
+**To add or remove an owner after install**, two supported paths:
+
+1. **Re-run the installer** with `--force` and the FULL new owner list (not
+   just the delta — this replaces the array, it does not append):
+   ```bash
+   bash enforce/install.sh --platform openclaw --owner-id "111111,222222,NEWID" --force
+   ```
+   Idempotent, re-merges via `merge_config.py`, backs up the config first.
+
+2. **Edit the config directly**, then restart/reload the runtime so the new
+   list takes effect:
+   - **OpenClaw:** patch `plugins.entries."dinotrust-enforce".config.ownerIds`
+     in `openclaw.json`, then `openclaw gateway restart` (a hot-patch alone
+     does not take effect until restart — the hook config is loaded on start).
+   - **Hermes / Claude Code / Codex:** edit `ownerIds` in `~/.dinotrust/enforce.json`
+     directly (it's plain JSON, `chmod 600`); the `pre_tool_call` handler reads it
+     fresh on each invocation, no restart needed for these runtimes.
+
+Removing an owner is symmetric to adding: drop their id from the array via
+either path above. There is no separate "remove" command — the list you
+provide (via re-install or direct edit) becomes the new source of truth.

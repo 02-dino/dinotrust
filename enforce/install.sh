@@ -57,7 +57,12 @@ Usage: bash enforce/install.sh --platform <p> --owner-id <id> [options]
 Supported platforms (real enforcement): openclaw | hermes | claude-code | codex-cli
 
 Options:
-  --owner-id IDS         Owner platform id(s), comma-separated.
+  --owner-id IDS         Owner platform id(s), comma-separated (e.g. 111111,222222).
+                         Every id gets identical owner tier (warn-only + critical-
+                         approval); no primary/secondary. To add/remove owners
+                         after install, re-run with --force and the FULL new list
+                         (replaces the array, does not append) — or edit the config
+                         directly and restart/reload. See enforce/README.md.
   --allow-scripts LIST   Non-owner exec allowlist (comma-separated script names,
                          e.g. exchange_data,semantic_search). Default: none.
   --config PATH          Runtime config file to register the hook in.
@@ -88,6 +93,12 @@ if [[ ! " ${SUPPORTED[*]} " =~ " ${OPT_PLATFORM} " ]]; then
 fi
 
 if [[ -z "$OPT_OWNER_ID" && "$OPT_NONINTERACTIVE" != "true" ]]; then
+  echo "Owner(s): platform id(s) that get warn-only + critical-approval access."
+  echo "Everyone else falls under strict non-owner rules (read-only, allowlisted scripts only)."
+  echo "Enter one or more, comma-separated (e.g. 111111,222222) — no primary/secondary,"
+  echo "every id listed gets identical owner tier. You can add/remove owners later by"
+  echo "re-running this installer with --force and the FULL new list (replaces, not appends),"
+  echo "or by editing the config directly — see enforce/README.md 'Owners' section."
   read -rp "Owner id(s) (comma-separated): " OPT_OWNER_ID
 fi
 [[ -z "$OPT_OWNER_ID" ]] && { err "--owner-id required"; exit 2; }
