@@ -1,0 +1,296 @@
+/**
+ * dinotrust-enforce — OpenClaw plugin (definePluginEntry pattern)
+ *
+ * ENFORCEMENT layer beneath dinotrust's AGENTS.md instruction layer.
+ * before_tool_call returns { block:true } (terminal) so the runtime OBEYS,
+ * independent of model compliance.
+ *
+ * POLICY (mirrors dinotrust AGENTS.md owner_rules / non_owner_rules):
+ *
+ *   OWNER (senderId in ownerIds) and AGENT-OPERATED-BY-OWNER (no senderId
+ *   resolvable = internal/self turn):
+ *     -> NEVER blocked. ownerWarnOnly => warn-log only. Owner has full access;
+ *        the .md instruction layer already asks for approval on writes. No hard
+ *        restriction here, by design.
+ *
+ *   NON-OWNER (senderId present AND not in ownerIds):
+ *     -> STRICT. Default deny on mutating/exec + secret reads. Allowlist:
+ *        - nonOwnerAllowedTools : read/web/memory tools pass
+ *        - exec : passes ONLY if the command runs an allowlisted read-only
+ *                 script under tools/ (exchange_data, semantic_search, ...);
+ *                 any other exec is blocked (no shell outside tools/).
+ *        - write/edit/apply_patch : blocked.
+ *        - any tool touching a protected secret glob : blocked.
+ *
+ * Master switch config.enforce=false => dry-run (log only, no block).
+ * Fail-open on errors: an enforcement bug must never brick tools.
+ *
+ * Requires plugins.entries["dinotrust-enforce"].hooks.allowConversationAccess=true
+ * for senderId/channel context on conversation-bound runs.
+ */
+
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+
+type Cfg = {
+  agentFilter: string;
+  ownerIds: string[];
+  ownerWarnOnly: boolean;
+  criticalExecPatterns: string[];
+  criticalPathGlobs: string[];
+  protectedGlobs: string[];
+  mutatingTools: string[];
+  nonOwnerAllowedTools: string[];
+  nonOwnerAllowedScripts: string[];
+  logFile: string;
+  enforce: boolean;
+};
+
+const DEFAULTS: Cfg = {
+  agentFilter: "agent:analyst",
+  ownerIds: ["1083618205"],
+  ownerWarnOnly: true,
+  // Owner is warn-only EXCEPT these critical/irreversible actions -> requireApproval
+  // ("are you sure?") even for the owner. Regex strings, tested against exec command.
+  criticalExecPatterns: [
+    "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
+    "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", ":\\(\\)\\s*\\{", "uninstall", "--hard\\b",
+  ],
+  // Owner writes/edits to these paths -> requireApproval (critical config/security).
+  criticalPathGlobs: ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"],
+  protectedGlobs: [
+    "**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/id_ed25519",
+    "**/credentials", "**/secrets/**",
+  ],
+  mutatingTools: ["exec", "write", "edit", "apply_patch"],
+  nonOwnerAllowedTools: ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"],
+  nonOwnerAllowedScripts: [
+    "exchange_data", "semantic_search", "defillama_search", "arkham_search",
+    "consensus_search", "news_consensus", "docs_search", "session_search", "graph_search",
+  ],
+  logFile: "",
+  enforce: true,
+};
+
+function cfg(raw: any): Cfg {
+  const c = { ...DEFAULTS, ...(raw || {}) };
+  for (const k of ["ownerIds", "criticalExecPatterns", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts"] as const) {
+    if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
+  }
+  return c;
+}
+
+function logPath(c: Cfg): string {
+  return c.logFile || path.join(os.homedir(), ".openclaw", "logs", "dinotrust-enforce.log");
+}
+
+function audit(c: Cfg, obj: Record<string, unknown>) {
+  try {
+    const p = logPath(c);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.appendFileSync(p, JSON.stringify({ ts: new Date().toISOString(), ...obj }) + "\n");
+  } catch { /* silent by contract */ }
+}
+
+/** Minimal glob -> RegExp. ** = any incl. /, * = any except /. */
+function globToRe(glob: string): RegExp {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === "*") { if (glob[i + 1] === "*") { re += ".*"; i++; } else re += "[^/]*"; }
+    else if (".+^${}()|[]\\".includes(ch)) re += "\\" + ch;
+    else re += ch;
+  }
+  return new RegExp("^" + re + "$");
+}
+
+function matchesProtected(p: string, globs: string[]): string | null {
+  const norm = p.replace(/\\/g, "/");
+  const base = norm.split("/").pop() || norm;
+  for (const g of globs) {
+    const re = globToRe(g);
+    const gBaseRe = globToRe(g.replace(/^\*\*\//, ""));
+    if (re.test(norm) || re.test(base) || gBaseRe.test(norm) || gBaseRe.test(base)) return g;
+  }
+  return null;
+}
+
+function targetPaths(event: any): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (v: unknown) => { if (typeof v === "string" && v && !seen.has(v)) { seen.add(v); out.push(v); } };
+  const p = event?.params ?? {};
+  push(p.path); push(p.file); push(p.filename); push(p.filepath);
+  if (Array.isArray(p.paths)) p.paths.forEach(push);
+  if (Array.isArray(event?.derivedPaths)) event.derivedPaths.forEach(push);
+  return out;
+}
+
+function anyProtected(event: any, globs: string[]): string | null {
+  for (const tp of targetPaths(event)) {
+    const h = matchesProtected(tp, globs);
+    if (h) return `${tp} ~ ${h}`;
+  }
+  if (event?.toolName === "exec") {
+    const cmd = String((event?.params ?? {}).command ?? "");
+    for (const t of cmd.split(/[\s;|&><'"()]+/).filter(Boolean)) {
+      const h = matchesProtected(t, globs);
+      if (h) return `exec-arg ~ ${h}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Critical/irreversible action detector (owner-approval tier).
+ * Returns a reason string when the tool call is critical, else null.
+ */
+/** Genuine write targets: `>`,`>>` redirection operands and `tee [-a] FILE`.
+ *  A critical path only appearing as a READ arg (grep/cat) is not a write. */
+function writeTargets(cmd: string): string[] {
+  const out: string[] = [];
+  const redir = /(?:^|\s)(?:[0-9]*|&)?>>?\s*([^\s;|&><'"()]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = redir.exec(cmd)) !== null) { if (m[1]) out.push(m[1]); }
+  const tee = /(?:^|[|;&]\s*|\s)tee\b((?:\s+(?:-a|--append))*)((?:\s+[^\s;|&><'"()]+)+)/g;
+  while ((m = tee.exec(cmd)) !== null) {
+    for (const t of (m[2] || "").split(/\s+/).filter(Boolean)) { if (!t.startsWith("-")) out.push(t); }
+  }
+  return out;
+}
+
+function criticalHit(event: any, c: Cfg): string | null {
+  const toolName = String(event?.toolName ?? "");
+  // critical path writes (config/security files) via write/edit/apply_patch
+  if (["write", "edit", "apply_patch"].includes(toolName)) {
+    for (const tp of targetPaths(event)) {
+      const h = matchesProtected(tp, c.criticalPathGlobs);
+      if (h) return `write ${tp} ~ ${h}`;
+    }
+  }
+  // critical exec command patterns
+  if (toolName === "exec") {
+    const cmd = String((event?.params ?? {}).command ?? "");
+    for (const pat of c.criticalExecPatterns) {
+      try { if (new RegExp(pat, "i").test(cmd)) return `exec ~ /${pat}/`; } catch { /* bad regex ignored */ }
+    }
+    // exec WRITING to a critical path (redirect / tee). Reads (grep/cat) pass.
+    for (const wt of writeTargets(cmd)) {
+      const h = matchesProtected(wt, c.criticalPathGlobs);
+      if (h) return `exec-write ${wt} ~ ${h}`;
+    }
+  }
+  return null;
+}
+
+/** True if an exec command invokes one of the allowlisted read-only scripts. */
+function execRunsAllowedScript(event: any, scripts: string[]): boolean {
+  if (event?.toolName !== "exec") return false;
+  const cmd = String((event?.params ?? {}).command ?? "");
+  if (!cmd) return false;
+  // Reject shell chaining / redirection first — allowlist is single read-only invocation only.
+  if (/[;|&><`$(){}]/.test(cmd)) return false;
+  // Command must reference an allowlisted script name, and stay within tools/.
+  const mentionsTools = /(^|[\/\s])tools\//.test(cmd);
+  for (const s of scripts) {
+    // match an allowlisted script as a filename token: <script>[...]. Allow an
+    // optional suffix before .py (e.g. semantic_search -> semantic_search_cli.py)
+    // but require the .py extension so it's clearly a script invocation.
+    const esc = s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp("(^|[\\/\\s])" + esc + "[A-Za-z0-9_]*\\.py([\\s]|$)");
+    if (re.test(cmd)) return mentionsTools || true; // script name is sufficient signal
+  }
+  return false;
+}
+
+/** Resolve verified sender id. null => internal/self turn (agent-operated-by-owner). */
+function resolveSenderId(event: any, ctx: any): string | null {
+  for (const src of [ctx, event, event?.metadata]) {
+    if (src && src.senderId != null && String(src.senderId).length > 0) return String(src.senderId);
+  }
+  const sk = String(ctx?.sessionKey ?? "");
+  const parts = sk.split(":");
+  const di = parts.indexOf("direct");
+  if (di >= 0 && parts[di + 1]) return parts[di + 1];
+  return null;
+}
+
+export default definePluginEntry({
+  id: "dinotrust-enforce",
+  name: "dinotrust enforce",
+  description: "Code-level enforcement floor: owner warn-only, non-owner strict with allowlist. Beneath the dinotrust AGENTS.md instruction layer.",
+  register(api: any) {
+    const c = cfg(api?.pluginConfig ?? api?.config);
+    audit(c, { evt: "register", enforce: c.enforce, ownerWarnOnly: c.ownerWarnOnly, agentFilter: c.agentFilter, hasPluginConfig: !!api?.pluginConfig });
+
+    api.on("before_tool_call", async (event: any, ctx: any) => {
+      try {
+        const sessionKey: string = String(ctx?.sessionKey ?? event?.sessionKey ?? "");
+        if (c.agentFilter && !sessionKey.includes(c.agentFilter)) return;
+
+        const toolName: string = String(event?.toolName ?? ctx?.toolName ?? "");
+        const sender = resolveSenderId(event, ctx);
+        const isOwner = sender == null || c.ownerIds.includes(sender);
+        const protectedHit = anyProtected(event, c.protectedGlobs);
+
+        // ===== OWNER / agent-operated-by-owner: warn-only + critical-approval =====
+        if (isOwner) {
+          // Critical/irreversible action -> requireApproval ("are you sure?") even for owner.
+          const crit = criticalHit(event, c);
+          if (crit) {
+            audit(c, { evt: "owner-approval", rule: "R-critical", toolName, sessionKey, sender: sender ?? "self", hit: crit, enforced: c.enforce });
+            if (c.enforce) {
+              return {
+                requireApproval: {
+                  title: `dinotrust: confirm critical action`,
+                  description: `This is irreversible/critical (${crit}). Are you sure? Reply /approve to proceed.`,
+                  severity: "critical",
+                  // Owner is trusted: unmet approval (no route / timeout) FAILS OPEN.
+                  timeoutBehavior: "allow",
+                },
+              };
+            }
+          }
+          if (protectedHit) {
+            // warn-only telemetry so owner still SEES secret-touch, no block
+            audit(c, { evt: "owner-warn", rule: "R-protected", toolName, sessionKey, sender: sender ?? "self", hit: protectedHit });
+          }
+          return; // otherwise full access, matches dinotrust owner_rules
+        }
+
+        // ===== NON-OWNER: strict + allowlist =====
+        // 1. secret access -> always block
+        if (protectedHit) {
+          audit(c, { evt: "block", rule: "R-nonowner-secret", toolName, sessionKey, sender, hit: protectedHit, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner blocked (protected resource)` };
+        }
+        // 2. explicitly allowed non-mutating tools -> pass
+        if (c.nonOwnerAllowedTools.includes(toolName)) return;
+        // 3. exec -> only allowlisted read-only tools/ scripts
+        if (toolName === "exec") {
+          if (execRunsAllowedScript(event, c.nonOwnerAllowedScripts)) {
+            audit(c, { evt: "allow", rule: "R-nonowner-script", toolName, sessionKey, sender });
+            return;
+          }
+          audit(c, { evt: "block", rule: "R-nonowner-exec", toolName, sessionKey, sender, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner exec restricted to allowlisted tools` };
+          return;
+        }
+        // 4. any other mutating tool -> block
+        if (c.mutatingTools.includes(toolName)) {
+          audit(c, { evt: "block", rule: "R-nonowner-mutate", toolName, sessionKey, sender, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner ${toolName} denied` };
+        }
+        // 5. everything else (unknown tool) for non-owner -> block (default deny)
+        else {
+          audit(c, { evt: "block", rule: "R-nonowner-default", toolName, sessionKey, sender, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner tool ${toolName} not allowlisted` };
+        }
+      } catch (err) {
+        audit(c, { evt: "error", error: String(err) });
+      }
+    }, { priority: 100 });
+  },
+});

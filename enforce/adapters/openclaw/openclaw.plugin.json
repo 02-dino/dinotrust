@@ -1,0 +1,72 @@
+{
+  "id": "dinotrust-enforce",
+  "name": "dinotrust enforce",
+  "description": "Code-level enforcement layer for dinotrust. Hard-blocks protected-resource access (.env/secrets/keys) and non-owner write/exec at the runtime tool boundary via before_tool_call — model-independent, sits beneath the AGENTS.md instruction layer.",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "agentFilter": {
+        "type": "string",
+        "default": "agent:analyst",
+        "description": "Only enforce on sessions whose sessionKey includes this substring. Empty string = all agents."
+      },
+      "ownerIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["1083618205"],
+        "description": "Verified platform sender IDs allowed to run mutating/exec tools. Owner-gate is only applied when a senderId is resolvable from context; otherwise falls back to instruction layer."
+      },
+      "protectedGlobs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/id_ed25519", "**/credentials", "**/secrets/**"],
+        "description": "Secret globs hard-blocked from NON-OWNER tools. Owner is warn-only (never blocked). openclaw.json intentionally NOT here for the live owner-operated agent."
+      },
+      "ownerWarnOnly": {
+        "type": "boolean",
+        "default": true,
+        "description": "When true, owner / agent-operated-by-owner sessions are NEVER hard-blocked, only warn-logged — EXCEPT criticalExecPatterns/criticalPathGlobs which trigger requireApproval (are-you-sure) even for owner. Matches dinotrust owner_rules."
+      },
+      "criticalExecPatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", "uninstall", "--hard\\b"],
+        "description": "Regex patterns for critical/irreversible exec commands. Owner gets requireApproval (are-you-sure) instead of silent pass; non-owner is already blocked from exec anyway."
+      },
+      "criticalPathGlobs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"],
+        "description": "Path globs where an owner WRITE/edit triggers requireApproval (are-you-sure). Config + security files that are dangerous to change silently."
+      },
+      "mutatingTools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["exec", "write", "edit", "apply_patch"],
+        "description": "Tools treated as mutating/exec for the non-owner gate."
+      },
+      "nonOwnerAllowedTools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"],
+        "description": "Non-mutating tools a non-owner MAY call directly (mirrors AGENTS.md non_owner_rules.allowed web/memory tools)."
+      },
+      "nonOwnerAllowedScripts": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["exchange_data", "semantic_search", "semantic_search_cli", "defillama_search", "arkham_search", "consensus_search", "news_consensus", "docs_search", "session_search", "graph_search"],
+        "description": "Non-owner exec allowlist: exec permitted ONLY when it runs one of these read-only tool scripts under tools/. Any other non-owner exec is blocked."
+      },
+      "logFile": {
+        "type": "string",
+        "default": "",
+        "description": "Optional audit log path. Empty = ~/.openclaw/logs/dinotrust-enforce.log"
+      },
+      "enforce": {
+        "type": "boolean",
+        "default": true,
+        "description": "Master switch. false = observe/log only (no blocking), for safe dry-run."
+      }
+    }
+  }
+}

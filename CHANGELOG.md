@@ -4,6 +4,70 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.19.0] — 2026-07-10
+
+### Added
+- **Enforce layer (`enforce/`)** — the code-level counterpart to the instruction
+  layer. A `before_tool_call` / `pre_tool_call` hook returns a terminal verdict
+  (allow / warn / **ask** / **block**), so policy holds even if the model does
+  not comply.
+  - `enforce/core/policy.ts` — single-source decision engine (21/21 selftest).
+    Zero hardcoded policy; everything is config (`ownerIds`, `criticalExecPatterns`,
+    `criticalPathGlobs`, `protectedGlobs`, `mutatingTools`, `nonOwnerAllowedTools`,
+    `nonOwnerAllowedScripts`, `enforce`).
+  - `enforce/adapters/openclaw/` — managed-hook plugin (inlines the engine;
+    24/24 selftest).
+  - `enforce/adapters/pre_tool_call/handler.py` — one Python handler serving
+    **Hermes, Claude Code, and Codex CLI** via the shared stdin-event/stdout-verdict
+    contract (26/26 selftest; e2e block/ask/allow/fail-open verified).
+  - `enforce/install.sh` — installs the hook for the four supported runtimes.
+- **Owner critical-action confirmation.** The owner (and agent-operated-by-owner)
+  is never hard-blocked — *except* critical/irreversible actions (`rm -rf`,
+  `git push --force`, writes to `openclaw.json` / `AGENTS.md` / security files /
+  `.env`), which now trigger an "are you sure?" approval prompt even for the owner.
+- **Non-owner allowlist.** Non-owners are strictly denied write/exec by default,
+  with a per-install allowlist of read-only tool scripts (e.g. `exchange_data`)
+  they may still run.
+- **Observability + enforce installed by default** in `scripts/install.sh`
+  (previously observability was opt-in and skipped headless). Opt out with
+  `--no-observability` / `--no-enforce`; shadow-test enforce with
+  `--enforce-shadow`; set the non-owner allowlist with `--allow-scripts`.
+
+- **Instruction layer synced to the enforce model.** `security_rules.md`'s
+  `owner_rules` now matches the code: owner default-allow, confirm only on
+  critical/irreversible actions, and the confirmation is a courtesy that
+  **fails open** (`on_unavailable_or_timeout: fail_open_allow`, `never:
+  strand_owner`) instead of a blanket approval-before-every-write. Since
+  `security_rules.md` is the single template injected into every runtime
+  (AGENTS.md / CLAUDE.md / SOUL.md), all runtimes get the corrected model.
+- **Smooth upgrades.** `update.sh` is version-aware and prints the v1.19.0
+  behavioral/support changes when crossing that boundary. The OpenClaw enforce
+  plugin entry is now **auto-merged** into `openclaw.json` (keyed, idempotent,
+  backed up; `enforce/adapters/openclaw/merge_config.py`) rather than emitted as
+  paste instructions — re-runs update owned keys without duplicating or
+  clobbering, and never silently disable an already-enabled enforcement.
+
+### Fixed
+- **Owner read false-positive.** `criticalHit` flagged a critical path appearing
+  anywhere in an exec command, so a *read* (`grep openclaw.json`) wrongly
+  triggered approval. Now only genuine write targets (`>`, `>>`, `tee`) count;
+  reads pass. (Non-owner secret reads are still blocked separately.)
+- **Owner stranding on unavailable approval.** `requireApproval` used
+  `timeoutBehavior: "deny"`, hard-blocking the owner when no approval route
+  exists. Owner now fails **open** — the confirmation is a courtesy, not a gate.
+
+### Changed
+- **Support scope narrowed to four runtimes with a real pre-tool veto:**
+  **OpenClaw, Hermes, Claude Code, OpenAI Codex CLI.** These get the full stack
+  (instruction + enforcement + independent audit).
+- **Dropped support for Cursor, Windsurf, Continue.dev, Aider, Goose.** They have
+  no pre-tool hook, so dinotrust could only inject a compliance-dependent
+  instruction layer with no independent audit — a false sense of security. The
+  installer now refuses these with a clear rationale; README and observability
+  docs updated accordingly.
+
+---
+
 ## [1.18.1] — 2026-06-28
 
 ### Added

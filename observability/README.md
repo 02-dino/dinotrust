@@ -56,7 +56,15 @@ under `_meta.agent_judged_only`:
 |------|----------|----------|----------|----------|
 | **T1** | OpenClaw (`adapters/openclaw`), Hermes (`adapters/hermes`) | real hook API | host/Hermes cron | independent, full |
 | **T2** | Discord, Slack | daemon, reuses `core/` (`adapters/_template`, `adapters/discord`) | in-process timer | independent, full |
-| **T3** | Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose | none — self-audit clause (`adapters/cli-selfaudit`) | on-demand | best-effort, honestly weaker |
+| **T3** | Claude Code, Codex CLI | none — self-audit clause (`adapters/cli-selfaudit`) | on-demand | best-effort, honestly weaker |
+
+> **Support scope.** dinotrust officially supports only **OpenClaw, Hermes,
+> Claude Code, Codex CLI** — the runtimes with a real pre-tool veto (see the
+> top-level README). Cursor, Windsurf, Continue.dev, Aider, and Goose have no
+> such hook and are **not supported**: they'd get instruction-only defense with
+> no enforcement and no independent audit. The `cli-selfaudit` adapter's
+> mechanism still applies to any self-reporting CLI, but we no longer list
+> unsupported runtimes as targets.
 
 The tier is decided by **physics, not effort**: does the runtime expose a
 programmatic message hook / long-lived process?
@@ -89,7 +97,7 @@ bash observability/install.sh --report-target <chat-id>
 bash observability/install.sh --platform hermes --report-target <chat-id>
 ```
 
-### T3 — No-daemon CLIs (Claude Code, Codex CLI, Cursor, Windsurf, Continue, Aider, Goose)
+### T3 — No-daemon CLIs (Claude Code, Codex CLI)
 
 Observability is set up automatically by `scripts/install.sh` when you pass
 `--with-observability`. It creates `~/.dinotrust/env` and a self-audit log:

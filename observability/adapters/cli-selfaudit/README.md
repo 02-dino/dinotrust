@@ -1,8 +1,13 @@
 # Tier-3 — No-daemon CLI self-audit
 
-**Runtimes:** Claude Code, OpenAI Codex CLI, Cursor, Windsurf, Continue.dev,
-Aider, Goose — any request/response CLI with **no persistent process and no
-message-event hook**.
+**Runtimes:** Claude Code, OpenAI Codex CLI — and, mechanically, any
+request/response CLI with **no persistent process and no message-event hook**
+(Cursor, Windsurf, Continue.dev, Aider, Goose fit the same shape).
+
+> **Note:** only **Claude Code** and **Codex CLI** are officially supported by
+> dinotrust (see top-level README § Supported runtimes). The mechanism below is
+> described generically — listing the others describes *what this pattern can
+> do*, not an endorsement or a supported install path for them.
 
 ## Why this tier is different (physics, not effort)
 

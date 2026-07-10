@@ -131,13 +131,30 @@ DINOTRUST_ALLOWED_ACTIONS
   owner_rules:
     when:
       requester_is_owner: true
-    require:
-      - approval_before:
-          - write_operations
-          - delete_operations
-    exceptions:
-      - running_existing_workspace_scripts: true
-      - scheduled_cron_jobs: true
+    default: allow
+    confirm_before:
+      scope: critical_or_irreversible_only
+      actions:
+        - rm_rf
+        - force_push
+        - drop_table
+        - truncate
+        - mkfs
+        - dd_overwrite
+        - uninstall
+        - hard_reset
+        - write_to: [openclaw_config, security_rules, agents_md, dotenv]
+    confirm_semantics:
+      type: courtesy_confirmation
+      not: hard_gate
+      on_unavailable_or_timeout: fail_open_allow
+      never: strand_owner
+    no_confirm:
+      - normal_write_operations
+      - normal_delete_operations
+      - read_operations
+      - running_existing_workspace_scripts
+      - scheduled_cron_jobs
 
 ## security_injection
   injection_defense:

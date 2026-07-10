@@ -169,11 +169,19 @@ def main():
     inbound = [r for r in act if r.get("direction") == "in"]
     outbound = [r for r in act if r.get("direction") == "out"]
 
-    # Skip slash/system noise in user-facing counts (e.g. /new, /status)
-    real_in = [
-        r for r in inbound
-        if not str(r.get("content", "")).strip().startswith("/")
-    ]
+    # Skip slash/system noise in user-facing counts (e.g. /new, /status).
+    # Also drop senderId-null internal injections (heartbeat / async-completion
+    # / gateway-restart continuation turns) so they don't get bucketed as a
+    # phantom "unknown" user and look like a hidden/unauthorized sender.
+    def _is_real_user(r):
+        if str(r.get("content", "")).strip().startswith("/"):
+            return False
+        sid = r.get("senderId")
+        if sid is None or str(sid).strip() in ("", "unknown"):
+            return False  # system/cron-injected turn, not a human sender
+        return True
+
+    real_in = [r for r in inbound if _is_real_user(r)]
 
     # Unique users — keyed by senderId so we can build mention links
     users = Counter(str(r.get("senderId") or "unknown") for r in real_in)

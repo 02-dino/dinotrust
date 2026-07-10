@@ -34,6 +34,12 @@ OPT_NONINTERACTIVE=false
 # headless (it needs a leak-sensitive --report-target we must not guess).
 OPT_NO_OBSERVABILITY=false   # --no-observability: skip the chain entirely
 OPT_WITH_OBSERVABILITY=false # --with-observability: force the chain (e.g. headless)
+# Enforce layer (code-level pre-tool veto). Default-on for platforms that support
+# it (openclaw|hermes|claude-code|codex-cli). --no-enforce opts out.
+OPT_NO_ENFORCE=false
+OPT_ENFORCE_SHADOW=false     # --enforce-shadow: install enforce in dry-run (log, no block)
+OPT_ALLOW_SCRIPTS=""         # --allow-scripts: non-owner exec allowlist for enforce
+OPT_AGENT=""                 # --agent: agentFilter substring for enforce (empty = all agents)
 OPT_REPORT_TARGET=""         # forwarded to observability/install.sh
 OPT_REPORT_CHANNEL=""        # delivery channel (telegram|discord|slack|file)
 OPT_REPORT_THREAD=""         # thread/topic ID for forum channels
@@ -53,6 +59,10 @@ while [[ $# -gt 0 ]]; do
     --workspace)  OPT_CONFIG="${2%/}/AGENTS.md"; shift 2 ;;
     --no-observability)   OPT_NO_OBSERVABILITY=true; shift ;;
     --with-observability) OPT_WITH_OBSERVABILITY=true; shift ;;
+    --no-enforce)         OPT_NO_ENFORCE=true; shift ;;
+    --enforce-shadow)     OPT_ENFORCE_SHADOW=true; shift ;;
+    --allow-scripts)      OPT_ALLOW_SCRIPTS="$2"; shift 2 ;;
+    --agent)              OPT_AGENT="$2"; shift 2 ;;
     --report-target)      OPT_REPORT_TARGET="$2"; shift 2 ;;
     --report-channel)     OPT_REPORT_CHANNEL="$2"; shift 2 ;;
     --report-thread)      OPT_REPORT_THREAD="$2"; shift 2 ;;
@@ -61,7 +71,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: bash scripts/install.sh [options]"
       echo ""
       echo "Options:"
-      echo "  --platform NAME     Platform: openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider"
+      echo "  --platform NAME     Runtime: openclaw|hermes|claude-code|codex-cli (only these support enforcement)"
       echo "  --owner-id IDS      Your platform user ID(s); comma-separated for multiple owners."
       echo "                      Scope an owner to specific platform(s) with id@platform"
       echo "                      (e.g. 1083618205@telegram, or 123@telegram+discord). A bare"
@@ -75,20 +85,27 @@ while [[ $# -gt 0 ]]; do
       echo "  --dry-run           Preview injection, no changes"
       echo "  --protected FILES   Comma-separated extra protected files"
       echo ""
-      echo "Observability (audit layer — all platforms):"
-      echo "  After a successful install, you are offered the observability"
-      echo "  audit layer (interactive: default Yes). It is separate from enforcement."
-      echo "  T1 (OpenClaw, Hermes): hook-based audit, auto-installed."
-      echo "  T3 (claude-code, codex, cursor, etc.): self-audit env setup + log dir."
-      echo "  --with-observability   Force-chain it (needs --report-target). Use headless."
-      echo "  --no-observability     Skip the chain entirely."
-      echo "  --report-target ID     Digest destination (chat/channel ID)."
+      echo "Observability (audit layer — installed BY DEFAULT, all platforms):"
+      echo "  Installed as part of the main install (local audit log). A report target"
+      echo "  adds remote digest delivery; it is optional and never guessed."
+      echo "  T1 (OpenClaw, Hermes): hook-based audit.  T3 (claude-code, codex): self-audit."
+      echo "  --no-observability     Opt out of the audit layer entirely."
+      echo "  --with-observability   Force-chain (default-on anyway; kept for clarity)."
+      echo "  --report-target ID     Digest destination (chat/channel ID). Optional."
       echo "  --report-channel NAME  Delivery channel: telegram|discord|slack|file."
+      echo ""
+      echo "Enforce (code-level pre-tool veto — installed BY DEFAULT on supported runtimes):"
+      echo "  Supported: openclaw | hermes | claude-code | codex-cli (they have a real"
+      echo "  pre-tool veto). Unsupported runtimes get the instruction layer only."
+      echo "  --no-enforce           Opt out; instruction layer only (compliance-dependent)."
+      echo "  --enforce-shadow       Install enforce in dry-run (log, no block) to shadow-test."
+      echo "  --allow-scripts LIST   Non-owner exec allowlist, comma-separated (e.g."
+      echo "                         exchange_data,semantic_search). Default: none."
       echo ""
       echo "Headless/agent use: pass --platform, --owner-id, --profile, and --config (or"
       echo "--workspace), plus --non-interactive and --force. Missing input then fails fast"
-      echo "with the exact flag to add, instead of hanging on a prompt. Observability is"
-      echo "skipped headless unless you pass --with-observability --report-target <id>."
+      echo "with the exact flag to add, instead of hanging on a prompt. Observability and"
+      echo "enforce are installed by default (opt out with --no-observability / --no-enforce)."
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -137,10 +154,14 @@ echo "────────────────────────�
 echo ""
 
 # ── Step 1: Platform ──────────────────────────────────────────────────────────
-PLATFORMS=(openclaw hermes claude-code codex-cli goose cursor windsurf continue aider)
+# Supported = runtimes with a real pre-tool veto (the enforce hook point).
+# Others get instruction-only, which is compliance-dependent, so we do not offer
+# them here. See README "Supported runtimes".
+PLATFORMS=(openclaw hermes claude-code codex-cli)
+UNSUPPORTED=(goose cursor windsurf continue aider)
 
 if [[ -z "$OPT_PLATFORM" ]]; then
-  need_input "platform" "--platform openclaw|hermes|claude-code|codex-cli|goose|cursor|windsurf|continue|aider" self
+  need_input "platform" "--platform openclaw|hermes|claude-code|codex-cli" self
   # Auto-detect
   DETECTED=""
   [[ -f "$HOME/.openclaw/openclaw.json" ]] && DETECTED="openclaw"
@@ -153,30 +174,30 @@ if [[ -z "$OPT_PLATFORM" ]]; then
   fi
 
   echo ""
-  ask "Which platform are you installing for?"
+  ask "Which runtime are you installing for? (only these support enforcement)"
   echo "  1) OpenClaw"
   echo "  2) Hermes"
   echo "  3) Claude Code"
   echo "  4) OpenAI Codex CLI"
-  echo "  5) Goose"
-  echo "  6) Cursor"
-  echo "  7) Windsurf"
-  echo "  8) Continue.dev"
-  echo "  9) Aider"
   echo ""
-  read -rp "Enter number [1-9]: " PLATFORM_NUM
+  read -rp "Enter number [1-4]: " PLATFORM_NUM
   case "$PLATFORM_NUM" in
     1) OPT_PLATFORM="openclaw" ;;
     2) OPT_PLATFORM="hermes" ;;
     3) OPT_PLATFORM="claude-code" ;;
     4) OPT_PLATFORM="codex-cli" ;;
-    5) OPT_PLATFORM="goose" ;;
-    6) OPT_PLATFORM="cursor" ;;
-    7) OPT_PLATFORM="windsurf" ;;
-    8) OPT_PLATFORM="continue" ;;
-    9) OPT_PLATFORM="aider" ;;
     *) error "Invalid selection." ;;
   esac
+fi
+
+# Guard: reject unsupported runtimes (passed via --platform) with the rationale.
+if [[ " ${UNSUPPORTED[*]} " =~ " ${OPT_PLATFORM} " ]]; then
+  echo -e "${RED}✗${NC} '$OPT_PLATFORM' is not supported: it has no pre-tool veto, so dinotrust could" >&2
+  echo -e "${RED}✗${NC} only inject the instruction layer — which a non-compliant agent can ignore," >&2
+  echo -e "${RED}✗${NC} with no independent audit to catch it. That's a false sense of security, not" >&2
+  echo -e "${RED}✗${NC} the posture dinotrust promises. Supported runtimes: ${PLATFORMS[*]}." >&2
+  echo -e "${RED}✗${NC} For '$OPT_PLATFORM', a tool built for its native permission model serves you better." >&2
+  exit 2
 fi
 
 info "Platform: $OPT_PLATFORM"
@@ -320,7 +341,7 @@ id_discovery_hint() {
     hermes)
       echo "Hermes: check your platform's user metadata or auth.test response for the verified user id"
       ;;
-    claude-code|codex-cli|cursor|windsurf|continue|aider|goose)
+    claude-code|codex-cli)
       if [[ "$_what" == "owner" ]]; then
         echo "CLI agent: your owner ID is typically your platform user ID (check the agent's config or the platform's account settings)"
       else
@@ -795,21 +816,27 @@ setup_t3_observability() {
 chain_observability() {
   [[ "$OPT_NO_OBSERVABILITY" == "true" ]] && { info "Skipping observability (--no-observability)."; return 0; }
 
-  # Decide whether to run.
-  local _run=false
+  # Observability is now part of the DEFAULT install (dino: "install it as part of
+  # the main installer"). It logs injection attempts locally regardless; a
+  # --report-target only adds remote digest DELIVERY, which stays optional and is
+  # never guessed. So: default-on everywhere, including headless. Opt out with
+  # --no-observability. Delivery-less installs still get the local audit log.
+  local _run=true
   if [[ "$OPT_WITH_OBSERVABILITY" == "true" ]]; then
     _run=true
   elif [[ "$OPT_NONINTERACTIVE" == "true" ]]; then
-    # Headless: do NOT demand a report-target that wasn't given. Skip with a hint.
-    info "Observability not installed (headless). To include it, re-run with:"
-    info "  --with-observability --report-target <chat-id> [--report-channel <name>]"
-    return 0
+    # Headless: install the audit layer (local logging). If no --report-target was
+    # given, remote delivery is simply not configured — the digest still runs
+    # on-demand and reads the local log.
+    _run=true
+    [[ -z "$OPT_REPORT_TARGET" ]] && info "Observability: installing local audit layer (no --report-target given, remote delivery unconfigured)."
   else
     echo ""
-    ask "Also install the observability audit layer now? It reports injection attempts to a target you choose. [Y/n]"
+    ask "Install the observability audit layer? (default: yes) It logs injection"
+    info "attempts locally; a report target adds remote digest delivery. [Y/n]"
     local _ans
     read -rp "> " _ans
-    [[ -z "$_ans" || "$_ans" =~ ^[Yy]$ ]] && _run=true
+    [[ "$_ans" =~ ^[Nn]$ ]] && _run=false
   fi
   if [[ "$_run" != "true" ]]; then
     info "Skipped observability (the optional audit layer — a daily/weekly digest"
@@ -845,8 +872,10 @@ chain_observability() {
       bash "$OBS_INSTALLER" "${_obs_args[@]}" || warn "Observability install did not complete — core enforcement is unaffected. Re-run observability/install.sh manually."
       ;;
 
-    claude-code|codex-cli|goose|cursor|windsurf|continue|aider)
+    claude-code|codex-cli)
       # T3 — no-daemon CLI: set up self-audit env + log dir
+      # (goose/cursor/windsurf/continue/aider are rejected earlier by the
+      #  UNSUPPORTED guard, so only the two supported CLIs reach here.)
       # Prompt for channel + target if not given
       if [[ -z "$OPT_REPORT_TARGET" && "$OPT_NONINTERACTIVE" != "true" ]]; then
         echo ""
@@ -878,6 +907,40 @@ chain_observability() {
   esac
 }
 
+# ── Chain: enforce layer (code-level pre-tool veto) ──────────────────────────
+# The instruction layer (security_rules.md) is now installed. For platforms with
+# a real pre-tool veto, also install the enforce hook so policy holds even if the
+# model doesn't comply. Default-on; --no-enforce opts out. Unsupported platforms
+# (cursor/windsurf/continue/aider/goose) are skipped with a clear note.
+ENFORCE_INSTALLER="$REPO_DIR/enforce/install.sh"
+chain_enforce() {
+  [[ "$OPT_NO_ENFORCE" == "true" ]] && { info "Skipping enforce layer (--no-enforce). Instruction layer is active; enforcement is not."; return 0; }
+  case "$OPT_PLATFORM" in
+    openclaw|hermes|claude-code|codex-cli) : ;;
+    *)
+      warn "Enforce layer not supported on '$OPT_PLATFORM' (no pre-tool veto)."
+      warn "You have the instruction layer only, which is compliance-dependent."
+      warn "For real enforcement use OpenClaw, Hermes, Claude Code, or Codex CLI."
+      return 0 ;;
+  esac
+  if [[ ! -f "$ENFORCE_INSTALLER" ]]; then
+    warn "Enforce installer not found at $ENFORCE_INSTALLER — skipping."; return 0
+  fi
+  local _args=(--platform "$OPT_PLATFORM")
+  [[ -n "$OPT_OWNER_ID" ]] && _args+=(--owner-id "$OPT_OWNER_ID")
+  [[ -n "$OPT_ALLOW_SCRIPTS" ]] && _args+=(--allow-scripts "$OPT_ALLOW_SCRIPTS")
+  [[ -n "${OPT_AGENT:-}" ]] && _args+=(--agent "$OPT_AGENT")
+  [[ -n "$OPT_CONFIG" ]] && _args+=(--config "$OPT_CONFIG")
+  [[ "$OPT_ENFORCE_SHADOW" == "true" ]] && _args+=(--shadow)
+  [[ "$OPT_FORCE" == "true" ]] && _args+=(--force)
+  $OPT_DRY_RUN && _args+=(--dry-run)
+  [[ "$OPT_NONINTERACTIVE" == "true" ]] && _args+=(--non-interactive)
+  echo ""
+  info "Chaining enforce: bash $ENFORCE_INSTALLER ${_args[*]}"
+  bash "$ENFORCE_INSTALLER" "${_args[@]}" || warn "Enforce install did not complete — instruction layer is unaffected. Re-run enforce/install.sh manually."
+}
+
 # Note: core --dry-run exits earlier (Step 8), so the chain only runs on a real
 # install — dry-run never reaches here, by design.
 chain_observability
+chain_enforce
