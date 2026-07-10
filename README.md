@@ -291,6 +291,42 @@ The ruleset matches: *sender is owner IFF (a bare owner_id equals the sender_id)
 
 > **⚠️ Each owner is a full-access account.** More owners means more accounts that, if compromised, grant the agent's full owner privileges. Add only IDs you trust at the same level as your own. There is no partial-owner tier — owner is all-or-nothing (use a profile preset if you need scoped non-owner access instead).
 
+**Adding or removing an owner after install**
+
+There are two owner-id stores that must stay in sync: `security_rules.md`'s
+`owner_ids` (instruction layer) and the enforce hook's own `ownerIds` config
+(`openclaw.json` plugin entry, or `~/.dinotrust/enforce.json` on CLI runtimes).
+Running the **top-level installer** keeps both in sync automatically — it's the
+recommended path:
+
+```bash
+bash scripts/install.sh --owner-id "123456789,987654321,NEWID" --force
+```
+
+Pass the FULL new owner list (this replaces the set, it does not append), same
+profile as before. `update.sh` does the equivalent while also pulling latest.
+This single command updates both the instruction layer and the enforce hook
+together — do not run `enforce/install.sh` on its own to add an owner unless
+you're intentionally diverging the two lists (see [`enforce/README.md`](enforce/README.md)
+for that advanced path and the risk of doing so).
+
+Alternatively, edit directly — but you must touch **both** files, or the two
+layers disagree about who's an owner:
+1. The injected block in your agent config (`AGENTS.md` / `CLAUDE.md` / …) — edit the `owner_ids:` list between `# --- dinotrust begin ---` / `# --- dinotrust end ---`.
+2. The enforce hook's own config — OpenClaw: `plugins.entries."dinotrust-enforce".config.ownerIds` in `openclaw.json`, then `openclaw gateway restart`; Hermes/Claude Code/Codex: `ownerIds` in `~/.dinotrust/enforce.json` (no restart needed, read fresh each call).
+
+**Editing `AGENTS.md` / `security_rules.md` alone does not change enforce-layer
+ownership** — the enforce hook reads its own config file, not the instruction
+file, precisely so a prompt injection or a confused model editing that file
+can't grant itself owner status at the code-enforcement level. If you edit the
+instruction file's `owner_ids` without also updating the enforce config, the
+two layers will disagree (instruction layer may recognize someone the hook
+still blocks, or vice versa) until you sync them or restart with the top-level
+installer.
+
+Removing an owner works the same way — drop their id from the full list you
+pass or edit; there is no separate "remove" command.
+
 ---
 
 ## Non-owner access is customizable

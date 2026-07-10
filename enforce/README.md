@@ -81,44 +81,26 @@ bash enforce/install.sh --platform openclaw --owner-id <id> \
 
 `enforce:false` first to shadow-test (log only), then flip to `true`.
 
-## Owners: multiple, and adding/removing after install
+## Owners, and this installer's scope
 
-`ownerIds` is an **array**, not a single id — pass one or many at install time
-as a comma-separated list:
+`ownerIds` here is an **array**, not a single id — comma-separated, e.g.
+`--owner-id "111111,222222,333333"`. Every id gets identical owner tier; no
+primary/secondary.
+
+**This is the enforce-layer's own config, separate from `security_rules.md`'s
+`owner_ids`.** Running `enforce/install.sh` directly (standalone, bypassing the
+top-level `scripts/install.sh`) updates ONLY the enforce hook's owner list —
+it does not touch the instruction-layer copy in your agent config. That's fine
+if you're intentionally running enforce standalone (e.g. `--no-observability`
+installs, or testing the hook in isolation), but if you normally installed via
+the top-level installer, use that same entrypoint to add/remove owners too, so
+both layers stay in sync:
 
 ```bash
-bash enforce/install.sh --platform openclaw --owner-id "111111,222222,333333"
+bash scripts/install.sh --owner-id "111111,222222,NEWID" --force
 ```
 
-Every id in the list gets identical owner tier (warn-only + critical-approval);
-everyone else falls under the strict non-owner rules. There is no primary/
-secondary distinction between owners.
-
-**Important: editing `AGENTS.md` / `security_rules.md` does NOT change who is
-an owner.** Those are the instruction layer (model-compliance-dependent) —
-the enforce hook deliberately never reads them, precisely so a prompt
-injection or a confused model editing that file can't grant itself owner
-status. `ownerIds` is read only from the hook's own config, never from a
-`.md` file.
-
-**To add or remove an owner after install**, two supported paths:
-
-1. **Re-run the installer** with `--force` and the FULL new owner list (not
-   just the delta — this replaces the array, it does not append):
-   ```bash
-   bash enforce/install.sh --platform openclaw --owner-id "111111,222222,NEWID" --force
-   ```
-   Idempotent, re-merges via `merge_config.py`, backs up the config first.
-
-2. **Edit the config directly**, then restart/reload the runtime so the new
-   list takes effect:
-   - **OpenClaw:** patch `plugins.entries."dinotrust-enforce".config.ownerIds`
-     in `openclaw.json`, then `openclaw gateway restart` (a hot-patch alone
-     does not take effect until restart — the hook config is loaded on start).
-   - **Hermes / Claude Code / Codex:** edit `ownerIds` in `~/.dinotrust/enforce.json`
-     directly (it's plain JSON, `chmod 600`); the `pre_tool_call` handler reads it
-     fresh on each invocation, no restart needed for these runtimes.
-
-Removing an owner is symmetric to adding: drop their id from the array via
-either path above. There is no separate "remove" command — the list you
-provide (via re-install or direct edit) becomes the new source of truth.
+See the main [README's Identity model](../README.md#identity-model) section
+("Multiple owners" / "Adding or removing an owner after install") for the full
+add/remove flow, why `AGENTS.md` edits alone don't grant enforce-layer
+ownership, and platform-scoped owner syntax (`id@platform`).
