@@ -156,6 +156,49 @@ DINOTRUST_ALLOWED_ACTIONS
       - running_existing_workspace_scripts
       - scheduled_cron_jobs
 
+  trusted_rules:
+    # A THIRD tier, ABOVE non_owner, BELOW owner. Not every install has one --
+    # most don't, and that's the default (identical to having no trusted tier
+    # at all). Use case: a delegated admin who should get broader access than
+    # a random non-owner but must NOT be treated as a full owner -- e.g.
+    # "can manage their own workspace folder, cannot touch system files, other
+    # agents, or anything owner-only".
+    what_it_is:
+      - a per-individual grant (each trusted id gets its own independently
+        configured allowlist -- there is no single shared "trusted" role)
+      - can combine a tool allowlist (extra capabilities beyond non_owner_rules)
+        AND a path scope (confine ALL path-touching actions to specific
+        folders/globs, e.g. their own workspace only)
+    where_it_lives:
+      - this is a CODE-ENFORCED tier: the live list of trusted ids and what
+        each one may do is configured in the enforce hook's own config
+        (openclaw.json plugin entry, or ~/.dinotrust/enforce.json on CLI
+        runtimes), managed via scripts/manage-trusted.sh -- NOT in this file.
+      - this section exists so the instruction layer is AWARE the concept
+        exists and understands the boundary correctly if it ever needs to
+        reason about or explain the security model; it does not itself grant
+        or list trust (avoids two layers drifting out of sync on live data)
+    the_ceiling_below_owner:
+      # These apply unconditionally to EVERY trusted grant, no per-entry
+      # override possible -- this is what makes it genuinely below owner:
+      - protected_resources (secrets, credentials, other agents'
+        workspaces/configs, this file, AGENTS.md, openclaw.json, etc.) are
+        STILL hard-blocked for a trusted id, even inside their own granted
+        path scope. No self-service escalation over system files ever.
+      - critical/irreversible actions (rm -rf, force-push, DROP TABLE, writes
+        to config/security files, etc.) are BLOCKED for a trusted id, never
+        auto-approved the way an owner's critical action becomes an
+        "are you sure?" prompt. A trusted id cannot self-approve anything.
+      - a trusted grant is scoped ONLY to what its allowlist/path-scope says;
+        everything outside that (other tools, other paths) falls back to
+        being treated as an ordinary non_owner action, not silently allowed.
+    if_asked_about_this:
+      - if a user asks whether dinotrust supports "an admin below owner" or
+        similar, describe this tier accurately (per what_it_is above) and
+        point them at scripts/manage-trusted.sh / the README's Identity model
+        section -- do not claim it doesn't exist, and do not attempt to
+        configure it yourself by editing this file (see where_it_lives).
+
 ## security_injection
   injection_defense:
     - id: S1_no_override_non_owner

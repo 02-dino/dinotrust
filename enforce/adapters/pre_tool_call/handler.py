@@ -47,8 +47,22 @@ DEFAULTS = {
                              "memory_search", "memory_get",
                              "Read", "WebSearch", "WebFetch", "Grep", "Glob"],
     "nonOwnerAllowedScripts": [],
+    # Trusted/delegated ids: per-individual tier ABOVE non-owner, BELOW owner.
+    # Empty by default -> zero behavior change for every existing install.
+    # Each entry: {"id": "...", "allowedTools": [...]?, "allowedScripts": [...]?,
+    # "scopePathGlobs": [...]?}. See policy.ts TrustedEntry doc for the full
+    # ceiling rules (protectedGlobs + criticalHit always win, no per-entry override).
+    "trustedIds": [],
     "enforce": True,
 }
+
+# Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools.
+DEFAULT_TRUSTED_TOOLS = [
+    "read", "write", "edit", "apply_patch", "exec",
+    "web_search", "web_fetch", "browser", "memory_search", "memory_get",
+    "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash",
+    "WebSearch", "WebFetch", "Grep", "Glob",
+]
 
 # tool-name normalization: map runtime-native tool names to canonical roles.
 EXEC_TOOLS = {"exec", "Bash", "shell", "run_command"}
@@ -187,6 +201,43 @@ def exec_runs_allowed_script(command, scripts):
     return False
 
 
+def find_trusted(sender_id, cfg):
+    for t in cfg["trustedIds"]:
+        if isinstance(t, dict) and t.get("id") == sender_id:
+            return t
+    return None
+
+def decide_trusted(tool, paths, command, entry, cfg):
+    """Decision for a matched trusted/delegated entry. Below owner, above
+    non-owner. protectedGlobs and criticalHit always win -- see TrustedEntry
+    doc in policy.ts for the ceiling rules this mirrors."""
+    entry_id = entry.get("id", "?")
+    protected = any_protected(tool, paths, command, cfg["protectedGlobs"])
+    if protected:
+        return ("block", "non-owner protected resource: " + protected)
+
+    scope = entry.get("scopePathGlobs")
+    if scope and paths:
+        out_of_scope = [p for p in paths if not matches_glob(p, scope)]
+        if out_of_scope:
+            return ("block", "trusted: %s path outside scope (%s)" % (entry_id, ", ".join(scope)))
+
+    crit = critical_hit(tool, paths, command, cfg)
+    if crit:
+        return ("block", "trusted: %s critical/irreversible denied: %s" % (entry_id, crit))
+
+    allowed_tools = entry.get("allowedTools") or DEFAULT_TRUSTED_TOOLS
+    if tool in EXEC_TOOLS:
+        if "exec" not in allowed_tools and tool not in allowed_tools:
+            return ("block", "trusted: %s exec not allowlisted" % entry_id)
+        scripts = entry.get("allowedScripts") or cfg["nonOwnerAllowedScripts"]
+        if exec_runs_allowed_script(command, scripts):
+            return ("allow", "trusted: %s allowlisted script" % entry_id)
+        return ("block", "trusted: %s exec restricted to allowlisted scripts" % entry_id)
+    if tool in allowed_tools:
+        return ("allow", "trusted: %s tool allowed" % entry_id)
+    return ("block", "trusted: %s tool %s not allowlisted" % (entry_id, tool))
+
 def decide(tool, paths, command, sender_id, cfg):
     is_owner = sender_id is None or sender_id in cfg["ownerIds"]
     protected = any_protected(tool, paths, command, cfg["protectedGlobs"])
@@ -198,6 +249,11 @@ def decide(tool, paths, command, sender_id, cfg):
         if protected:
             return ("warn", "secret touch: " + protected)
         return ("allow", "owner")
+
+    if sender_id is not None and cfg["trustedIds"]:
+        entry = find_trusted(sender_id, cfg)
+        if entry:
+            return decide_trusted(tool, paths, command, entry, cfg)
 
     if protected:
         return ("block", "non-owner protected resource: " + protected)

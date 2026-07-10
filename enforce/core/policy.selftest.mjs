@@ -48,5 +48,40 @@ t("stranger memory_search", call("memory_search"), STRANGER, "allow");
 t("stranger exec cat credentials", call("exec", { command: "cat ~/.config/credentials" }), STRANGER, "block");
 t("stranger unknown tool", call("some_write_tool"), STRANGER, "block");
 
+// ── trusted/delegated tier (above non-owner, below owner) ──
+const CFG_TRUSTED = normalizeConfig({
+  ownerIds: ["1083618205"],
+  nonOwnerAllowedScripts: ["exchange_data", "semantic_search", "consensus_search"],
+  trustedIds: [
+    { id: "555555", scopePathGlobs: ["workspace-bob/**"] },
+    { id: "666666", allowedTools: ["read", "write"], allowedScripts: ["exchange_data"] },
+    { id: "777777", allowedTools: ["read", "write", "exec"], allowedScripts: ["exchange_data"] },
+  ],
+});
+function tt(name, c, sender, expect) {
+  const v = decide(c, sender, CFG_TRUSTED);
+  const ok = v.action === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+tt("trusted scope: in-scope write allowed", call("write", { paths: ["workspace-bob/notes.md"] }), "555555", "allow");
+tt("trusted scope: out-of-scope write blocked", call("write", { paths: ["workspace-alice/notes.md"] }), "555555", "block");
+tt("trusted scope: protected glob wins even in scope", call("write", { paths: ["workspace-bob/.env"] }), "555555", "block");
+tt("trusted scope: critical action blocked not approved", call("exec", { command: "rm -rf workspace-bob/x" }), "555555", "block");
+tt("trusted tool-allowlist: allowed tool passes", call("read", { paths: ["anywhere.txt"] }), "666666", "allow");
+tt("trusted tool-allowlist: disallowed tool blocked", call("edit", { paths: ["anywhere.txt"] }), "666666", "block");
+tt("trusted exec: not granted -> blocked", call("exec", { command: "python3 tools/exchange_data.py price BTC" }), "666666", "block");
+tt("trusted exec: granted + allowlisted script -> allowed", call("exec", { command: "python3 tools/exchange_data.py price BTC" }), "777777", "allow");
+tt("trusted exec: granted but script not allowlisted -> blocked", call("exec", { command: "python3 tools/arkham_search.py x" }), "777777", "block");
+tt("trusted with no scopePathGlobs: any path allowed if tool allowed", call("write", { paths: ["/etc/random/path.txt"] }), "777777", "allow");
+tt("non-trusted stranger still hits normal non-owner path", call("write", { paths: ["anywhere.txt"] }), "999999", "block");
+tt("owner unaffected by trustedIds config", call("write", { paths: ["anything.txt"] }), "1083618205", "allow");
+
+// back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
+const v = decide(call("read"), "555555", CFG);
+const backOk = v.action === "allow" && v.reason === "non-owner allowed tool";
+console.log(`${backOk ? "PASS" : "FAIL"}  back-compat: empty trustedIds unaffected  -> ${v.action} (${v.reason})`);
+backOk ? pass++ : fail++;
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

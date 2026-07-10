@@ -60,5 +60,49 @@ t("stranger memory_search", "memory_search", STRANGER, "allow")
 t("stranger cat credentials", "exec", STRANGER, "block", command="cat ~/.config/credentials")
 t("stranger unknown tool", "some_write_tool", STRANGER, "block")
 
+# ── trusted/delegated tier (above non-owner, below owner) ──
+CFG_TRUSTED = dict(handler.DEFAULTS)
+CFG_TRUSTED["ownerIds"] = ["1083618205"]
+CFG_TRUSTED["nonOwnerAllowedScripts"] = ["exchange_data", "semantic_search", "consensus_search"]
+CFG_TRUSTED["trustedIds"] = [
+    {"id": "555555", "scopePathGlobs": ["workspace-bob/**"]},
+    {"id": "666666", "allowedTools": ["read", "write"], "allowedScripts": ["exchange_data"]},
+    {"id": "777777", "allowedTools": ["read", "write", "exec"], "allowedScripts": ["exchange_data"]},
+]
+
+def tt(name, tool, sender, expect, command="", paths=None):
+    global _pass, _fail
+    action, reason = handler.decide(tool, paths or [], command, sender, CFG_TRUSTED)
+    ok = action == expect
+    print(("PASS" if ok else "FAIL") + "  %s  -> %s (%s)" % (name, action, reason))
+    if ok:
+        _pass += 1
+    else:
+        _fail += 1
+
+tt("trusted scope: in-scope write allowed", "write", "555555", "allow", paths=["workspace-bob/notes.md"])
+tt("trusted scope: out-of-scope write blocked", "write", "555555", "block", paths=["workspace-alice/notes.md"])
+tt("trusted scope: protected glob wins even in scope", "write", "555555", "block", paths=["workspace-bob/.env"])
+tt("trusted scope: critical action blocked not approved", "exec", "555555", "block", command="rm -rf workspace-bob/x")
+tt("trusted tool-allowlist: allowed tool passes", "read", "666666", "allow", paths=["anywhere.txt"])
+tt("trusted tool-allowlist: disallowed tool blocked", "edit", "666666", "block", paths=["anywhere.txt"])
+tt("trusted exec: not granted -> blocked", "exec", "666666", "block", command="python3 tools/exchange_data.py price BTC")
+tt("trusted exec: granted + allowlisted script -> allowed", "exec", "777777", "allow", command="python3 tools/exchange_data.py price BTC")
+tt("trusted exec: granted but script not allowlisted -> blocked", "exec", "777777", "block", command="python3 tools/arkham_search.py x")
+tt("trusted with no scopePathGlobs: any path allowed if tool allowed", "write", "777777", "allow", paths=["/etc/random/path.txt"])
+tt("non-trusted stranger still hits normal non-owner path", "write", "999999", "block", paths=["anywhere.txt"])
+tt("owner unaffected by trustedIds config", "write", "1083618205", "allow", paths=["anything.txt"])
+
+# back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
+CFG_BACKCOMPAT = dict(handler.DEFAULTS)
+CFG_BACKCOMPAT["ownerIds"] = ["1083618205"]
+action, reason = handler.decide("read", [], "", "555555", CFG_BACKCOMPAT)
+ok = action == "allow" and reason == "non-owner allowed tool"
+print(("PASS" if ok else "FAIL") + "  back-compat: empty trustedIds unaffected  -> %s (%s)" % (action, reason))
+if ok:
+    _pass += 1
+else:
+    _fail += 1
+
 print("\n%d passed, %d failed" % (_pass, _fail))
 sys.exit(1 if _fail else 0)

@@ -402,6 +402,48 @@ Start from a preset, then trim or extend `allowed` to taste — e.g. a market bo
 
 ---
 
+## Trusted / delegated access (a third tier)
+
+Most installs only need owner vs. non-owner. But sometimes there's a person
+who should get **more** than a stranger and **less** than you — a delegated
+admin who manages their own workspace folder, or a teammate who needs one
+extra tool, without becoming a full owner. That's `trustedIds`: a third tier,
+above non-owner, below owner, off by default (empty = zero behavior change).
+
+Each trusted id is configured **individually** — there's no shared "trusted"
+role, just per-person grants you compose from two knobs:
+
+| Knob | What it does |
+|------|--------------|
+| **Tool allowlist** | Extra tools/scripts this id may use, beyond the non-owner default. Omit → a sane broader-than-non-owner default (read/write/edit/exec/web/memory). |
+| **Path scope** (`--scope`) | Confines *every* path-touching action to specific globs — anything outside is blocked outright, no partial access. This is what makes "admin of their own workspace, nothing else" possible. |
+
+**The ceiling — always enforced, no per-entry override:**
+- Protected resources (`.env`, secrets, credentials, other agents'/workspaces' configs) stay hard-blocked, even inside a trusted id's own scope.
+- Critical/irreversible actions (`rm -rf`, force-push, `DROP TABLE`, …) are **blocked** for trusted ids — never escalated to an "are you sure?" approval the way an owner's critical action is.
+
+Manage it with `scripts/manage-trusted.sh` (same philosophy as `manage-owner.sh` — surgical edits, no full re-install):
+
+```bash
+# Delegated admin: broad access, but only inside their own workspace folder
+bash scripts/manage-trusted.sh add 555555 --scope "workspace-bob/**"
+
+# Extra tool access, no path restriction (their own risk surface is just those tools)
+bash scripts/manage-trusted.sh add 666666 --tools read,write --scripts exchange_data
+
+bash scripts/manage-trusted.sh list
+bash scripts/manage-trusted.sh show 555555
+bash scripts/manage-trusted.sh remove 555555
+```
+
+`trustedIds` lives **only** in the enforce hook's own config (`openclaw.json`
+plugin entry, or `~/.dinotrust/enforce.json`) — it's a code-enforced allowlist,
+not an identity/ownership claim, so there's no instruction-layer copy to keep
+in sync. `security_rules.md`'s `trusted_rules` section documents the concept
+for the agent's own awareness; it doesn't itself grant or list trust.
+
+---
+
 ## Observability (audit layer)
 
 dinotrust core *enforces*. The [`observability/`](observability/) module

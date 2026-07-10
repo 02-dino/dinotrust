@@ -112,3 +112,24 @@ See the main [README's Identity model](../README.md#identity-model) section
 ("Multiple owners" / "Adding or removing an owner after install") for the full
 add/remove flow, why `AGENTS.md` edits alone don't grant enforce-layer
 ownership, and platform-scoped owner syntax (`id@platform`).
+
+## Trusted / delegated ids (third tier, below owner)
+
+`trustedIds` is a separate, optional config on this same enforce hook: a
+per-individual grant above non-owner but below owner (e.g. "admin of their
+own workspace folder, nothing else"). Empty by default — zero behavior
+change unless you explicitly add someone. Unlike `ownerIds`, it lives
+**only** here (no instruction-layer counterpart to sync), managed with:
+
+```bash
+bash ../scripts/manage-trusted.sh add 555555 --scope "workspace-bob/**"
+bash ../scripts/manage-trusted.sh add 666666 --tools read,write --scripts exchange_data
+bash ../scripts/manage-trusted.sh list
+bash ../scripts/manage-trusted.sh remove 555555
+```
+
+Protected resources and critical/irreversible actions are hard-blocked for
+every trusted id regardless of scope — that ceiling has no per-entry
+override. See the main [README's Trusted / delegated access](../README.md#trusted--delegated-access-a-third-tier)
+section for the full picture, and `enforce/core/policy.ts`'s `TrustedEntry`
+doc comment for the exact enforcement semantics.

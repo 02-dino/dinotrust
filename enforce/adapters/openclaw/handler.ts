@@ -34,6 +34,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+type TrustedEntry = {
+  id: string;
+  allowedTools?: string[];
+  allowedScripts?: string[];
+  scopePathGlobs?: string[];
+};
+
 type Cfg = {
   agentFilter: string;
   ownerIds: string[];
@@ -44,9 +51,19 @@ type Cfg = {
   mutatingTools: string[];
   nonOwnerAllowedTools: string[];
   nonOwnerAllowedScripts: string[];
+  // Trusted/delegated ids: per-individual tier ABOVE non-owner, BELOW owner.
+  // Empty by default -> zero behavior change. See policy.ts TrustedEntry doc
+  // for the full ceiling rules (protectedGlobs + criticalHit always win).
+  trustedIds: TrustedEntry[];
   logFile: string;
   enforce: boolean;
 };
+
+// Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools.
+const DEFAULT_TRUSTED_TOOLS: string[] = [
+  "read", "write", "edit", "apply_patch", "exec",
+  "web_search", "web_fetch", "browser", "memory_search", "memory_get",
+];
 
 const DEFAULTS: Cfg = {
   agentFilter: "agent:analyst",
@@ -70,16 +87,22 @@ const DEFAULTS: Cfg = {
     "exchange_data", "semantic_search", "defillama_search", "arkham_search",
     "consensus_search", "news_consensus", "docs_search", "session_search", "graph_search",
   ],
+  trustedIds: [],
   logFile: "",
   enforce: true,
 };
 
 function cfg(raw: any): Cfg {
   const c = { ...DEFAULTS, ...(raw || {}) };
-  for (const k of ["ownerIds", "criticalExecPatterns", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts"] as const) {
+  for (const k of ["ownerIds", "criticalExecPatterns", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds"] as const) {
     if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
   }
   return c;
+}
+
+function findTrusted(senderId: string, c: Cfg): TrustedEntry | null {
+  for (const t of c.trustedIds) if (t.id === senderId) return t;
+  return null;
 }
 
 function logPath(c: Cfg): string {
@@ -234,6 +257,7 @@ export default definePluginEntry({
         const sender = resolveSenderId(event, ctx);
         const isOwner = sender == null || c.ownerIds.includes(sender);
         const protectedHit = anyProtected(event, c.protectedGlobs);
+        const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c) : null;
 
         // ===== OWNER / agent-operated-by-owner: warn-only + critical-approval =====
         if (isOwner) {
@@ -258,6 +282,57 @@ export default definePluginEntry({
             audit(c, { evt: "owner-warn", rule: "R-protected", toolName, sessionKey, sender: sender ?? "self", hit: protectedHit });
           }
           return; // otherwise full access, matches dinotrust owner_rules
+        }
+
+        // ===== TRUSTED / delegated (above non-owner, below owner) =====
+        if (trusted) {
+          // protectedGlobs ALWAYS wins, even inside this entry's own scopePathGlobs.
+          if (protectedHit) {
+            audit(c, { evt: "block", rule: "R-trusted-protected", toolName, sessionKey, sender, id: trusted.id, hit: protectedHit, blocked: c.enforce });
+            if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted blocked (protected resource)` };
+            return;
+          }
+          // Path confinement, if this entry sets it.
+          if (trusted.scopePathGlobs && trusted.scopePathGlobs.length > 0) {
+            const tp = targetPaths(event);
+            if (tp.length > 0) {
+              const outOfScope = tp.some((p) => !matchesProtected(p, trusted.scopePathGlobs!));
+              if (outOfScope) {
+                audit(c, { evt: "block", rule: "R-trusted-scope", toolName, sessionKey, sender, id: trusted.id, paths: tp, blocked: c.enforce });
+                if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted path outside scope (${trusted.scopePathGlobs.join(", ")})` };
+                return;
+              }
+            }
+          }
+          // Critical/irreversible actions are BLOCKED for trusted, never auto-approved.
+          const crit = criticalHit(event, c);
+          if (crit) {
+            audit(c, { evt: "block", rule: "R-trusted-critical", toolName, sessionKey, sender, id: trusted.id, hit: crit, blocked: c.enforce });
+            if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted critical/irreversible denied (${crit})` };
+            return;
+          }
+          const allowedTools = trusted.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
+          if (toolName === "exec") {
+            if (!allowedTools.includes("exec")) {
+              audit(c, { evt: "block", rule: "R-trusted-exec", toolName, sessionKey, sender, id: trusted.id, blocked: c.enforce });
+              if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted exec not allowlisted` };
+              return;
+            }
+            if (execRunsAllowedScript(event, trusted.allowedScripts ?? c.nonOwnerAllowedScripts)) {
+              audit(c, { evt: "allow", rule: "R-trusted-script", toolName, sessionKey, sender, id: trusted.id });
+              return;
+            }
+            audit(c, { evt: "block", rule: "R-trusted-exec", toolName, sessionKey, sender, id: trusted.id, blocked: c.enforce });
+            if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted exec restricted to allowlisted scripts` };
+            return;
+          }
+          if (allowedTools.includes(toolName)) {
+            audit(c, { evt: "allow", rule: "R-trusted-tool", toolName, sessionKey, sender, id: trusted.id });
+            return;
+          }
+          audit(c, { evt: "block", rule: "R-trusted-tool", toolName, sessionKey, sender, id: trusted.id, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted tool ${toolName} not allowlisted` };
+          return;
         }
 
         // ===== NON-OWNER: strict + allowlist =====

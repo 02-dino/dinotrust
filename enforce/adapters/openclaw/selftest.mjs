@@ -6,6 +6,8 @@ const NONOWNER_TOOLS = ["read", "web_search", "web_fetch", "browser", "memory_se
 const NONOWNER_SCRIPTS = ["exchange_data", "semantic_search", "defillama_search", "arkham_search", "consensus_search"];
 const CRIT_EXEC = ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "uninstall", "--hard\\b"];
 const CRIT_PATHS = ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"];
+const DEFAULT_TRUSTED_TOOLS = ["read", "write", "edit", "apply_patch", "exec", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
+let TRUSTED = []; // mutated per-test-block below (mirrors config.trustedIds)
 
 function globToRe(glob) {
   let re = "";
@@ -70,6 +72,29 @@ function criticalHit(event) {
   }
   return null;
 }
+function findTrusted(senderId) {
+  for (const t of TRUSTED) if (t.id === senderId) return t;
+  return null;
+}
+function decideTrusted(event, entry) {
+  const toolName = event.toolName;
+  const protectedHit = anyProtected(event, PROTECTED);
+  if (protectedHit) return { block: true, why: "trusted-protected" };
+  if (entry.scopePathGlobs && entry.scopePathGlobs.length) {
+    const tp = targetPaths(event);
+    if (tp.length && tp.some((p) => !matchesProtected(p, entry.scopePathGlobs))) return { block: true, why: "trusted-scope" };
+  }
+  const crit = criticalHit(event);
+  if (crit) return { block: true, why: "trusted-critical" };
+  const allowedTools = entry.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
+  if (toolName === "exec") {
+    if (!allowedTools.includes("exec")) return { block: true, why: "trusted-exec-not-allowlisted" };
+    return execRunsAllowedScript(event, entry.allowedScripts ?? NONOWNER_SCRIPTS)
+      ? { block: false, why: "trusted-script" } : { block: true, why: "trusted-exec-script-blocked" };
+  }
+  if (allowedTools.includes(toolName)) return { block: false, why: "trusted-tool" };
+  return { block: true, why: "trusted-tool-blocked" };
+}
 function decide(event, ctx) {
   const toolName = event.toolName;
   const sender = resolveSenderId(event, ctx);
@@ -79,6 +104,10 @@ function decide(event, ctx) {
     const crit = criticalHit(event);
     if (crit) return { block: false, approval: true, why: "owner-approval" };
     return { block: false, why: protectedHit ? "owner-warn" : "owner-pass" };
+  }
+  if (sender != null && TRUSTED.length) {
+    const entry = findTrusted(sender);
+    if (entry) return decideTrusted(event, entry);
   }
   if (protectedHit) return { block: true, why: "nonowner-secret" };
   if (NONOWNER_TOOLS.includes(toolName)) return { block: false, why: "nonowner-allowed-tool" };
@@ -131,6 +160,33 @@ t("stranger web_search", { toolName: "web_search", params: {} }, STRANGER, false
 t("stranger memory_search", { toolName: "memory_search", params: {} }, STRANGER, false, "nonowner-allowed-tool");
 t("stranger exec cat credentials", { toolName: "exec", params: { command: "cat ~/.config/credentials" } }, STRANGER, true, "nonowner-secret");
 t("stranger unknown tool", { toolName: "some_write_tool", params: {} }, STRANGER, true, "nonowner-default");
+
+// ── trusted/delegated tier (above non-owner, below owner) ──
+TRUSTED = [
+  { id: "555555", scopePathGlobs: ["workspace-bob/**"] },
+  { id: "666666", allowedTools: ["read", "write"], allowedScripts: ["exchange_data"] },
+  { id: "777777", allowedTools: ["read", "write", "exec"], allowedScripts: ["exchange_data"] },
+];
+const T1 = { sessionKey: "agent:analyst:telegram:direct:555555", senderId: "555555" };
+const T2 = { sessionKey: "agent:analyst:telegram:direct:666666", senderId: "666666" };
+const T3 = { sessionKey: "agent:analyst:telegram:direct:777777", senderId: "777777" };
+
+t("trusted scope: in-scope write allowed", { toolName: "write", params: { path: "workspace-bob/notes.md" } }, T1, false, "trusted-tool");
+t("trusted scope: out-of-scope write blocked", { toolName: "write", params: { path: "workspace-alice/notes.md" } }, T1, true, "trusted-scope");
+t("trusted scope: protected glob wins even in scope", { toolName: "write", params: { path: "workspace-bob/.env" } }, T1, true, "trusted-protected");
+t("trusted scope: critical action blocked not approved", { toolName: "exec", params: { command: "rm -rf workspace-bob/x" } }, T1, true, "trusted-critical");
+t("trusted tool-allowlist: allowed tool passes", { toolName: "read", params: { path: "anywhere.txt" } }, T2, false, "trusted-tool");
+t("trusted tool-allowlist: disallowed tool blocked", { toolName: "edit", params: { path: "anywhere.txt" } }, T2, true, "trusted-tool-blocked");
+t("trusted exec: not granted -> blocked", { toolName: "exec", params: { command: "python3 tools/exchange_data.py price BTC" } }, T2, true, "trusted-exec-not-allowlisted");
+t("trusted exec: granted + allowlisted script -> allowed", { toolName: "exec", params: { command: "python3 tools/exchange_data.py price BTC" } }, T3, false, "trusted-script");
+t("trusted exec: granted but script not allowlisted -> blocked", { toolName: "exec", params: { command: "python3 tools/arkham_search.py x" } }, T3, true, "trusted-exec-script-blocked");
+t("trusted with no scopePathGlobs: any path allowed if tool allowed", { toolName: "write", params: { path: "/etc/random/path.txt" } }, T3, false, "trusted-tool");
+t("non-trusted stranger still hits normal non-owner path", { toolName: "write", params: { path: "anywhere.txt" } }, STRANGER, true, "nonowner-mutate");
+t("owner unaffected by TRUSTED config", { toolName: "write", params: { path: "anything.txt" } }, OWNER, false, "owner-pass");
+
+// back-compat: empty TRUSTED -> byte-identical to pre-trusted-tier behavior
+TRUSTED = [];
+t("back-compat: empty trustedIds unaffected", { toolName: "read", params: { path: "x" } }, T1, false, "nonowner-allowed-tool");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

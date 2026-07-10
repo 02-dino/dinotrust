@@ -33,9 +33,54 @@ export type PolicyConfig = {
   nonOwnerAllowedTools: string[];
   /** Non-owner exec allowlist: exec permitted only if it runs one of these read-only scripts. */
   nonOwnerAllowedScripts: string[];
+  /**
+   * Trusted/delegated ids: a per-individual tier ABOVE non-owner, BELOW owner.
+   * Empty by default -> zero behavior change for every existing install.
+   * Each entry is independently configured (no shared named roles) so one
+   * install can express both "extra tool access" and "admin of my own
+   * workspace folder only" grants side by side.
+   *
+   * Ceiling that keeps this genuinely below owner, ALWAYS, no per-entry
+   * override possible:
+   *   - protectedGlobs still hard-blocks (.env, credentials, other
+   *     workspace-*\/ dirs, etc.) even if a path also matches scopePathGlobs.
+   *   - criticalHit() (irreversible/critical actions) is BLOCKED, never
+   *     auto-approved the way owner's criticalHit escalates to "approve".
+   */
+  trustedIds: TrustedEntry[];
   /** Master switch. false => dry-run (decide still returns verdicts, adapter logs but does not enforce). */
   enforce: boolean;
 };
+
+export type TrustedEntry = {
+  /** Platform sender id, same identity model as ownerIds entries (bare id only; no platform-scoping for trusted). */
+  id: string;
+  /**
+   * Tool allowlist for this entry. Omitted -> DEFAULT_TRUSTED_TOOLS (broader
+   * than the non-owner default, still excludes config/gateway/cron/message/
+   * sessions_spawn -- those need explicit opt-in even for trusted).
+   */
+  allowedTools?: string[];
+  /** exec allowlist for this entry. Omitted -> falls back to config.nonOwnerAllowedScripts. */
+  allowedScripts?: string[];
+  /**
+   * Optional path confinement ("delegated admin of my own workspace only").
+   * When set, ANY tool call carrying a path must match one of these globs or
+   * it's blocked outright, regardless of the tool being otherwise allowlisted.
+   * Tools with no path (e.g. web_search) are unaffected. exec is NOT
+   * path-scoped by this (see execRunsAllowedScript note) -- exec's only gate
+   * is allowedScripts, same mechanism as non-owner, to avoid unreliable
+   * path-extraction from arbitrary shell commands.
+   * Omitted -> no path restriction (pure tool-allowlist trusted grant).
+   */
+  scopePathGlobs?: string[];
+};
+
+/** Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools. */
+export const DEFAULT_TRUSTED_TOOLS: string[] = [
+  "read", "write", "edit", "apply_patch", "exec",
+  "web_search", "web_fetch", "browser", "memory_search", "memory_get",
+];
 
 export const DEFAULT_POLICY: PolicyConfig = {
   ownerIds: [],
@@ -52,6 +97,7 @@ export const DEFAULT_POLICY: PolicyConfig = {
   mutatingTools: ["exec", "write", "edit", "apply_patch"],
   nonOwnerAllowedTools: ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"],
   nonOwnerAllowedScripts: [], // empty by default; each install fills its own (e.g. analyst tools/)
+  trustedIds: [], // empty by default; zero behavior change unless an install explicitly grants trust
   enforce: true,
 };
 
@@ -74,7 +120,7 @@ export function normalizeConfig(raw: Partial<PolicyConfig> | undefined | null): 
   const c: PolicyConfig = { ...DEFAULT_POLICY, ...(raw || {}) };
   const arrKeys: (keyof PolicyConfig)[] = [
     "ownerIds", "criticalExecPatterns", "criticalPathGlobs", "protectedGlobs",
-    "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts",
+    "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds",
   ];
   for (const k of arrKeys) if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULT_POLICY as any)[k];
   return c;
@@ -160,6 +206,47 @@ export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolea
   return false;
 }
 
+/** Finds a config.trustedIds entry matching senderId, or null. */
+function findTrusted(senderId: string, c: PolicyConfig): TrustedEntry | null {
+  for (const t of c.trustedIds) if (t.id === senderId) return t;
+  return null;
+}
+
+/**
+ * Decision for a matched trusted/delegated entry. Below owner, above
+ * non-owner. See TrustedEntry doc comment for the ceiling rules.
+ */
+function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Verdict {
+  // protectedGlobs ALWAYS wins, even inside this entry's own scopePathGlobs.
+  // No self-service escalation over secrets/system files/other workspaces.
+  const protectedHit = anyProtected(call, c.protectedGlobs);
+  if (protectedHit) return { action: "block", reason: `non-owner protected resource: ${protectedHit}` };
+
+  // Path confinement, if this entry sets it: any call carrying a path must
+  // match, or it's out of scope. Tools with no path are unaffected.
+  if (entry.scopePathGlobs && entry.scopePathGlobs.length > 0 && call.paths.length > 0) {
+    const inScope = call.paths.every((p) => matchesGlob(p, entry.scopePathGlobs!));
+    if (!inScope) return { action: "block", reason: `trusted: ${entry.id} path outside scope (${entry.scopePathGlobs!.join(", ")})` };
+  }
+
+  // Critical/irreversible actions are BLOCKED for trusted, never auto-approved
+  // the way owner's criticalHit escalates to "approve". This is the other half
+  // of the below-owner ceiling.
+  const crit = criticalHit(call, c);
+  if (crit) return { action: "block", reason: `trusted: ${entry.id} critical/irreversible denied: ${crit}` };
+
+  const allowedTools = entry.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
+  if (call.toolName === "exec") {
+    if (!allowedTools.includes("exec")) return { action: "block", reason: `trusted: ${entry.id} exec not allowlisted` };
+    const scripts = entry.allowedScripts ?? c.nonOwnerAllowedScripts;
+    return execRunsAllowedScript(call, scripts)
+      ? { action: "allow", reason: `trusted: ${entry.id} allowlisted script` }
+      : { action: "block", reason: `trusted: ${entry.id} exec restricted to allowlisted scripts` };
+  }
+  if (allowedTools.includes(call.toolName)) return { action: "allow", reason: `trusted: ${entry.id} tool allowed` };
+  return { action: "block", reason: `trusted: ${entry.id} tool ${call.toolName} not allowlisted` };
+}
+
 /**
  * THE decision. Pure function: (call, senderId, config) -> Verdict.
  * senderId === null  => internal/self turn (agent-operated-by-owner) => treated as owner.
@@ -175,6 +262,12 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
     if (crit) return { action: "approve", reason: `critical/irreversible: ${crit}` };
     if (protectedHit) return { action: "warn", reason: `secret touch: ${protectedHit}` };
     return { action: "allow", reason: "owner" };
+  }
+
+  // ── TRUSTED / delegated (above non-owner, below owner) ──
+  if (senderId != null && c.trustedIds.length > 0) {
+    const entry = findTrusted(senderId, c);
+    if (entry) return decideTrusted(call, entry, c);
   }
 
   // ── NON-OWNER: strict + allowlist ──
