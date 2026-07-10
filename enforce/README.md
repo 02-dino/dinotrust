@@ -88,17 +88,24 @@ bash enforce/install.sh --platform openclaw --owner-id <id> \
 primary/secondary.
 
 **This is the enforce-layer's own config, separate from `security_rules.md`'s
-`owner_ids`.** Running `enforce/install.sh` directly (standalone, bypassing the
-top-level `scripts/install.sh`) updates ONLY the enforce hook's owner list —
-it does not touch the instruction-layer copy in your agent config. That's fine
-if you're intentionally running enforce standalone (e.g. `--no-observability`
-installs, or testing the hook in isolation), but if you normally installed via
-the top-level installer, use that same entrypoint to add/remove owners too, so
-both layers stay in sync:
+`owner_ids`.** Running `enforce/install.sh` directly at INSTALL time (standalone,
+bypassing the top-level `scripts/install.sh`) sets ONLY the enforce hook's
+owner list — it does not touch the instruction-layer copy in your agent config.
+That's fine if you're intentionally running enforce standalone (e.g.
+`--no-observability` installs, or testing the hook in isolation).
+
+**To add/remove an owner LATER (post-install), don't re-run this installer** —
+use `../scripts/manage-owner.sh` instead:
 
 ```bash
-bash scripts/install.sh --owner-id "111111,222222,NEWID" --force
+bash scripts/manage-owner.sh add 987654321 --oc-json ~/.openclaw/openclaw.json
+bash scripts/manage-owner.sh add 987654321 --dt-conf ~/.dinotrust/enforce.json
 ```
+
+It's a surgical single-line edit (via the same `merge_config.py` key-scoped
+merge this installer uses) that keeps the instruction layer and enforce config
+in sync WITHOUT resetting any other customization — unlike re-running an
+installer with `--force`, which regenerates from scratch.
 
 See the main [README's Identity model](../README.md#identity-model) section
 ("Multiple owners" / "Adding or removing an owner after install") for the full

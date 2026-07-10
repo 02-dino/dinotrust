@@ -59,11 +59,13 @@ Supported platforms (real enforcement): openclaw | hermes | claude-code | codex-
 Options:
   --owner-id IDS         Owner platform id(s), comma-separated (e.g. 111111,222222).
                          Every id gets identical owner tier (warn-only + critical-
-                         approval); no primary/secondary. If you normally install
-                         via the top-level scripts/install.sh, add/remove owners
-                         through THAT script instead (keeps the instruction-layer
-                         copy in sync) — see README.md 'Multiple owners'. Running
-                         --force here alone updates only this enforce hook's list.
+                         approval); no primary/secondary. To add/remove an owner
+                         LATER (post-install), prefer ../scripts/manage-owner.sh
+                         instead of re-running this installer — it edits only the
+                         owner_ids line (instruction layer) and can optionally sync
+                         this hook's ownerIds too via --oc-json/--dt-conf, without
+                         resetting any other customization. See README.md 'Adding
+                         or removing an owner after install'.
   --allow-scripts LIST   Non-owner exec allowlist (comma-separated script names,
                          e.g. exchange_data,semantic_search). Default: none.
   --config PATH          Runtime config file to register the hook in.
@@ -98,11 +100,9 @@ if [[ -z "$OPT_OWNER_ID" && "$OPT_NONINTERACTIVE" != "true" ]]; then
   echo "Everyone else falls under strict non-owner rules (read-only, allowlisted scripts only)."
   echo "Enter one or more, comma-separated (e.g. 111111,222222) — no primary/secondary,"
   echo "every id listed gets identical owner tier."
-  echo "To add/remove owners later: if you normally install via the top-level"
-  echo "scripts/install.sh, prefer re-running THAT script instead — it keeps this"
-  echo "hook's owner list in sync with the instruction-layer copy. See README.md"
-  echo "'Multiple owners' section. (Re-running this installer directly with --force"
-  echo "and the FULL new list works too, but updates only this hook's own list.)"
+  echo "To add/remove an owner LATER: use ../scripts/manage-owner.sh instead of"
+  echo "re-running this installer — it's a surgical single-line edit that won't"
+  echo "reset other customizations. See README.md 'Adding or removing an owner'."
   read -rp "Owner id(s) (comma-separated): " OPT_OWNER_ID
 fi
 [[ -z "$OPT_OWNER_ID" ]] && { err "--owner-id required"; exit 2; }
