@@ -10,15 +10,15 @@ Knowing a Telegram user ID is easy. Knowing whether that ID is allowed to read y
 
 Most agent-security tools sit *in front of* the agent: a proxy, a middleware firewall, an API gateway that intercepts every message. That means another service to deploy, another endpoint to secure, another thing that breaks.
 
-dinotrust has **zero infrastructure**. It injects a structured ruleset straight into the agent's own context — the same channel the agent reads its instructions from — and the agent carries the policy itself; on the 4 supported runtimes a code-level hook backs it with a real veto (see below). No proxy. No middleware. No API changes. Delete the injected block and it's gone cleanly.
+dinotrust does this in **two layers**, with **zero infrastructure** — no proxy, no middleware, no API changes:
 
-- **Two layers** — an **instruction** layer (`security_rules.md`, injected into the agent's context) *and* a **code-level enforce** layer (a `pre_tool_call` hook that returns a terminal allow/deny/ask verdict). The instruction layer tells the agent the policy; the enforce layer makes it hold **even if the model doesn't comply**.
-- **Self-carrying, code-backed** — the agent carries the policy in its own context, and on supported runtimes a `pre_tool_call` hook enforces the block-tier independently of the agent's compliance. Nothing to run in front of it, nothing to keep online.
-- **Zero-infrastructure** — one config block (+ one hook), no extra service, no new attack surface.
-- **4 supported runtimes, full stack** — **OpenClaw, Hermes, Claude Code, OpenAI Codex CLI**. These are the runtimes with a real pre-tool veto, so they get **both** layers: instruction *and* enforcement + independent audit. Other runtimes (Cursor, Windsurf, Continue.dev, Aider, Goose) have no pre-tool hook — they can only receive the instruction layer, which is compliance-dependent, so dinotrust does **not** officially support them (see [Supported runtimes](#supported-runtimes)).
+- **Enforce layer (the real veto)** — a `pre_tool_call` code hook that returns a terminal allow/deny/ask verdict at the tool boundary. Non-owner write/exec and secret-path touches are stopped *before the tool fires* — this holds **even if the model is jailbroken or doesn't comply**, because it isn't the model deciding. On the 4 supported runtimes this is a genuine code-level boundary, not a suggestion.
+- **Instruction layer** — a structured ruleset injected straight into the agent's own context, the same channel it reads its instructions from. It tells the agent the policy in plain language and works on any LLM; the enforce layer is what makes the block-tier hold when instruction-following alone wouldn't.
+- **4 supported runtimes, full stack** — **OpenClaw, Hermes, Claude Code, OpenAI Codex CLI**: the runtimes that expose a real pre-tool veto, so they get *both* layers + independent audit. Cursor, Windsurf, Continue.dev, Aider, and Goose have no such hook — instruction-only there is compliance-dependent, so dinotrust does **not** support them (see [Supported runtimes](#supported-runtimes)).
 - **Authorization, not authentication** — ownership is bound to the platform's verified identity signal (numeric/UUID), never to chat claims. Re-checked every turn.
+- **Self-carrying** — the policy lives in the agent's context and one hook; delete the injected block and it's gone cleanly. Nothing to run in front of it, nothing to keep online.
 
-**This tracks model capability.** Enforcement is the agent's own instruction-following, not a static regex or proxy filter. As models get better at following instructions, they enforce the rules more reliably and resist manipulation better — while a fixed filter stays exactly as good (or as brittle) as the day it shipped. It cuts both ways: stronger models also mean stronger adversaries, so this raises reliability, not absolute guarantees (see [Identity model](#identity-model)).
+**On the compliance-dependent parts** (the instruction layer everywhere, and the enforce layer's *ask*-tier confirmations), enforcement is the agent's own instruction-following — which *tracks model capability*: as models get better at following instructions they resist manipulation better, while a fixed regex/proxy filter stays exactly as brittle as the day it shipped. It cuts both ways — stronger models also mean stronger adversaries — so those tiers raise reliability, not absolute guarantees. The enforce layer's **block-tier**, by contrast, does not depend on the model at all (see [Identity model](#identity-model) and the [security FAQ](#faq)).
 
 ---
 
@@ -114,26 +114,50 @@ Follow the prompts. Done in under a minute.
 | `--profile NAME` | Interactive | Preset: `private-assistant`, `market-analyst`, `custom` |
 | `--global` | Project-level | Inject into global config instead of project-level |
 | `--force` | — | Overwrite existing dinotrust block |
+| `--no-enforce` | Enforce on | Skip the code-level `pre_tool_call` layer (instruction layer only — compliance-dependent) |
+| `--no-observability` | Observability on | Skip the independent audit/digest layer |
 | `--dry-run` | — | Preview what would be injected, no changes |
 
 ---
 
 ## What gets installed
 
+dinotrust installs in two layers (both by default; opt out with
+`--no-enforce` / `--no-observability`):
+
+**1. Instruction layer** — the installer reads `security_rules.md`, fills
+placeholders, and appends the filled ruleset (between `# --- dinotrust begin ---`
+/ `# --- dinotrust end ---`) into your agent's existing config file
+(`AGENTS.md` / `CLAUDE.md` / `SOUL.md`). No new file — it edits the config the
+agent already reads every turn.
+
+**2. Enforce layer** (the `pre_tool_call` code hook) — installed per runtime:
+
+| Runtime | Where the hook lands |
+|---------|----------------------|
+| OpenClaw | plugin copied to `~/.openclaw/extensions/dinotrust-enforce/`, entry merged into `openclaw.json` |
+| Hermes / Claude Code / Codex CLI | `handler.py` copied under the runtime's hook dir, wired to its `pre_tool_call` / `PreToolUse` config |
+
+The optional **observability** audit layer, when enabled, adds a small
+report script + a cron/hook entry (see [Observability](#observability-audit-layer)).
+
+Repo layout:
+
 ```
 dinotrust/
-├── scripts/
-│   ├── install.sh       ← main installer
-│   ├── uninstall.sh     ← removes injected block
-│   └── update.sh        ← re-runs install with --force
-├── security_rules.md    ← the ruleset template (filled by installer)
-├── README.md
-├── CHANGELOG.md
-├── VERSION
-└── LICENSE
+├── scripts/          install.sh · uninstall.sh · update.sh
+├── security_rules.md the instruction-layer template (filled by installer)
+├── enforce/          the code-level pre_tool_call layer + per-runtime adapters
+├── observability/    optional independent audit layer
+├── README.md · CHANGELOG.md · VERSION · LICENSE
 ```
 
-Nothing is copied to your workspace. The installer reads `security_rules.md`, fills placeholders, and appends the result to your agent's config file.
+The instruction layer edits only the marked block in your config file —
+`uninstall.sh` strips exactly that block and nothing else. The enforce and
+observability layers add their own files (listed above); remove those manually
+if you opt back out — on OpenClaw, delete
+`~/.openclaw/extensions/dinotrust-enforce/` and its `openclaw.json` entry; on the
+CLI runtimes, remove the copied `handler.py` and its hook wiring.
 
 ---
 
@@ -154,18 +178,21 @@ grep "dinotrust begin" <your-agent-config-file>
 
 After install, the agent enforces rules automatically. No commands needed.
 
-To verify injection:
+To verify injection (pick your runtime's config file):
 ```bash
-# OpenClaw example
-grep -n "dinotrust" ~/.openclaw/workspace-<agent>/AGENTS.md
-
-# Claude Code example
-grep -n "dinotrust" ~/.claude/CLAUDE.md
+# OpenClaw
+grep -n "dinotrust" <workspace>/AGENTS.md
+# Hermes
+grep -n "dinotrust" ~/.hermes/SOUL.md
+# Claude Code
+grep -n "dinotrust" ./CLAUDE.md      # or ~/.claude/CLAUDE.md with --global
+# OpenAI Codex CLI
+grep -n "dinotrust" ./AGENTS.md      # or ~/.codex/AGENTS.md with --global
 ```
 
-To update rules (re-run installer):
+To update rules, use the updater (version-aware, preserves your owner ID + profile):
 ```bash
-bash ~/.dinotrust/scripts/install.sh --force
+bash scripts/update.sh
 ```
 
 ---
@@ -304,11 +331,15 @@ Start from a preset, then trim or extend `allowed` to taste — e.g. a market bo
 
 ## Observability (audit layer)
 
-dinotrust core *enforces*. The optional [`observability/`](observability/) module
+dinotrust core *enforces*. The [`observability/`](observability/) module
 *observes and reports* — an independent record of agent traffic and which
 reject-patterns (R1/R3/R4/R6/R7/S0) fired, delivered as a daily/weekly digest.
 Same zero-infra ethos: regex, no LLM; a language-neutral taxonomy
 (`patterns.json`) plus thin per-platform adapters.
+
+It is **installed by default** as part of `scripts/install.sh` (opt out with
+`--no-observability`). To (re)install or point it at a different destination
+standalone:
 
 ```bash
 bash observability/install.sh --report-target <chat-id>
