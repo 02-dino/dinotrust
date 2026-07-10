@@ -190,10 +190,17 @@ grep -n "dinotrust" ./CLAUDE.md      # or ~/.claude/CLAUDE.md with --global
 grep -n "dinotrust" ./AGENTS.md      # or ~/.codex/AGENTS.md with --global
 ```
 
-To update rules, use the updater (version-aware, preserves your owner ID + profile):
+To update rules (pull latest + re-inject), use the updater:
 ```bash
 bash scripts/update.sh
 ```
+**Note:** this re-runs the full installer with `--force`, which means it needs
+your `--owner-id` and `--profile` passed again (or answered interactively) —
+they are **not** auto-detected from the existing block, and it regenerates the
+whole ruleset from scratch (see ["Adding or removing an owner after
+install"](#identity-model) for why this matters if you've customized
+anything). If you only need to change owners, use `scripts/manage-owner.sh`
+instead — it doesn't touch anything else.
 
 ---
 
@@ -469,7 +476,16 @@ So dinotrust raises the bar significantly and turns the block-tier into a hard b
 bash scripts/update.sh
 ```
 
-Pulls latest + re-runs install with `--force`. Your owner ID and profile are preserved in the existing block.
+Pulls latest + re-runs install with `--force`. **Not** a lightweight refresh:
+it needs `--owner-id` and `--profile` passed again (interactive or flags —
+neither is read back from your existing block), and it regenerates the whole
+injected ruleset from scratch, discarding any hand-edits made after install
+(protected_resources, deflection message, allowed_actions). Have those ready
+before running it, or expect to re-answer the prompts.
+
+Just need to add/remove an owner? Don't use this — use
+[`scripts/manage-owner.sh`](#identity-model) instead; it's a single-line edit
+that leaves everything else alone.
 
 ## Uninstall
 
