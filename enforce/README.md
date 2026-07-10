@@ -56,9 +56,9 @@ imports); the `pre_tool_call` adapter re-implements it in Python (no JS dep).
 All three are covered by selftests that assert identical verdicts:
 
 ```bash
-node --experimental-strip-types enforce/core/policy.selftest.mjs      # 21/21
-node enforce/adapters/openclaw/selftest.mjs                           # 24/24
-python3 enforce/adapters/pre_tool_call/selftest.py                    # 26/26
+node --experimental-strip-types enforce/core/policy.selftest.mjs      # 24/24
+node enforce/adapters/openclaw/selftest.mjs                           # 27/27
+python3 enforce/adapters/pre_tool_call/selftest.py                    # 29/29
 ```
 
 Change policy in one place → mirror in the others → re-run all three. See
