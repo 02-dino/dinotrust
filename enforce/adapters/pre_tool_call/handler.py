@@ -171,6 +171,36 @@ def write_targets(cmd):
     return out
 
 
+def strip_quoted(cmd):
+    """Strip shell quoted-string literals ('...' and "...") before scanning for
+    critical-exec patterns: a destructive OPERATOR lives outside quotes; the same
+    words inside a quoted ARG (git commit -m "...rm -rf...", echo, grep) are inert
+    text and must not trip the gate. Real destructive cmds with quoted args still
+    match (operator is unquoted). Mirror of core/policy.ts stripQuoted."""
+    out = []
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch == "'":
+            i += 1
+            while i < n and cmd[i] != "'":
+                i += 1
+            i += 1
+            out.append(" ")
+        elif ch == '"':
+            i += 1
+            while i < n and cmd[i] != '"':
+                if cmd[i] == "\\" and i + 1 < n:
+                    i += 1
+                i += 1
+            i += 1
+            out.append(" ")
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
 def escalation_hit(tool, paths, command, cfg):
     """ESCALATION / irreversible -> the only owner-facing APPROVAL trigger.
     (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
@@ -182,9 +212,10 @@ def escalation_hit(tool, paths, command, cfg):
             if h:
                 return "write %s ~ %s" % (p, h)
     if tool in EXEC_TOOLS and command:
+        scan = strip_quoted(command)
         for pat in cfg["criticalExecPatterns"]:
             try:
-                if re.search(pat, command, re.I):
+                if re.search(pat, scan, re.I):
                     return "exec ~ /%s/" % pat
             except re.error:
                 pass

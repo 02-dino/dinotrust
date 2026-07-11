@@ -4,6 +4,28 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.21.1] — 2026-07-11
+
+### Fixed
+- **criticalExecPatterns no longer false-positive on destructive keywords buried
+  inside quoted arguments.** Previously the exec scan regex-tested the ENTIRE
+  command string, so a benign command that merely MENTIONS a destructive pattern
+  in a quoted arg (e.g. `git commit -m "... rm -rf ..."`, an `echo "DROP TABLE"`,
+  a `grep 'dd if='`) tripped the owner critical-approval gate — and on surfaces
+  with no approval route, got hard-blocked. (Hit twice in real use committing
+  changes whose messages described destructive patterns.)
+- New `stripQuoted()` helper removes single- and double-quoted string literals
+  from the command BEFORE the criticalExecPatterns scan. A destructive OPERATOR
+  lives outside quotes and still matches (including with a quoted arg, e.g.
+  `rm -rf "/some path"`); the same words as inert quoted text no longer match.
+  Redirect/`tee` write-target detection is unchanged (it already excluded quote
+  chars).
+- Mirrored across all three layers (core `policy.ts`, openclaw `handler.ts`,
+  `pre_tool_call/handler.py`) + selftests. Passing: core 46, openclaw 45,
+  python 48 (live extension mirror 32).
+
+---
+
 ## [1.21.0] — 2026-07-11
 
 ### Changed

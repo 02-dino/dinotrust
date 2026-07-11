@@ -35,6 +35,13 @@ t("owner write security_rules.md -> warn (reversible doc)", call("write", { path
 t("owner echo > security_rules.md -> warn (exec-write reversible doc)", call("exec", { command: "echo x > /x/security_rules.md" }), OWNER, "warn");
 // escalation paths (openclaw.json / .env) STILL approve -- injection tripwire kept.
 t("owner edit .env -> approve (escalation)", call("edit", { paths: ["/x/.env"] }), OWNER, "approve");
+// quoted-arg false-positive guard: a destructive pattern INSIDE a quoted arg is inert text -> must NOT approve.
+t("owner git commit -m with rm -rf in msg -> allow (quoted, inert)", call("exec", { command: `git commit -m "docs: mention rm -rf and git push --force in changelog"` }), OWNER, "allow");
+t("owner echo quoted DROP TABLE -> allow (quoted, inert)", call("exec", { command: `echo "DROP TABLE users -- example"` }), OWNER, "allow");
+t("owner single-quoted dd if= -> allow (quoted, inert)", call("exec", { command: `grep -n 'dd if=/dev/zero' notes.txt` }), OWNER, "allow");
+// but the operator OUTSIDE quotes still fires even when its ARG is quoted:
+t("owner rm -rf quoted-path -> approve (operator unquoted)", call("exec", { command: `rm -rf "/tmp/some path"` }), OWNER, "approve");
+t("owner force-push after quoted arg -> approve (operator unquoted)", call("exec", { command: `git commit -m "wip" && git push origin main --force` }), OWNER, "approve");
 
 // self (agent-operated-by-owner)
 t("self exec normal -> allow", call("exec", { command: "python3 procedures/backup.py" }), SELF, "allow");

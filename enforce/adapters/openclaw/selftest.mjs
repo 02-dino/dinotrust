@@ -61,6 +61,16 @@ function writeTargets(cmd) {
   }
   return out;
 }
+function stripQuoted(cmd) {
+  let out = ""; let i = 0; const n = cmd.length;
+  while (i < n) {
+    const ch = cmd[i];
+    if (ch === "'") { i++; while (i < n && cmd[i] !== "'") i++; i++; out += " "; }
+    else if (ch === '"') { i++; while (i < n && cmd[i] !== '"') { if (cmd[i] === "\\" && i + 1 < n) i++; i++; } i++; out += " "; }
+    else { out += ch; i++; }
+  }
+  return out;
+}
 function escalationHit(event) {
   const toolName = event.toolName;
   if (["write", "edit", "apply_patch"].includes(toolName)) {
@@ -68,7 +78,8 @@ function escalationHit(event) {
   }
   if (toolName === "exec") {
     const cmd = String((event.params ?? {}).command ?? "");
-    for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(cmd)) return "exec:" + pat; } catch {} }
+    const scan = stripQuoted(cmd);
+    for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(scan)) return "exec:" + pat; } catch {} }
     for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, ESC_PATHS); if (h) return "exec-write:" + wt; }
   }
   return null;
@@ -155,6 +166,11 @@ t("owner cat .env -> warn+pass (read)", { toolName: "exec", params: { command: "
 t("owner grep security file -> pass (read arg)", { toolName: "exec", params: { command: "grep -n foo docs/security_rules.md" } }, OWNER, false, "owner-pass");
 t("owner echo > openclaw.json -> approval (write target)", { toolName: "exec", params: { command: "echo x > /root/.openclaw/openclaw.json" } }, OWNER, false, "owner-approval");
 t("owner tee -a .env -> approval (tee write)", { toolName: "exec", params: { command: "echo x | tee -a /x/.env" } }, OWNER, false, "owner-approval");
+// quoted-arg false-positive guard: destructive pattern inside quotes is inert -> pass, not approval.
+t("owner commit msg with destructive words quoted -> pass", { toolName: "exec", params: { command: `git commit -m "docs: mention rm -rf and --force in notes"` } }, OWNER, false, "owner-pass");
+t("owner echo quoted DROP TABLE -> pass", { toolName: "exec", params: { command: `echo "DROP TABLE users"` } }, OWNER, false, "owner-pass");
+// operator OUTSIDE quotes still fires even with a quoted arg:
+t("owner destructive op with quoted path -> approval", { toolName: "exec", params: { command: `rm -rf "/tmp/some path"` } }, OWNER, false, "owner-approval");
 t("owner edit .env -> approval (write to critical path)", { toolName: "edit", params: { path: "/x/.env" } }, OWNER, false, "owner-approval");
 
 // SELF (agent-operated-by-owner, no senderId) — treated as owner, never blocked

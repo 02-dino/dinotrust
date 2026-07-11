@@ -196,6 +196,39 @@ function writeTargets(cmd: string): string[] {
 }
 
 /**
+ * Strip shell quoted-string literals ('...' and "...") from a command before
+ * scanning for critical-exec patterns. Rationale: a destructive OPERATOR
+ * (rm -rf, dd, DROP TABLE, --force) lives OUTSIDE quotes; the same words buried
+ * inside a quoted ARGUMENT (e.g. `git commit -m "... rm -rf ..."`, an echo, a
+ * grep pattern) are inert text, not an execution -> must not trip the gate.
+ * Real destructive commands with quoted args (`rm -rf "/some path"`) still match
+ * because the operator itself is unquoted. Single-quote spans take no escapes
+ * (sh semantics); double-quote spans honor \" . Unterminated quote -> strip to
+ * end of string (conservative: a dangling quote can't hide a real operator that
+ * would already have matched before the quote opened).
+ */
+function stripQuoted(cmd: string): string {
+  let out = "";
+  let i = 0;
+  const n = cmd.length;
+  while (i < n) {
+    const ch = cmd[i];
+    if (ch === "'") {
+      i++; while (i < n && cmd[i] !== "'") i++;
+      i++; // consume closing quote (or run off end)
+      out += " "; // preserve token boundary
+    } else if (ch === '"') {
+      i++; while (i < n && cmd[i] !== '"') { if (cmd[i] === "\\" && i + 1 < n) i++; i++; }
+      i++;
+      out += " ";
+    } else {
+      out += ch; i++;
+    }
+  }
+  return out;
+}
+
+/**
  * ESCALATION / irreversible hit -> the only owner-facing APPROVAL trigger.
  * Covers: (a) critical/irreversible exec commands (rm -rf, force-push, DROP,
  * mkfs, dd, --hard, ...), and (b) writes (tool or exec-redirect) to an
@@ -209,8 +242,10 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
     for (const p of call.paths) { const h = matchesGlob(p, c.escalationPathGlobs); if (h) return `write ${p} ~ ${h}`; }
   }
   if (call.toolName === "exec" && call.command) {
+    // Scan with quoted literals removed so quoted-arg text can't false-positive.
+    const scan = stripQuoted(call.command);
     for (const pat of c.criticalExecPatterns) {
-      try { if (new RegExp(pat, "i").test(call.command)) return `exec ~ /${pat}/`; } catch { /* skip bad regex */ }
+      try { if (new RegExp(pat, "i").test(scan)) return `exec ~ /${pat}/`; } catch { /* skip bad regex */ }
     }
     // WRITES to an escalation path -> approval. Reads (grep/cat) pass. See writeTargets.
     for (const wt of writeTargets(call.command)) {

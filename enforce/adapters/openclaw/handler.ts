@@ -190,6 +190,22 @@ function writeTargets(cmd: string): string[] {
   return out;
 }
 
+// Strip shell quoted-string literals ('...' and "...") before scanning for
+// critical-exec patterns: a destructive OPERATOR lives outside quotes; the same
+// words inside a quoted ARG (git commit -m "...rm -rf...", echo, grep) are inert
+// text and must not trip the gate. Real destructive cmds with quoted args still
+// match (operator is unquoted). Mirror of core/policy.ts stripQuoted.
+function stripQuoted(cmd: string): string {
+  let out = ""; let i = 0; const n = cmd.length;
+  while (i < n) {
+    const ch = cmd[i];
+    if (ch === "'") { i++; while (i < n && cmd[i] !== "'") i++; i++; out += " "; }
+    else if (ch === '"') { i++; while (i < n && cmd[i] !== '"') { if (cmd[i] === "\\" && i + 1 < n) i++; i++; } i++; out += " "; }
+    else { out += ch; i++; }
+  }
+  return out;
+}
+
 // ESCALATION / irreversible detector -> the ONLY owner-facing APPROVAL trigger.
 // (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
 // target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
@@ -204,8 +220,9 @@ function escalationHit(event: any, c: Cfg): string | null {
   }
   if (toolName === "exec") {
     const cmd = String((event?.params ?? {}).command ?? "");
+    const scan = stripQuoted(cmd);
     for (const pat of c.criticalExecPatterns) {
-      try { if (new RegExp(pat, "i").test(cmd)) return `exec ~ /${pat}/`; } catch { /* bad regex ignored */ }
+      try { if (new RegExp(pat, "i").test(scan)) return `exec ~ /${pat}/`; } catch { /* bad regex ignored */ }
     }
     // exec WRITING to an escalation path (redirect / tee). Reads (grep/cat) pass.
     for (const wt of writeTargets(cmd)) {

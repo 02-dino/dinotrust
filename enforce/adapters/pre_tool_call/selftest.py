@@ -36,6 +36,11 @@ t("owner cat .env warn (read not write)", "exec", OWNER, "warn", command="cat .e
 t("owner grep security file allow (read arg)", "exec", OWNER, "allow", command="grep -n foo docs/security_rules.md")
 t("owner echo > openclaw.json approve (write target)", "exec", OWNER, "approve", command="echo x > /root/.openclaw/openclaw.json")
 t("owner tee -a .env approve (tee write)", "exec", OWNER, "approve", command="echo x | tee -a /x/.env")
+# quoted-arg false-positive guard: destructive pattern inside quotes is inert -> allow, not approve.
+t("owner commit msg with destructive words quoted allow", "exec", OWNER, "allow", command='git commit -m "docs: mention rm -rf and --force in notes"')
+t("owner echo quoted DROP TABLE allow", "exec", OWNER, "allow", command='echo "DROP TABLE users"')
+# operator outside quotes still fires with a quoted arg:
+t("owner destructive op with quoted path approve", "exec", OWNER, "approve", command='rm -rf "/tmp/some path"')
 # split: reversible security-DOC edits -> warn only (not approve)
 t("owner edit AGENTS.md warn (reversible doc)", "edit", OWNER, "warn", paths=["/x/AGENTS.md"])
 t("owner edit security_rules.md warn (reversible doc)", "edit", OWNER, "warn", paths=["/x/security_rules.md"])
