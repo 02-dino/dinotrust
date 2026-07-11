@@ -36,7 +36,10 @@ DEFAULTS = {
         r"rm\s+-rf", r"git\s+push.*--force", r"git\s+push.*-f\b", r"\bDROP\s+TABLE",
         r"\bTRUNCATE\b", r"mkfs", r"dd\s+if=", r"uninstall", r"--hard\b",
     ],
-    "criticalPathGlobs": ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"],
+    # Owner write/edit/exec-write here -> approval (privilege-escalation / brick risk).
+    "escalationPathGlobs": ["**/openclaw.json", "**/.env"],
+    # Owner write/edit here -> warn only (reversible security docs; git+backups).
+    "criticalPathGlobs": ["**/security_rules.md", "**/AGENTS.md"],
     "protectedGlobs": [
         "**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/id_ed25519",
         "**/credentials", "**/secrets/**",
@@ -51,7 +54,7 @@ DEFAULTS = {
     # Empty by default -> zero behavior change for every existing install.
     # Each entry: {"id": "...", "allowedTools": [...]?, "allowedScripts": [...]?,
     # "scopePathGlobs": [...]?}. See policy.ts TrustedEntry doc for the full
-    # ceiling rules (protectedGlobs + criticalHit always win, no per-entry override).
+    # ceiling rules (protectedGlobs + escalation/doc hits always win, no per-entry override).
     "trustedIds": [],
     "enforce": True,
 }
@@ -168,10 +171,14 @@ def write_targets(cmd):
     return out
 
 
-def critical_hit(tool, paths, command, cfg):
+def escalation_hit(tool, paths, command, cfg):
+    """ESCALATION / irreversible -> the only owner-facing APPROVAL trigger.
+    (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
+    target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
+    security-doc edits are NOT here -> see critical_doc_hit."""
     if tool in WRITE_TOOLS:
         for p in paths:
-            h = matches_glob(p, cfg["criticalPathGlobs"])
+            h = matches_glob(p, cfg["escalationPathGlobs"])
             if h:
                 return "write %s ~ %s" % (p, h)
     if tool in EXEC_TOOLS and command:
@@ -181,7 +188,23 @@ def critical_hit(tool, paths, command, cfg):
                     return "exec ~ /%s/" % pat
             except re.error:
                 pass
-        # exec WRITING to a critical path. Reads (grep/cat) pass.
+        # exec WRITING to an escalation path. Reads (grep/cat) pass.
+        for wt in write_targets(command):
+            h = matches_glob(wt, cfg["escalationPathGlobs"])
+            if h:
+                return "exec-write %s ~ %s" % (wt, h)
+    return None
+
+def critical_doc_hit(tool, paths, command, cfg):
+    """SECURITY-DOC write -> owner gets `warn` only (reversible: git+backups),
+    never approval/block. Write (tool or exec-redirect) to a criticalPathGlobs
+    doc (security_rules.md / AGENTS.md). Also feeds the trusted-tier ceiling."""
+    if tool in WRITE_TOOLS:
+        for p in paths:
+            h = matches_glob(p, cfg["criticalPathGlobs"])
+            if h:
+                return "write %s ~ %s" % (p, h)
+    if tool in EXEC_TOOLS and command:
         for wt in write_targets(command):
             h = matches_glob(wt, cfg["criticalPathGlobs"])
             if h:
@@ -209,7 +232,7 @@ def find_trusted(sender_id, cfg):
 
 def decide_trusted(tool, paths, command, entry, cfg):
     """Decision for a matched trusted/delegated entry. Below owner, above
-    non-owner. protectedGlobs and criticalHit always win -- see TrustedEntry
+    non-owner. protectedGlobs + escalation/doc hits always win -- see TrustedEntry
     doc in policy.ts for the ceiling rules this mirrors."""
     entry_id = entry.get("id", "?")
     protected = any_protected(tool, paths, command, cfg["protectedGlobs"])
@@ -222,7 +245,8 @@ def decide_trusted(tool, paths, command, entry, cfg):
         if out_of_scope:
             return ("block", "trusted: %s path outside scope (%s)" % (entry_id, ", ".join(scope)))
 
-    crit = critical_hit(tool, paths, command, cfg)
+    # Critical/irreversible AND security-doc writes blocked for trusted (ceiling).
+    crit = escalation_hit(tool, paths, command, cfg) or critical_doc_hit(tool, paths, command, cfg)
     if crit:
         return ("block", "trusted: %s critical/irreversible denied: %s" % (entry_id, crit))
 
@@ -243,9 +267,14 @@ def decide(tool, paths, command, sender_id, cfg):
     protected = any_protected(tool, paths, command, cfg["protectedGlobs"])
 
     if is_owner:
-        crit = critical_hit(tool, paths, command, cfg)
-        if crit:
-            return ("approve", "critical/irreversible: " + crit)
+        # All access. Only approval trigger is genuine escalation/irreversible.
+        esc = escalation_hit(tool, paths, command, cfg)
+        if esc:
+            return ("approve", "critical/irreversible: " + esc)
+        # Reversible security-doc edit -> warn only (owner still sees it).
+        doc = critical_doc_hit(tool, paths, command, cfg)
+        if doc:
+            return ("warn", "security-doc edit (reversible): " + doc)
         if protected:
             return ("warn", "secret touch: " + protected)
         return ("allow", "owner")

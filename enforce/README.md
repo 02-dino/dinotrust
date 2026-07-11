@@ -18,7 +18,8 @@ as an actual gate:
 | Sender | Action | Verdict |
 |---|---|---|
 | **Owner** / agent-operated-by-owner | normal | **allow** (warn-log on secret touch) |
-| **Owner** | critical/irreversible (`rm -rf`, `git push --force`, write to `openclaw.json`/`security_rules.md`/`AGENTS.md`/`.env`, …) | **ask** — "are you sure?" confirmation, even for the owner |
+| **Owner** | edit a reversible security doc (`security_rules.md`, `AGENTS.md`) | **allow** (warn-log only — reversible via git/backups, no friction) |
+| **Owner** | critical/irreversible or privilege-escalating (`rm -rf`, `git push --force`, `DROP TABLE`, `mkfs`, `dd`, write to `openclaw.json`/`.env`, …) | **ask** — "are you sure?" confirmation, even for the owner |
 | **Non-owner** | read / web / memory tools | **allow** |
 | **Non-owner** | exec of an allowlisted read-only script (e.g. `tools/exchange_data.py`) | **allow** |
 | **Non-owner** | any other exec / shell | **block** |
@@ -26,8 +27,12 @@ as an actual gate:
 | **Non-owner** | touch a secret path (`.env`, keys, `credentials`, `secrets/**`) | **block** |
 
 **Zero hardcoded policy.** Every rule is config (`ownerIds`,
-`criticalExecPatterns`, `criticalPathGlobs`, `protectedGlobs`, `mutatingTools`,
-`nonOwnerAllowedTools`, `nonOwnerAllowedScripts`, `enforce`). Ships with safe
+`criticalExecPatterns`, `escalationPathGlobs`, `criticalPathGlobs`,
+`protectedGlobs`, `mutatingTools`, `nonOwnerAllowedTools`,
+`nonOwnerAllowedScripts`, `enforce`). `escalationPathGlobs` (owner-approval:
+`openclaw.json`/`.env`) is split from `criticalPathGlobs` (owner warn-only:
+`security_rules.md`/`AGENTS.md`) so the owner only ever gets a prompt on
+genuinely irreversible/escalating actions. Ships with safe
 general defaults and an **empty** `nonOwnerAllowedScripts` — each install fills
 its own allowlist. `enforce:false` = dry-run (log, no block).
 

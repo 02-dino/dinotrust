@@ -4,6 +4,38 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.21.0] — 2026-07-11
+
+### Changed
+- **Owner (and agent-operated-by-owner) is now truly all-access: approval fires
+  ONLY on genuinely critical/irreversible or privilege-escalating actions.**
+  Previously the owner path escalated to `requireApproval` on ANY write to a
+  `criticalPathGlobs` file — including reversible doc edits to `security_rules.md`
+  / `AGENTS.md`. That was gating on tool+path pattern, not on actual
+  irreversibility, and (when no approval route was available, e.g. some chat
+  surfaces) it degraded into an accidental hard-block of the owner.
+- Split the old `criticalPathGlobs` into two config keys with distinct owner
+  semantics:
+  - **`escalationPathGlobs`** (default `openclaw.json`, `.env`) — owner
+    write/edit/exec-write here still triggers approval. Kept as the one
+    owner-facing tripwire against a prompt-injected model self-escalating via
+    runtime/plugin config or secrets.
+  - **`criticalPathGlobs`** (default `security_rules.md`, `AGENTS.md`) — owner
+    write here is now **warn-only** (reversible via git/backups; no friction).
+  - `criticalExecPatterns` (rm -rf, force-push, DROP TABLE, mkfs, dd, --hard)
+    still triggers owner approval — unchanged.
+- **Trusted tier and non-owner behavior unchanged:** trusted is still hard-
+  blocked from BOTH escalation and security-doc paths (the below-owner ceiling);
+  non-owner still blocked from all mutating/secret actions.
+- Mirrored across all three enforcement layers (core `policy.ts`, OpenClaw
+  `adapters/openclaw/handler.ts`, `adapters/pre_tool_call/handler.py`) per the
+  parity rule. Selftests updated + passing: core 41, openclaw 42, python 45.
+- `openclaw.plugin.json` schema, `enforce/README.md` verdict table + config key
+  list updated. `install.sh` unaffected (it never emitted these globs; installs
+  inherit the new split defaults automatically).
+
+---
+
 ## [1.20.0] — 2026-07-11
 
 ### Changed

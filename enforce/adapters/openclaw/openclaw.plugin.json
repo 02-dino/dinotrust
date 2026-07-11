@@ -25,7 +25,7 @@
       "ownerWarnOnly": {
         "type": "boolean",
         "default": true,
-        "description": "When true, owner / agent-operated-by-owner sessions are NEVER hard-blocked, only warn-logged — EXCEPT criticalExecPatterns/criticalPathGlobs which trigger requireApproval (are-you-sure) even for owner. Matches dinotrust owner_rules."
+        "description": "When true, owner / agent-operated-by-owner sessions are NEVER hard-blocked, only warn-logged — EXCEPT genuinely critical/irreversible or privilege-escalating actions (criticalExecPatterns + escalationPathGlobs writes) which trigger requireApproval (are-you-sure). Reversible security-doc edits (criticalPathGlobs) are warn-only for owner. Matches dinotrust owner_rules (all access, approval only for critical/irreversible)."
       },
       "criticalExecPatterns": {
         "type": "array",
@@ -33,11 +33,17 @@
         "default": ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", "uninstall", "--hard\\b"],
         "description": "Regex patterns for critical/irreversible exec commands. Owner gets requireApproval (are-you-sure) instead of silent pass; non-owner is already blocked from exec anyway."
       },
+      "escalationPathGlobs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["**/openclaw.json", "**/.env"],
+        "description": "Privilege-escalation / brick-risk paths: an owner WRITE/edit/exec-write here triggers requireApproval (are-you-sure). The one owner-facing path tripwire, kept because a prompt-injected model acting as owner editing runtime/plugin config or secrets could silently self-escalate. Trusted tier is hard-blocked from these. Default: openclaw.json + .env."
+      },
       "criticalPathGlobs": {
         "type": "array",
         "items": { "type": "string" },
-        "default": ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"],
-        "description": "Path globs where an owner WRITE/edit triggers requireApproval (are-you-sure). Config + security files that are dangerous to change silently."
+        "default": ["**/security_rules.md", "**/AGENTS.md"],
+        "description": "Sensitive but REVERSIBLE security-doc paths (git + backups): an owner WRITE/edit here is warn-only telemetry, never approval or block — owner has all access and a doc edit is not irreversible. Non-owner is still blocked from these (they overlap protectedGlobs). Trusted tier is hard-blocked. Default: security_rules.md + AGENTS.md."
       },
       "mutatingTools": {
         "type": "array",

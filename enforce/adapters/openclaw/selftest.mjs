@@ -5,7 +5,8 @@ const OWNERS = ["1083618205"];
 const NONOWNER_TOOLS = ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
 const NONOWNER_SCRIPTS = ["exchange_data", "semantic_search", "defillama_search", "arkham_search", "consensus_search"];
 const CRIT_EXEC = ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "uninstall", "--hard\\b"];
-const CRIT_PATHS = ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"];
+const ESC_PATHS = ["**/openclaw.json", "**/.env"];          // owner write -> approval (escalation)
+const DOC_PATHS = ["**/security_rules.md", "**/AGENTS.md"]; // owner write -> warn (reversible)
 const DEFAULT_TRUSTED_TOOLS = ["read", "write", "edit", "apply_patch", "exec", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
 let TRUSTED = []; // mutated per-test-block below (mirrors config.trustedIds)
 
@@ -60,15 +61,26 @@ function writeTargets(cmd) {
   }
   return out;
 }
-function criticalHit(event) {
+function escalationHit(event) {
   const toolName = event.toolName;
   if (["write", "edit", "apply_patch"].includes(toolName)) {
-    for (const tp of targetPaths(event)) { const h = matchesProtected(tp, CRIT_PATHS); if (h) return "path:" + tp; }
+    for (const tp of targetPaths(event)) { const h = matchesProtected(tp, ESC_PATHS); if (h) return "path:" + tp; }
   }
   if (toolName === "exec") {
     const cmd = String((event.params ?? {}).command ?? "");
     for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(cmd)) return "exec:" + pat; } catch {} }
-    for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, CRIT_PATHS); if (h) return "exec-write:" + wt; }
+    for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, ESC_PATHS); if (h) return "exec-write:" + wt; }
+  }
+  return null;
+}
+function criticalDocHit(event) {
+  const toolName = event.toolName;
+  if (["write", "edit", "apply_patch"].includes(toolName)) {
+    for (const tp of targetPaths(event)) { const h = matchesProtected(tp, DOC_PATHS); if (h) return "doc:" + tp; }
+  }
+  if (toolName === "exec") {
+    const cmd = String((event.params ?? {}).command ?? "");
+    for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, DOC_PATHS); if (h) return "exec-doc:" + wt; }
   }
   return null;
 }
@@ -84,7 +96,7 @@ function decideTrusted(event, entry) {
     const tp = targetPaths(event);
     if (tp.length && tp.some((p) => !matchesProtected(p, entry.scopePathGlobs))) return { block: true, why: "trusted-scope" };
   }
-  const crit = criticalHit(event);
+  const crit = escalationHit(event) ?? criticalDocHit(event);
   if (crit) return { block: true, why: "trusted-critical" };
   const allowedTools = entry.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
   if (toolName === "exec") {
@@ -101,8 +113,10 @@ function decide(event, ctx) {
   const isOwner = sender == null || OWNERS.includes(sender);
   const protectedHit = anyProtected(event, PROTECTED);
   if (isOwner) {
-    const crit = criticalHit(event);
-    if (crit) return { block: false, approval: true, why: "owner-approval" };
+    const esc = escalationHit(event);
+    if (esc) return { block: false, approval: true, why: "owner-approval" };
+    const doc = criticalDocHit(event);
+    if (doc) return { block: false, why: "owner-warn" };
     return { block: false, why: protectedHit ? "owner-warn" : "owner-pass" };
   }
   if (sender != null && TRUSTED.length) {
@@ -132,7 +146,9 @@ const STRANGER = { sessionKey: "agent:analyst:telegram:direct:999", senderId: "9
 t("owner rm -rf -> approval", { toolName: "exec", params: { command: "rm -rf /tmp/x" } }, OWNER, false, "owner-approval");
 t("owner git push --force -> approval", { toolName: "exec", params: { command: "git push origin main --force" } }, OWNER, false, "owner-approval");
 t("owner write openclaw.json -> approval", { toolName: "write", params: { path: "/root/.openclaw/openclaw.json" } }, OWNER, false, "owner-approval");
-t("owner edit AGENTS.md -> approval", { toolName: "edit", params: { path: "/x/AGENTS.md" } }, OWNER, false, "owner-approval");
+t("owner edit AGENTS.md -> warn (reversible doc)", { toolName: "edit", params: { path: "/x/AGENTS.md" } }, OWNER, false, "owner-warn");
+t("owner edit security_rules.md -> warn (reversible doc)", { toolName: "edit", params: { path: "/x/security_rules.md" } }, OWNER, false, "owner-warn");
+t("owner echo > security_rules.md -> warn (exec-write doc)", { toolName: "exec", params: { command: "echo x > /x/security_rules.md" } }, OWNER, false, "owner-warn");
 t("owner normal exec -> pass", { toolName: "exec", params: { command: "ls -la" } }, OWNER, false, "owner-pass");
 t("owner normal write -> pass", { toolName: "write", params: { path: "/tmp/note.txt" } }, OWNER, false, "owner-pass");
 t("owner cat .env -> warn+pass (read)", { toolName: "exec", params: { command: "cat .env" } }, OWNER, false, "owner-warn");

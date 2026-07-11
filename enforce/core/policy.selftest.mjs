@@ -28,7 +28,13 @@ t("owner read .env -> warn (read, not write)", call("exec", { command: "cat .env
 t("owner grep security file -> allow (read arg)", call("exec", { command: "grep -n foo docs/security_rules.md" }), OWNER, "allow");
 t("owner echo > openclaw.json -> approve (write target)", call("exec", { command: "echo x > /root/.openclaw/openclaw.json" }), OWNER, "approve");
 t("owner tee -a .env -> approve (tee write)", call("exec", { command: "echo x | tee -a /x/.env" }), OWNER, "approve");
-t("owner edit AGENTS.md -> approve", call("edit", { paths: ["/x/AGENTS.md"] }), OWNER, "approve");
+// split: reversible security-DOC edits (security_rules.md / AGENTS.md) -> warn only, NOT approve.
+t("owner edit AGENTS.md -> warn (reversible doc)", call("edit", { paths: ["/x/AGENTS.md"] }), OWNER, "warn");
+t("owner edit security_rules.md -> warn (reversible doc)", call("edit", { paths: ["/x/security_rules.md"] }), OWNER, "warn");
+t("owner write security_rules.md -> warn (reversible doc)", call("write", { paths: ["/repo/security_rules.md"] }), OWNER, "warn");
+t("owner echo > security_rules.md -> warn (exec-write reversible doc)", call("exec", { command: "echo x > /x/security_rules.md" }), OWNER, "warn");
+// escalation paths (openclaw.json / .env) STILL approve -- injection tripwire kept.
+t("owner edit .env -> approve (escalation)", call("edit", { paths: ["/x/.env"] }), OWNER, "approve");
 
 // self (agent-operated-by-owner)
 t("self exec normal -> allow", call("exec", { command: "python3 procedures/backup.py" }), SELF, "allow");

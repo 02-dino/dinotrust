@@ -46,6 +46,9 @@ type Cfg = {
   ownerIds: string[];
   ownerWarnOnly: boolean;
   criticalExecPatterns: string[];
+  // Privilege-escalation / brick-risk paths: owner write here -> approval.
+  escalationPathGlobs: string[];
+  // Reversible security-doc paths: owner write here -> warn only.
   criticalPathGlobs: string[];
   protectedGlobs: string[];
   mutatingTools: string[];
@@ -53,7 +56,7 @@ type Cfg = {
   nonOwnerAllowedScripts: string[];
   // Trusted/delegated ids: per-individual tier ABOVE non-owner, BELOW owner.
   // Empty by default -> zero behavior change. See policy.ts TrustedEntry doc
-  // for the full ceiling rules (protectedGlobs + criticalHit always win).
+  // for the full ceiling rules (protectedGlobs + escalation/doc hits always win).
   trustedIds: TrustedEntry[];
   logFile: string;
   enforce: boolean;
@@ -75,8 +78,11 @@ const DEFAULTS: Cfg = {
     "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
     "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", ":\\(\\)\\s*\\{", "uninstall", "--hard\\b",
   ],
-  // Owner writes/edits to these paths -> requireApproval (critical config/security).
-  criticalPathGlobs: ["**/openclaw.json", "**/security_rules.md", "**/AGENTS.md", "**/.env"],
+  // Owner write/edit/exec-write to these paths -> requireApproval: genuine
+  // privilege-escalation / brick risk (runtime+plugin config, secrets).
+  escalationPathGlobs: ["**/openclaw.json", "**/.env"],
+  // Owner write/edit here -> warn only (reversible security docs; git+backups).
+  criticalPathGlobs: ["**/security_rules.md", "**/AGENTS.md"],
   protectedGlobs: [
     "**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/id_ed25519",
     "**/credentials", "**/secrets/**",
@@ -94,7 +100,7 @@ const DEFAULTS: Cfg = {
 
 function cfg(raw: any): Cfg {
   const c = { ...DEFAULTS, ...(raw || {}) };
-  for (const k of ["ownerIds", "criticalExecPatterns", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds"] as const) {
+  for (const k of ["ownerIds", "criticalExecPatterns", "escalationPathGlobs", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds"] as const) {
     if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
   }
   return c;
@@ -184,22 +190,45 @@ function writeTargets(cmd: string): string[] {
   return out;
 }
 
-function criticalHit(event: any, c: Cfg): string | null {
+// ESCALATION / irreversible detector -> the ONLY owner-facing APPROVAL trigger.
+// (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
+// target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
+// security-doc edits are NOT here -> see criticalDocHit.
+function escalationHit(event: any, c: Cfg): string | null {
   const toolName = String(event?.toolName ?? "");
-  // critical path writes (config/security files) via write/edit/apply_patch
+  if (["write", "edit", "apply_patch"].includes(toolName)) {
+    for (const tp of targetPaths(event)) {
+      const h = matchesProtected(tp, c.escalationPathGlobs);
+      if (h) return `write ${tp} ~ ${h}`;
+    }
+  }
+  if (toolName === "exec") {
+    const cmd = String((event?.params ?? {}).command ?? "");
+    for (const pat of c.criticalExecPatterns) {
+      try { if (new RegExp(pat, "i").test(cmd)) return `exec ~ /${pat}/`; } catch { /* bad regex ignored */ }
+    }
+    // exec WRITING to an escalation path (redirect / tee). Reads (grep/cat) pass.
+    for (const wt of writeTargets(cmd)) {
+      const h = matchesProtected(wt, c.escalationPathGlobs);
+      if (h) return `exec-write ${wt} ~ ${h}`;
+    }
+  }
+  return null;
+}
+
+// SECURITY-DOC detector -> owner gets `warn` only (reversible: git + backups),
+// never approval/block. A write (tool or exec-redirect) to a criticalPathGlobs
+// doc (security_rules.md / AGENTS.md). Also feeds the trusted-tier ceiling.
+function criticalDocHit(event: any, c: Cfg): string | null {
+  const toolName = String(event?.toolName ?? "");
   if (["write", "edit", "apply_patch"].includes(toolName)) {
     for (const tp of targetPaths(event)) {
       const h = matchesProtected(tp, c.criticalPathGlobs);
       if (h) return `write ${tp} ~ ${h}`;
     }
   }
-  // critical exec command patterns
   if (toolName === "exec") {
     const cmd = String((event?.params ?? {}).command ?? "");
-    for (const pat of c.criticalExecPatterns) {
-      try { if (new RegExp(pat, "i").test(cmd)) return `exec ~ /${pat}/`; } catch { /* bad regex ignored */ }
-    }
-    // exec WRITING to a critical path (redirect / tee). Reads (grep/cat) pass.
     for (const wt of writeTargets(cmd)) {
       const h = matchesProtected(wt, c.criticalPathGlobs);
       if (h) return `exec-write ${wt} ~ ${h}`;
@@ -259,23 +288,33 @@ export default definePluginEntry({
         const protectedHit = anyProtected(event, c.protectedGlobs);
         const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c) : null;
 
-        // ===== OWNER / agent-operated-by-owner: warn-only + critical-approval =====
+        // ===== OWNER / agent-operated-by-owner: ALL ACCESS =====
+        // Only friction is approval on genuinely critical/irreversible or
+        // privilege-escalating actions (escalationHit: irreversible exec, or a
+        // write to openclaw.json/.env). Reversible security-doc edits
+        // (security_rules.md/AGENTS.md) and secret touches are ALLOWED with
+        // warn-only telemetry so the owner still SEES them. No path/tool-pattern
+        // gate beyond the escalation tripwire.
         if (isOwner) {
-          // Critical/irreversible action -> requireApproval ("are you sure?") even for owner.
-          const crit = criticalHit(event, c);
-          if (crit) {
-            audit(c, { evt: "owner-approval", rule: "R-critical", toolName, sessionKey, sender: sender ?? "self", hit: crit, enforced: c.enforce });
+          const esc = escalationHit(event, c);
+          if (esc) {
+            audit(c, { evt: "owner-approval", rule: "R-escalation", toolName, sessionKey, sender: sender ?? "self", hit: esc, enforced: c.enforce });
             if (c.enforce) {
               return {
                 requireApproval: {
                   title: `dinotrust: confirm critical action`,
-                  description: `This is irreversible/critical (${crit}). Are you sure? Reply /approve to proceed.`,
+                  description: `This is irreversible/critical (${esc}). Are you sure? Reply /approve to proceed.`,
                   severity: "critical",
                   // Owner is trusted: unmet approval (no route / timeout) FAILS OPEN.
                   timeoutBehavior: "allow",
                 },
               };
             }
+          }
+          const doc = criticalDocHit(event, c);
+          if (doc) {
+            // warn-only: reversible security-doc edit, owner still SEES it, no gate
+            audit(c, { evt: "owner-warn", rule: "R-security-doc", toolName, sessionKey, sender: sender ?? "self", hit: doc });
           }
           if (protectedHit) {
             // warn-only telemetry so owner still SEES secret-touch, no block
@@ -304,8 +343,10 @@ export default definePluginEntry({
               }
             }
           }
-          // Critical/irreversible actions are BLOCKED for trusted, never auto-approved.
-          const crit = criticalHit(event, c);
+          // Critical/irreversible actions AND security-doc writes are BLOCKED for
+          // trusted, never auto-approved (below-owner ceiling: no irreversible
+          // ops, no touching config/security files).
+          const crit = escalationHit(event, c) ?? criticalDocHit(event, c);
           if (crit) {
             audit(c, { evt: "block", rule: "R-trusted-critical", toolName, sessionKey, sender, id: trusted.id, hit: crit, blocked: c.enforce });
             if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted critical/irreversible denied (${crit})` };
