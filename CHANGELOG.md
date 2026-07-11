@@ -4,6 +4,29 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.20.0] — 2026-07-11
+
+### Changed
+- **Unified access management into one front door: `scripts/manage-access.sh`.**
+  Owner and trusted-tier management were two separate scripts (`manage-owner.sh`,
+  `manage-trusted.sh`) — bad UX (users had to remember which script for which
+  tier). They are now one command with a subject argument:
+  - `bash scripts/manage-access.sh owner   <list|add|remove> ...`
+  - `bash scripts/manage-access.sh trusted <list|show|add|remove> ...`
+  - Run with no args (or `--help`) for combined usage; run a subject with no
+    action for that subject's full flag help.
+- The dispatcher forwards each subject to the existing, already-tested
+  implementation (`_manage-owner-impl.sh` / `_manage-trusted-impl.sh`) verbatim
+  — every flag, backup, and enforce-sync behavior is byte-for-byte preserved;
+  only the entry point and help text changed.
+- **Back-compat:** `scripts/manage-owner.sh` and `scripts/manage-trusted.sh`
+  remain as thin shims that print a deprecation notice and forward to
+  `manage-access.sh`, so existing commands and muscle memory keep working.
+- README, `enforce/README.md`, `enforce/install.sh` help/prompt text, and
+  `security_rules.md` references updated to the unified command.
+
+---
+
 ## [1.19.0] — 2026-07-10
 
 ### Added

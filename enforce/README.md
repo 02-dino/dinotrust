@@ -95,10 +95,10 @@ That's fine if you're intentionally running enforce standalone (e.g.
 `--no-observability` installs, or testing the hook in isolation).
 
 **To add/remove an owner LATER (post-install), don't re-run this installer** —
-use `../scripts/manage-owner.sh` instead:
+use the unified `../scripts/manage-access.sh` front door instead:
 
 ```bash
-bash scripts/manage-owner.sh add 987654321
+bash scripts/manage-access.sh owner add 987654321
 ```
 
 It's a surgical single-line edit (via the same `merge_config.py` key-scoped
@@ -122,10 +122,10 @@ change unless you explicitly add someone. Unlike `ownerIds`, it lives
 **only** here (no instruction-layer counterpart to sync), managed with:
 
 ```bash
-bash ../scripts/manage-trusted.sh add 555555 --scope "workspace-bob/**"
-bash ../scripts/manage-trusted.sh add 666666 --tools read,write --scripts exchange_data
-bash ../scripts/manage-trusted.sh list
-bash ../scripts/manage-trusted.sh remove 555555
+bash ../scripts/manage-access.sh trusted add 555555 --scope "workspace-bob/**"
+bash ../scripts/manage-access.sh trusted add 666666 --tools read,write --scripts exchange_data
+bash ../scripts/manage-access.sh trusted list
+bash ../scripts/manage-access.sh trusted remove 555555
 ```
 
 Protected resources and critical/irreversible actions are hard-blocked for

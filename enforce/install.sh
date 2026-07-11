@@ -60,7 +60,8 @@ Options:
   --owner-id IDS         Owner platform id(s), comma-separated (e.g. 111111,222222).
                          Every id gets identical owner tier (warn-only + critical-
                          approval); no primary/secondary. To add/remove an owner
-                         LATER (post-install), prefer ../scripts/manage-owner.sh
+                         LATER (post-install), prefer
+                         `../scripts/manage-access.sh owner ...`
                          instead of re-running this installer — it edits only the
                          owner_ids line (instruction layer) and auto-syncs this
                          hook's ownerIds too (same default path this installer
@@ -101,7 +102,7 @@ if [[ -z "$OPT_OWNER_ID" && "$OPT_NONINTERACTIVE" != "true" ]]; then
   echo "Everyone else falls under strict non-owner rules (read-only, allowlisted scripts only)."
   echo "Enter one or more, comma-separated (e.g. 111111,222222) — no primary/secondary,"
   echo "every id listed gets identical owner tier."
-  echo "To add/remove an owner LATER: use ../scripts/manage-owner.sh instead of"
+  echo "To add/remove an owner LATER: use ../scripts/manage-access.sh owner ... instead of"
   echo "re-running this installer — it's a surgical single-line edit that syncs"
   echo "both this hook's config and the instruction layer automatically, without"
   echo "resetting other customizations. See README.md 'Adding or removing an owner'."

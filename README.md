@@ -199,7 +199,7 @@ your `--owner-id` and `--profile` passed again (or answered interactively) —
 they are **not** auto-detected from the existing block, and it regenerates the
 whole ruleset from scratch (see ["Adding or removing an owner after
 install"](#identity-model) for why this matters if you've customized
-anything). If you only need to change owners, use `scripts/manage-owner.sh`
+anything). If you only need to change owners, use `scripts/manage-access.sh owner`
 instead — it doesn't touch anything else.
 
 ---
@@ -300,22 +300,23 @@ The ruleset matches: *sender is owner IFF (a bare owner_id equals the sender_id)
 
 **Adding or removing an owner after install**
 
-Use `scripts/manage-owner.sh` — it's a small, surgical tool built specifically
-for this, and the recommended way to add/remove an owner post-install. One
-command updates **both** owner-id stores (see below) automatically:
+Use `scripts/manage-access.sh owner` — the owner subject of the unified
+access-management front door, a small, surgical tool built specifically for
+this and the recommended way to add/remove an owner post-install. One command
+updates **both** owner-id stores (see below) automatically:
 
 ```bash
-bash scripts/manage-owner.sh list                       # show current owners
-bash scripts/manage-owner.sh add    987654321            # add a bare (any-platform) owner
-bash scripts/manage-owner.sh add    555@telegram          # add a platform-scoped owner
-bash scripts/manage-owner.sh remove 987654321             # remove an owner
+bash scripts/manage-access.sh owner list                # show current owners
+bash scripts/manage-access.sh owner add    987654321     # add a bare (any-platform) owner
+bash scripts/manage-access.sh owner add    555@telegram   # add a platform-scoped owner
+bash scripts/manage-access.sh owner remove 987654321      # remove an owner
 ```
 
 Why this instead of re-running the full installer: `scripts/install.sh --force`
 regenerates the **entire** injected instruction block from scratch (profile,
 protected_resources, deflection message, allowed_actions — everything you may
 have customized after install), because it has no way to tell your hand-edits
-apart from a fresh answer. `manage-owner.sh` finds the existing `owner_ids:`
+apart from a fresh answer. `manage-access.sh owner` finds the existing `owner_ids:`
 line inside the block and replaces **only that line**, in place — every other
 customization (hand-added protected resources, tuned non-owner allowlist,
 custom deflection message) is left byte-for-byte untouched. It auto-detects
@@ -325,7 +326,7 @@ it up before editing, and refuses to remove the last remaining owner.
 There are actually **two** owner-id stores — `security_rules.md`'s `owner_ids`
 (instruction layer) and the enforce hook's own `ownerIds` config (`openclaw.json`
 plugin entry, or `~/.dinotrust/enforce.json` on CLI runtimes). By default
-`manage-owner.sh` updates **both in one command**: it looks in the exact same
+`manage-access.sh owner` updates **both in one command**: it looks in the exact same
 two hardcoded locations `enforce/install.sh` itself always writes to
 (`~/.openclaw/openclaw.json`, `~/.dinotrust/enforce.json` — that installer has
 no path-override flag either, since there's only ever one of each per host) and
@@ -335,9 +336,9 @@ it just skips the sync with a note (instruction-layer-only setups are fine).
 To point at a nonstandard path instead, or to skip the enforce side entirely:
 
 ```bash
-bash scripts/manage-owner.sh add 987654321 --oc-json /path/to/openclaw.json   # nonstandard OpenClaw path
-bash scripts/manage-owner.sh add 987654321 --dt-conf /path/to/enforce.json   # nonstandard CLI-runtime path
-bash scripts/manage-owner.sh add 987654321 --no-sync-enforce                 # instruction layer only
+bash scripts/manage-access.sh owner add 987654321 --oc-json /path/to/openclaw.json   # nonstandard OpenClaw path
+bash scripts/manage-access.sh owner add 987654321 --dt-conf /path/to/enforce.json   # nonstandard CLI-runtime path
+bash scripts/manage-access.sh owner add 987654321 --no-sync-enforce                 # instruction layer only
 ```
 
 OpenClaw requires a gateway restart afterward for the enforce hook to pick up
@@ -347,7 +348,7 @@ fresh on each call, no restart needed.
 **Editing `AGENTS.md` / `security_rules.md` alone does not change enforce-layer
 ownership** — the enforce hook reads its own config file, not the instruction
 file, precisely so a prompt injection or a confused model editing that file
-can't grant itself owner status at the code-enforcement level. `manage-owner.sh`
+can't grant itself owner status at the code-enforcement level. `manage-access.sh owner`
 syncs both by default so this normally isn't something you have to think about;
 it only comes up if you passed `--no-sync-enforce` or the enforce config lives
 somewhere `--oc-json`/`--dt-conf` needs to point at explicitly.
@@ -355,13 +356,13 @@ somewhere `--oc-json`/`--dt-conf` needs to point at explicitly.
 **Limitation:** platform-scoped owners (`id@platform`) are an
 instruction-layer-only concept — the enforce hook's `ownerIds` is a flat array
 with no scoping support. If you add a scoped owner and sync the enforce side,
-`manage-owner.sh` warns you that the id lands there *unscoped* (owner on any
+`manage-access.sh owner` warns you that the id lands there *unscoped* (owner on any
 platform at the enforce layer, even though the instruction layer restricts it).
 
 *(Re-running the full installer with `--force` and the complete owner list
 still works and stays in sync automatically — useful if you're already
 re-running it for another reason, e.g. an upgrade — but for a standalone
-owner change, `manage-owner.sh` is safer and doesn't risk your other
+owner change, `manage-access.sh owner` is safer and doesn't risk your other
 customizations.)*
 
 ---
@@ -422,18 +423,19 @@ role, just per-person grants you compose from two knobs:
 - Protected resources (`.env`, secrets, credentials, other agents'/workspaces' configs) stay hard-blocked, even inside a trusted id's own scope.
 - Critical/irreversible actions (`rm -rf`, force-push, `DROP TABLE`, …) are **blocked** for trusted ids — never escalated to an "are you sure?" approval the way an owner's critical action is.
 
-Manage it with `scripts/manage-trusted.sh` (same philosophy as `manage-owner.sh` — surgical edits, no full re-install):
+Manage it with `scripts/manage-access.sh trusted` (the trusted subject of the
+same front door used for owners — surgical edits, no full re-install):
 
 ```bash
 # Delegated admin: broad access, but only inside their own workspace folder
-bash scripts/manage-trusted.sh add 555555 --scope "workspace-bob/**"
+bash scripts/manage-access.sh trusted add 555555 --scope "workspace-bob/**"
 
 # Extra tool access, no path restriction (their own risk surface is just those tools)
-bash scripts/manage-trusted.sh add 666666 --tools read,write --scripts exchange_data
+bash scripts/manage-access.sh trusted add 666666 --tools read,write --scripts exchange_data
 
-bash scripts/manage-trusted.sh list
-bash scripts/manage-trusted.sh show 555555
-bash scripts/manage-trusted.sh remove 555555
+bash scripts/manage-access.sh trusted list
+bash scripts/manage-access.sh trusted show 555555
+bash scripts/manage-access.sh trusted remove 555555
 ```
 
 `trustedIds` lives **only** in the enforce hook's own config (`openclaw.json`
@@ -529,7 +531,7 @@ injected ruleset from scratch, discarding any hand-edits made after install
 before running it, or expect to re-answer the prompts.
 
 Just need to add/remove an owner? Don't use this — use
-[`scripts/manage-owner.sh`](#identity-model) instead; it's a single-line edit
+[`scripts/manage-access.sh owner`](#identity-model) instead; it's a single-line edit
 that leaves everything else alone.
 
 ## Uninstall

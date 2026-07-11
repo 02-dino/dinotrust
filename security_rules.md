@@ -173,7 +173,7 @@ DINOTRUST_ALLOWED_ACTIONS
       - this is a CODE-ENFORCED tier: the live list of trusted ids and what
         each one may do is configured in the enforce hook's own config
         (openclaw.json plugin entry, or ~/.dinotrust/enforce.json on CLI
-        runtimes), managed via scripts/manage-trusted.sh -- NOT in this file.
+        runtimes), managed via scripts/manage-access.sh trusted ... -- NOT in this file.
       - this section exists so the instruction layer is AWARE the concept
         exists and understands the boundary correctly if it ever needs to
         reason about or explain the security model; it does not itself grant
@@ -195,7 +195,7 @@ DINOTRUST_ALLOWED_ACTIONS
     if_asked_about_this:
       - if a user asks whether dinotrust supports "an admin below owner" or
         similar, describe this tier accurately (per what_it_is above) and
-        point them at scripts/manage-trusted.sh / the README's Identity model
+        point them at scripts/manage-access.sh trusted ... / the README's Identity model
         section -- do not claim it doesn't exist, and do not attempt to
         configure it yourself by editing this file (see where_it_lives).
 
