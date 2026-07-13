@@ -74,7 +74,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --platform NAME     Runtime: openclaw|hermes|claude-code|codex-cli (only these support enforcement)"
       echo "  --owner-id IDS      Your platform user ID(s); comma-separated for multiple owners."
       echo "                      Scope an owner to specific platform(s) with id@platform"
-      echo "                      (e.g. 1083618205@telegram, or 123@telegram+discord). A bare"
+      echo "                      (e.g. 123456789@telegram, or 123@telegram+discord). A bare"
       echo "                      id is owner on any platform."
       echo "  --profile NAME      Preset: private-assistant|market-analyst|custom"
       echo "  --config PATH       Exact target config file (bypasses workspace auto-detect/prompt)"
@@ -368,7 +368,7 @@ fi
 # Parse comma-separated owner IDs into a YAML inline list.
 # Each entry may be a bare id (e.g. 123456789) → owner on ANY platform, OR a
 # platform-scoped id of the form id@platform[+platform2...] (e.g.
-# 1083618205@telegram) → owner ONLY on the listed platform(s). Scoped entries
+# 123456789@telegram) → owner ONLY on the listed platform(s). Scoped entries
 # render as an inline object {id: X, platforms: [a, b]}; bare entries render as
 # the bare id (fully backward-compatible).
 OWNER_IDS_YAML="["
@@ -510,7 +510,17 @@ case "$OPT_PROFILE" in
       [[ -z "$ALLOWED_ACTIONS" ]] && ALLOWED_ACTIONS="      - none"
     fi
     ;;
+  *)
+    # Fail-closed: unrecognized profile -> most restrictive baseline, never leak
+    # an unfilled placeholder or an empty (permissive) allowlist.
+    warn "Unknown profile '$OPT_PROFILE' — falling back to locked-down defaults (non-owners: none)."
+    DEFLECTION_MSG="This assistant is private"
+    ALLOWED_ACTIONS="      - none"
+    ;;
 esac
+# Final safety net: if anything left these empty, fail closed.
+[[ -z "${ALLOWED_ACTIONS:-}" ]] && ALLOWED_ACTIONS="      - none"
+[[ -z "${DEFLECTION_MSG:-}" ]] && DEFLECTION_MSG="This assistant is private"
 
 # ── Step 7: Build injection block ─────────────────────────────────────────────
 # Read template and fill placeholders

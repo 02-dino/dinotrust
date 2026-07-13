@@ -69,8 +69,14 @@ const DEFAULT_TRUSTED_TOOLS: string[] = [
 ];
 
 const DEFAULTS: Cfg = {
-  agentFilter: "agent:analyst",
-  ownerIds: ["1083618205"],
+  // Generic safe defaults for distribution. agentFilter "" = enforce on ALL
+  // agents (never silently no-op on a differently-named agent). ownerIds []
+  // = no assumed owner: until the install configures ownerIds, a resolvable
+  // sender is treated as NON-owner (locked down), never auto-owned. The
+  // agent-operated-by-owner path (no senderId) still passes. Per-install
+  // config in openclaw.json fills these.
+  agentFilter: "",
+  ownerIds: [],
   ownerWarnOnly: true,
   // Owner is warn-only EXCEPT these critical/irreversible actions -> requireApproval
   // ("are you sure?") even for the owner. Regex strings, tested against exec command.

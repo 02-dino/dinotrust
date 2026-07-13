@@ -7,13 +7,13 @@
     "properties": {
       "agentFilter": {
         "type": "string",
-        "default": "agent:analyst",
+        "default": "",
         "description": "Only enforce on sessions whose sessionKey includes this substring. Empty string = all agents."
       },
       "ownerIds": {
         "type": "array",
         "items": { "type": "string" },
-        "default": ["1083618205"],
+        "default": [],
         "description": "Verified platform sender IDs allowed to run mutating/exec tools. Owner-gate is only applied when a senderId is resolvable from context; otherwise falls back to instruction layer."
       },
       "protectedGlobs": {
