@@ -728,6 +728,20 @@ if [[ "$OPT_PLATFORM" == "aider" ]]; then
   fi
 fi
 
+# Skill: install the dinotrust-security-model reference skill next to the config.
+# The injected block points to it for the identity/trust mechanics (kept out of
+# the always-on prompt to save space). Degrades safely if not copied: the block
+# only *references* it, never depends on it for enforcement.
+DT_SKILL_SRC="$REPO_DIR/skills/dinotrust-security-model"
+if [[ -d "$DT_SKILL_SRC" ]]; then
+  DT_SKILL_DEST="$(dirname "$CONFIG_FILE")/skills/dinotrust-security-model"
+  if mkdir -p "$(dirname "$DT_SKILL_DEST")" 2>/dev/null && cp -r "$DT_SKILL_SRC" "$DT_SKILL_DEST" 2>/dev/null; then
+    info "Installed skill: dinotrust-security-model -> $DT_SKILL_DEST"
+  else
+    warn "Could not copy dinotrust-security-model skill to $DT_SKILL_DEST — the injected block references it; copy skills/dinotrust-security-model/ manually if you want the reference layer."
+  fi
+fi
+
 # Cursor: add frontmatter
 if [[ "$OPT_PLATFORM" == "cursor" ]]; then
   CURSOR_FRONTMATTER="---
