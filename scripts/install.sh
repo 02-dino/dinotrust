@@ -737,6 +737,9 @@ if [[ -d "$DT_SKILL_SRC" ]]; then
   DT_SKILL_DEST="$(dirname "$CONFIG_FILE")/skills/dinotrust-security-model"
   if mkdir -p "$(dirname "$DT_SKILL_DEST")" 2>/dev/null && cp -r "$DT_SKILL_SRC" "$DT_SKILL_DEST" 2>/dev/null; then
     info "Installed skill: dinotrust-security-model -> $DT_SKILL_DEST"
+    # Auto-discovered from <workspace>/skills (highest-precedence root). Visible
+    # by default; if you pin an agent skills allowlist (agents.*.skills), add
+    # "dinotrust-security-model" to it or the agent won't see the reference layer.
   else
     warn "Could not copy dinotrust-security-model skill to $DT_SKILL_DEST — the injected block references it; copy skills/dinotrust-security-model/ manually if you want the reference layer."
   fi
