@@ -138,6 +138,22 @@ agent already reads every turn.
 | OpenClaw | plugin copied to `~/.openclaw/extensions/dinotrust-enforce/`, entry merged into `openclaw.json` |
 | Hermes / Claude Code / Codex CLI | `handler.py` copied under the runtime's hook dir, wired to its `pre_tool_call` / `PreToolUse` config |
 
+On **OpenClaw**, the enforce hook *escalates* critical/non-owner tool calls for
+approval — but OpenClaw only shows an approval card if an approval **route** is
+configured for the channel/account. If none is set, OpenClaw falls back to
+`askFallback` which **defaults to `deny`**, so a fresh install would silently
+block (or dead-end with "no approval route") the moment dinotrust escalates
+something. To prevent that, the OpenClaw installer **auto-wires an approval
+route**: for every configured Telegram/Discord/Slack account that has no
+`execApprovals` yet, it sets
+`execApprovals = { enabled: true, approvers: [<your owner id(s)>], target: "dm" }`
+using the `--owner-id` you already provided. It is **idempotent** (never touches
+an account that already has `execApprovals` — so an explicit opt-out or custom
+setup is respected), validated by re-parsing the JSON, and skipped cleanly if
+`python3` is missing (with a warning telling you to wire it manually). Result:
+dinotrust escalations reach you as an approval card instead of being silently
+denied.
+
 The optional **observability** audit layer, when enabled, adds a small
 report script + a cron/hook entry (see [Observability](#observability-audit-layer)).
 

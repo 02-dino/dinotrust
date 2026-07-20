@@ -714,6 +714,86 @@ PYCAP
   fi
 fi
 
+# ── OpenClaw exec-approval route auto-wire ────────────────────────────────────
+# dinotrust's enforce hook ESCALATES critical/non-owner tool calls for approval.
+# But OpenClaw only shows an approval card if an approval ROUTE is configured for
+# the channel/account (channels.<chan>.accounts.<acct>.execApprovals). When that
+# is unset, OpenClaw resolves the prompt via askFallback — which DEFAULTS TO DENY.
+# Net effect for a fresh installer: dinotrust flags a command → no route → OpenClaw
+# silently DENIES (or emits "no approval route") → the user thinks dinotrust "broke
+# exec". The approval plumbing lives in openclaw.json, NOT in the hook, so dinotrust
+# cannot fix it at runtime — it has to be wired at install. We do it here:
+# for every configured Telegram/Discord/Slack account with NO execApprovals set,
+# wire enabled=true + approvers=<owner ids> + target=dm. Idempotent (never touches
+# an account that already has execApprovals — respects an explicit user choice),
+# raise-only, validated by re-parsing the JSON, OpenClaw-only, and skipped cleanly
+# if python3 is missing. Owner IDs come from the same --owner-id the installer
+# already collected; @platform suffixes are stripped so the raw id is the approver.
+if [[ "$OPT_PLATFORM" == "openclaw" ]]; then
+  OPENCLAW_JSON="${OPENCLAW_CONFIG:-$HOME/.openclaw/openclaw.json}"
+  if [[ -f "$OPENCLAW_JSON" ]] && command -v python3 &>/dev/null; then
+    APPROVE_RESULT=$(OPENCLAW_JSON="$OPENCLAW_JSON" DT_OWNER_IDS="$OPT_OWNER_ID" python3 - <<'PYAPPROVE'
+import json, os, sys
+path = os.environ["OPENCLAW_JSON"]
+raw = os.environ.get("DT_OWNER_IDS", "")
+# Parse comma-separated owner ids; strip any @platform scoping to the bare id.
+approvers = []
+for entry in raw.split(","):
+    e = entry.strip().replace(" ", "")
+    if not e:
+        continue
+    oid = e.split("@", 1)[0]
+    if oid and oid not in approvers:
+        approvers.append(oid)
+if not approvers:
+    print("SKIP no owner ids to set as approvers"); sys.exit(0)
+try:
+    cfg = json.load(open(path))
+except Exception as e:
+    print(f"SKIP could not parse openclaw.json: {e}"); sys.exit(0)
+channels = cfg.get("channels")
+if not isinstance(channels, dict):
+    print("SKIP no channels block in openclaw.json"); sys.exit(0)
+# Only chat channels that support native approval cards.
+APPROVAL_CHANNELS = ("telegram", "discord", "slack")
+wired = []
+for chan_name in APPROVAL_CHANNELS:
+    chan = channels.get(chan_name)
+    if not isinstance(chan, dict):
+        continue
+    accounts = chan.get("accounts")
+    if not isinstance(accounts, dict):
+        continue
+    for acct_name, acct in accounts.items():
+        if not isinstance(acct, dict):
+            continue
+        # Idempotent: never touch an account that already has execApprovals set
+        # (respects an explicit user choice, incl. enabled=false to opt out).
+        if "execApprovals" in acct:
+            continue
+        acct["execApprovals"] = {
+            "enabled": True,
+            "approvers": list(approvers),
+            "target": "dm",
+        }
+        wired.append(f"{chan_name}.{acct_name}")
+if not wired:
+    print("OK all approval-capable accounts already have execApprovals (or none configured)"); sys.exit(0)
+json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
+json.load(open(path))  # validate round-trip
+print("WIRED " + "; ".join(wired) + "  approvers=" + ",".join(approvers))
+PYAPPROVE
+)
+    case "$APPROVE_RESULT" in
+      WIRED*) success "OpenClaw exec-approval route wired so dinotrust escalations reach you (not silently denied): ${APPROVE_RESULT#WIRED }" ;;
+      OK*)    info "OpenClaw exec-approval route already configured — left as-is" ;;
+      SKIP*)  warn "exec-approval auto-wire skipped: ${APPROVE_RESULT#SKIP } — without a route, dinotrust escalations may hit askFallback=deny. Set channels.<chan>.accounts.<acct>.execApprovals manually." ;;
+    esac
+  elif [[ -f "$OPENCLAW_JSON" ]]; then
+    warn "python3 not found — cannot auto-wire the exec-approval route. Without it, dinotrust escalations may be silently denied. Set channels.<chan>.accounts.<acct>.execApprovals.{enabled:true,approvers:[<your id>],target:dm} manually."
+  fi
+fi
+
 # Aider: also patch .aider.conf.yml
 if [[ "$OPT_PLATFORM" == "aider" ]]; then
   AIDER_CONF=".aider.conf.yml"
