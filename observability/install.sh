@@ -46,6 +46,14 @@ OPT_REPORT_ACCOUNT=""   # delivery account id (optional)
 OPT_SCHEDULE="30 10 * * *"   # daily default
 OPT_REPORT_TZ=""        # default host TZ
 OPT_PRIVACY="patterns-only"  # safest default
+# Approval follow-up (A′): sweep that nudges the owner on a genuinely-missed
+# critical-approval card (expired, nothing ran). Default ON. Resolution is
+# deterministic via the hook's approve-resume re-fire marker (no false pings).
+OPT_APPROVAL_FOLLOWUP=true
+OPT_FOLLOWUP_SCHEDULE="*/5 * * * *"   # sweep cadence (every 5 min)
+OPT_FOLLOWUP_NUDGE_AFTER=200         # seconds past issue before a miss is nudged
+OPT_FOLLOWUP_GC_AFTER=1800           # seconds before a state line is GC'd
+OPT_PENDING_LOG=""                   # enforce-hook pending-approvals state file (default derived)
 # Mode flags.
 OPT_FORCE=false
 OPT_DRY_RUN=false
@@ -66,6 +74,12 @@ while [[ $# -gt 0 ]]; do
     --schedule)        OPT_SCHEDULE="$2"; shift 2 ;;
     --report-tz)       OPT_REPORT_TZ="$2"; shift 2 ;;
     --privacy)         OPT_PRIVACY="$2"; shift 2 ;;
+    --approval-followup)    OPT_APPROVAL_FOLLOWUP=true; shift ;;
+    --no-approval-followup) OPT_APPROVAL_FOLLOWUP=false; shift ;;
+    --followup-schedule)    OPT_FOLLOWUP_SCHEDULE="$2"; shift 2 ;;
+    --followup-nudge-after) OPT_FOLLOWUP_NUDGE_AFTER="$2"; shift 2 ;;
+    --followup-gc-after)    OPT_FOLLOWUP_GC_AFTER="$2"; shift 2 ;;
+    --pending-log)          OPT_PENDING_LOG="$2"; shift 2 ;;
     --force)           OPT_FORCE=true; shift ;;
     --dry-run)         OPT_DRY_RUN=true; shift ;;
     --non-interactive|--yes|-y) OPT_NONINTERACTIVE=true; shift ;;
@@ -88,6 +102,13 @@ while [[ $# -gt 0 ]]; do
       echo "  --schedule CRON       Cron expr for the digest (default: '30 10 * * *')."
       echo "  --report-tz TZ        IANA tz for the schedule (default: host TZ)."
       echo "  --privacy MODE        patterns-only|truncated|full (default: patterns-only)."
+      echo ""
+      echo "APPROVAL FOLLOW-UP (A′ — default ON; nudges owner on a missed critical-approval card):"
+      echo "  --no-approval-followup   Disable the follow-up sweep (opt out)."
+      echo "  --followup-schedule CRON Sweep cadence (default: '*/5 * * * *')."
+      echo "  --followup-nudge-after S Seconds past issue before a miss is nudged (default: 200)."
+      echo "  --followup-gc-after S    Seconds before a state line is GC'd (default: 1800)."
+      echo "  --pending-log PATH       Enforce-hook pending-approvals state file (default: derived)."
       echo ""
       echo "Modes:"
       echo "  --force               Overwrite an existing install."
@@ -258,10 +279,17 @@ if [[ "$OPT_PLATFORM" == "openclaw" ]]; then
   # ── OpenClaw: sources + install targets ────────────────────────────────────
   HANDLER_SRC="$SCRIPT_DIR/adapters/openclaw/handler.ts"
   REPORT_SRC="$SCRIPT_DIR/adapters/openclaw/report.py"
+  FOLLOWUP_SRC="$SCRIPT_DIR/adapters/openclaw/approval-followup.py"
   HOOK_DIR="$HOME/.openclaw/hooks/${OPT_AGENT}-dinotrust-observability"
   HOOK_DEST="$HOOK_DIR/handler.ts"
   PATTERNS_DEST="$HOOK_DIR/patterns.json"
   REPORT_DEST="$HOME/.openclaw/scripts/${OPT_AGENT}-dinotrust-report.py"
+  FOLLOWUP_DEST="$HOME/.openclaw/scripts/${OPT_AGENT}-dinotrust-approval-followup.py"
+  # Pending-approvals state file: the enforce hook (scripts/install.sh) derives
+  # this from ITS logFile as <stem>-pending-approvals.jsonl. The default enforce
+  # logFile is ~/.openclaw/logs/dinotrust-enforce.log, so the default state file
+  # is the path below. If a custom enforce logFile was used, pass --pending-log.
+  [[ -n "$OPT_PENDING_LOG" ]] || OPT_PENDING_LOG="$_LOG_DIR/dinotrust-enforce-pending-approvals.jsonl"
   AGENT_FILTER_VAL="agent:${OPT_AGENT}"
 
 elif [[ "$OPT_PLATFORM" == "hermes" ]]; then
@@ -395,8 +423,22 @@ REPORT_OUT="$(substitute "$REPORT_SRC" \
   "__THREAD_ID__=$OPT_REPORT_THREAD" \
   "__ACCOUNT__=$OPT_REPORT_ACCOUNT")"
 
+# Approval follow-up sweep (A′). OpenClaw only; default ON. Substituted here so
+# --dry-run can show it. FOLLOWUP_SRC is unset on Hermes (no adapter yet).
+FOLLOWUP_OUT=""
+if [[ "$OPT_APPROVAL_FOLLOWUP" == "true" && "$OPT_PLATFORM" == "openclaw" ]]; then
+  FOLLOWUP_OUT="$(substitute "$FOLLOWUP_SRC" \
+    "__PENDING_LOG__=$OPT_PENDING_LOG" \
+    "__CHANNEL__=$OPT_REPORT_CHANNEL" \
+    "__TARGET__=$OPT_REPORT_TARGET" \
+    "__THREAD_ID__=$OPT_REPORT_THREAD" \
+    "__ACCOUNT__=$OPT_REPORT_ACCOUNT" \
+    "__NUDGE_AFTER_SEC__=$OPT_FOLLOWUP_NUDGE_AFTER" \
+    "__GC_AFTER_SEC__=$OPT_FOLLOWUP_GC_AFTER")"
+fi
+
 # Residual-placeholder guard.
-_residual=$(printf '%s\n%s\n' "$HANDLER_OUT" "$REPORT_OUT" | grep -oE '__[A-Z_]+__' | sort -u || true)
+_residual=$(printf '%s\n%s\n%s\n' "$HANDLER_OUT" "$REPORT_OUT" "$FOLLOWUP_OUT" | grep -oE '__[A-Z_]+__' | sort -u || true)
 if [[ -n "$_residual" ]]; then
   error "Unsubstituted placeholder(s) remain: $(echo "$_residual" | tr '\n' ' '). Refusing to install a broken hook."
 fi
@@ -407,6 +449,11 @@ install_files() {
   printf '%s' "$HANDLER_OUT" > "$HOOK_DEST"
   printf '%s' "$REPORT_OUT" > "$REPORT_DEST"
   chmod +x "$REPORT_DEST"
+  if [[ -n "$FOLLOWUP_OUT" ]]; then
+    printf '%s' "$FOLLOWUP_OUT" > "$FOLLOWUP_DEST"
+    chmod +x "$FOLLOWUP_DEST"
+    success "Installed follow-up: $FOLLOWUP_DEST"
+  fi
   cp "$PATTERNS_SRC" "$PATTERNS_DEST"
   if [[ "$OPT_PLATFORM" == "hermes" ]]; then
     cp "$HOOK_YAML_SRC" "$HOOK_YAML_DEST"
@@ -433,9 +480,19 @@ CRON_TZ_PREFIX=""
 CRON_CMD="PATH=${CRON_PATH} python3 ${REPORT_DEST} --period daily >> ${_LOG_DIR}/${OPT_AGENT}-dinotrust-report.log 2>&1"
 CRON_LINE="${CRON_TZ_PREFIX}${OPT_SCHEDULE} ${CRON_CMD} ${CRON_TAG}"
 
+# Approval follow-up sweep cron (A′). Separate cadence + separate tag from the
+# daily digest so re-runs replace it independently. OpenClaw only; default ON.
+FOLLOWUP_CRON_TAG="# dinotrust-approval-followup:${OPT_AGENT}"
+FOLLOWUP_CRON_LINE=""
+if [[ "$OPT_APPROVAL_FOLLOWUP" == "true" && "$OPT_PLATFORM" == "openclaw" ]]; then
+  FOLLOWUP_CRON_CMD="PATH=${CRON_PATH} python3 ${FOLLOWUP_DEST} >> ${_LOG_DIR}/${OPT_AGENT}-dinotrust-approval-followup.log 2>&1"
+  FOLLOWUP_CRON_LINE="${CRON_TZ_PREFIX}${OPT_FOLLOWUP_SCHEDULE} ${FOLLOWUP_CRON_CMD} ${FOLLOWUP_CRON_TAG}"
+fi
+
 _CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
 if [[ -n "$_CURRENT_CRON" ]]; then
-  _MERGED_CRON="$(printf '%s\n' "$_CURRENT_CRON" | grep -vF "$CRON_TAG" || true)"
+  # strip BOTH our tags so a re-run replaces, never duplicates.
+  _MERGED_CRON="$(printf '%s\n' "$_CURRENT_CRON" | grep -vF "$CRON_TAG" | grep -vF "$FOLLOWUP_CRON_TAG" || true)"
 else
   _MERGED_CRON=""
 fi
@@ -444,10 +501,12 @@ if [[ -n "$_MERGED_CRON" ]]; then
 else
   _MERGED_CRON="${CRON_LINE}"
 fi
+[[ -n "$FOLLOWUP_CRON_LINE" ]] && _MERGED_CRON="${_MERGED_CRON}"$'\n'"${FOLLOWUP_CRON_LINE}"
 
 install_cron() {
   printf '%s\n' "$_MERGED_CRON" | crontab -
   success "Cron wired: $OPT_SCHEDULE (tz: ${OPT_REPORT_TZ:-host}) — tag $CRON_TAG"
+  [[ -n "$FOLLOWUP_CRON_LINE" ]] && success "Follow-up cron wired: $OPT_FOLLOWUP_SCHEDULE — tag $FOLLOWUP_CRON_TAG"
 }
 
 # ── Preflight: validate.py taxonomy drift guard ────────────────────────────

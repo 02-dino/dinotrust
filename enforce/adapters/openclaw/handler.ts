@@ -129,6 +129,99 @@ function audit(c: Cfg, obj: Record<string, unknown>) {
   } catch { /* silent by contract */ }
 }
 
+// ── Approval follow-up (A′: "confirmed-miss only") ────────────────────────────
+// When the hook escalates a critical action -> OpenClaw shows an approval card.
+// If APPROVED, OpenClaw resumes the SAME command in the SAME session, which
+// re-enters before_tool_call. We use that re-fire as a deterministic "it ran"
+// signal: match it to the pending intent by fingerprint -> mark RESOLVED ->
+// the sweep never nudges. If the card EXPIRES/missed, no re-fire, no resolution
+// -> sweep sends one owner reminder. No timer-guessing, no false pings.
+//
+// State lives in a JSONL sibling of the audit log so the sweep script (cron)
+// can read it without importing the plugin. Each escalation appends a PENDING
+// line; resolution appends a RESOLVED line for the same intentId (append-only,
+// last-writer-wins on read — avoids read-modify-write races with the sweep).
+const RESOLVE_WINDOW_MS = 1800 * 1000; // DEFAULT_EXEC_APPROVAL_TIMEOUT_MS (30m)
+
+function pendingPath(c: Cfg): string {
+  const base = logPath(c);
+  const dir = path.dirname(base);
+  const stem = path.basename(base).replace(/\.log$/i, "");
+  return path.join(dir, `${stem}-pending-approvals.jsonl`);
+}
+
+// Stable fingerprint for {tool, command, session}. dinotrust never sees
+// OpenClaw's approvalId, so this is how the resume re-fire is matched to its
+// pending intent. Cheap non-crypto hash (djb2) — no node:crypto dependency.
+function intentFingerprint(toolName: string, command: string, sessionKey: string): string {
+  const s = `${toolName}\u0000${command}\u0000${sessionKey}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+function execCommandOf(event: any): string {
+  return String((event?.params ?? {}).command ?? "");
+}
+
+// Append a PENDING intent line at escalation time.
+function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName: string; sessionKey: string; sender: string; hit: string }) {
+  try {
+    const p = pendingPath(c);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const line = {
+      kind: "pending",
+      intentId: `${o.fp}:${Date.now()}`,
+      fp: o.fp,
+      tsIssued: new Date().toISOString(),
+      command: (o.command || "").slice(0, 400), // privacy/size cap
+      toolName: o.toolName,
+      sessionKey: o.sessionKey,
+      sender: o.sender,
+      hit: o.hit,
+      severity: "critical",
+    };
+    fs.appendFileSync(p, JSON.stringify(line) + "\n");
+  } catch { /* silent by contract */ }
+}
+
+// On a re-fire matching an OPEN pending intent within the window, append a
+// RESOLVED marker. Returns true if this call resolved a pending intent (i.e.
+// it is an approved-resume, not a fresh escalation) — caller then passes it
+// through WITHOUT re-escalating, which also breaks the escalate->approve->
+// resume->escalate loop.
+function resolvePendingIfRefire(c: Cfg, fp: string): boolean {
+  try {
+    const p = pendingPath(c);
+    if (!fs.existsSync(p)) return false;
+    const now = Date.now();
+    const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean);
+    // Build resolution state: pending intents minus already-resolved ones.
+    const resolved = new Set<string>();
+    const openByFp = new Map<string, { intentId: string; tsMs: number }>();
+    for (const ln of lines) {
+      let o: any; try { o = JSON.parse(ln); } catch { continue; }
+      if (o?.kind === "resolved" && o.intentId) resolved.add(o.intentId);
+    }
+    for (const ln of lines) {
+      let o: any; try { o = JSON.parse(ln); } catch { continue; }
+      if (o?.kind !== "pending" || o.fp !== fp || !o.intentId) continue;
+      if (resolved.has(o.intentId)) continue;
+      const tsMs = Date.parse(o.tsIssued);
+      if (isNaN(tsMs) || now - tsMs > RESOLVE_WINDOW_MS) continue;
+      // pick the most recent open pending for this fp
+      const prev = openByFp.get(fp);
+      if (!prev || tsMs > prev.tsMs) openByFp.set(fp, { intentId: o.intentId, tsMs });
+    }
+    const hit = openByFp.get(fp);
+    if (!hit) return false;
+    fs.appendFileSync(p, JSON.stringify({
+      kind: "resolved", intentId: hit.intentId, fp, resolvedAt: new Date().toISOString(),
+    }) + "\n");
+    return true;
+  } catch { return false; }
+}
+
 /** Minimal glob -> RegExp. ** = any incl. /, * = any except /. */
 function globToRe(glob: string): RegExp {
   let re = "";
@@ -321,8 +414,22 @@ export default definePluginEntry({
         if (isOwner) {
           const esc = escalationHit(event, c);
           if (esc) {
+            // A′ re-fire resolution: an APPROVED escalation makes OpenClaw resume
+            // the SAME command in the SAME session, re-entering this hook. If we
+            // find an OPEN pending intent with the same fingerprint (within the
+            // resolve window), THIS call is that approved-resume: mark it
+            // resolved (so the sweep won't nudge) and PASS IT THROUGH without
+            // re-escalating (else escalate->approve->resume->escalate loops).
+            const fp = intentFingerprint(toolName, execCommandOf(event), sessionKey);
+            if (c.enforce && resolvePendingIfRefire(c, fp)) {
+              audit(c, { evt: "owner-approval-resolved", rule: "R-escalation", toolName, sessionKey, sender: sender ?? "self", hit: esc, fp });
+              return; // approved-resume: allow, no second card, no nudge
+            }
             audit(c, { evt: "owner-approval", rule: "R-escalation", toolName, sessionKey, sender: sender ?? "self", hit: esc, enforced: c.enforce });
             if (c.enforce) {
+              // Log the PENDING intent BEFORE returning the card. If approved,
+              // the resume re-fire resolves it; if it expires, the sweep nudges.
+              recordPendingIntent(c, { fp, command: execCommandOf(event), toolName, sessionKey, sender: sender ?? "self", hit: esc });
               return {
                 requireApproval: {
                   title: `dinotrust: confirm critical action`,
