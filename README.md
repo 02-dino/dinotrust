@@ -6,7 +6,16 @@
 
 ## Why dinotrust is different
 
-Knowing a Telegram user ID is easy. Knowing whether that ID is allowed to read your files, run commands, or see your keys — and enforcing it every turn — is what dinotrust does.
+Knowing *who* sent a message is easy. Deciding what they're allowed to do — and, every turn, stopping injected instructions, secret leaks, and disallowed tool calls at the tool boundary — is what dinotrust does.
+
+It's four things, not one. Identity is only the first:
+
+- **Authorization** — bind ownership to the platform's verified identity signal (Telegram/Discord user ID, GitHub, UUID), re-checked every turn; never to chat claims.
+- **Injection defense** — reject override claims, encoded/hypothetical bypasses, and multi-turn escalation (matters even on a single-user CLI where there is no "other user").
+- **Secret protection** — block reads of credential paths *and* self-gate outbound replies so keys/tokens don't leak into the model's own output.
+- **Code-level tool veto** — a `pre_tool_call` hook that terminally allows/denies/asks at the tool boundary, holding even if the model is jailbroken.
+
+The rest of this section is about *how* those hold with zero infrastructure — no proxy, no middleware.
 
 Most agent-security tools sit *in front of* the agent: a proxy, a middleware firewall, an API gateway that intercepts every message. That means another service to deploy, another endpoint to secure, another thing that breaks.
 
