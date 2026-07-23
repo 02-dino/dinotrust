@@ -688,21 +688,28 @@ if d.pop("workspaceBootstrap", None) is not None:
 if d.get("contextInjection") != "always":
     d["contextInjection"] = "always"
     msgs.append("contextInjection -> always (ruleset injected every turn, not skipped on continuation)")
-# thinkingDefault -> medium: dinotrust is a security ruleset injected into root
-# files. Without a minimum thinking floor, the agent may acknowledge the rules
-# but not reliably internalize and act on them — especially the injection-defense
-# patterns which require genuine reasoning to apply correctly. medium is the
-# safe FLOOR: raise to medium only if the current level is unset or BELOW medium
-# (off/none/minimal/low, or adaptive which itself falls back to medium on models
-# that don't support it). Leave anything AT or ABOVE medium (high/xhigh/max)
-# untouched — never lower a user's explicit stronger choice, only enforce the floor.
-_TD_RANK = {"off": 0, "none": 0, "minimal": 1, "low": 2, "adaptive": 3,
-            "medium": 3, "high": 4, "xhigh": 5, "max": 5}
+# thinkingDefault -> medium FLOOR: dinotrust is a security ruleset injected into root
+# files. Without a minimum thinking floor, the agent may acknowledge the injection-
+# defense rules but not reliably reason about + apply them. medium is the safe floor.
+# TRUE FLOOR, raise-only, and CRITICALLY: only acts on EXPLICIT below-floor values.
+# We only lift a thinkingDefault explicitly set to off/minimal/low.
+# medium/high/xhigh -> already >= floor, untouched. adaptive/max -> >= floor, untouched.
+#
+# UNSET IS DELIBERATELY LEFT ALONE. 'unset' does NOT mean 'low' — it means the
+# provider/model default resolves (OpenClaw thinking.md): Claude 4.6 defaults to
+# 'adaptive' (>= our floor), while Opus 4.8/4.7 default 'off'. We cannot know the
+# user's model here, so writing 'medium' on unset would CLOBBER a 4.6 user's adaptive
+# default DOWN to a fixed medium (the exact latency regression we are avoiding). Better
+# to respect the model's own default than to guess wrong. On an unset off-default model
+# the code-veto (block-tier) still enforces regardless of thinking level; only the soft
+# instruction/ask tier is un-boosted. Kept in lockstep with dinomem's identical guard.
+_THINK_ORDER = {"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}
 _cur_td = d.get("thinkingDefault")
-_cur_rank = _TD_RANK.get(_cur_td, -1)  # unset / unknown -> -1 (below floor)
-if _cur_rank < _TD_RANK["medium"]:
+# Act ONLY on an explicit, known level ranked below medium. Unset (None) -> skip.
+# adaptive/max are NOT in _THINK_ORDER by design -> never match, never lowered.
+if _cur_td is not None and _cur_td in _THINK_ORDER and _THINK_ORDER[_cur_td] < _THINK_ORDER["medium"]:
     d["thinkingDefault"] = "medium"
-    msgs.append("thinkingDefault -> medium (security floor: raised from unset/below; ensures rules are internalized, not just acknowledged)")
+    msgs.append(f"thinkingDefault -> medium floor (was explicit {_cur_td}; below-floor lifted; unset/adaptive/high/max untouched)")
 if msgs:
     json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
     json.load(open(path))  # validate

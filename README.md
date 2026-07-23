@@ -509,9 +509,9 @@ Your instruction file may be getting truncated. Agents inject the config file in
 The installer warns you at install time if the projected size is over the cap. To confirm at runtime, ask the agent to quote a rule from near the end of the `dinotrust begin..end` block — if it can't, the block is being truncated. Fixes: trim the instruction file, or (on OpenClaw) raise `agents.defaults.bootstrapMaxChars`. Because dinotrust is a security ruleset, a truncated block is a silent enforcement gap, not just a cosmetic issue.
 
 **Responses feel slower after installing**
-Most likely cause: on OpenClaw, the installer **adds `agents.defaults.thinkingDefault: medium`** as a security *floor*. It raises the level to `medium` **only if your current setting is unset or below medium** (`off`/`none`/`minimal`/`low`, or `adaptive` which itself falls back to `medium` on models that don't support it). If you already run `medium` or higher (`high`/`xhigh`/`max`), it is **left untouched** — dinotrust never lowers a stronger choice.
+Most likely cause: on OpenClaw, the installer **adds `agents.defaults.thinkingDefault: medium`** as a security *floor*. It raises the level to `medium` **only if you had explicitly set it below medium** (`off`/`minimal`/`low`). If you already run `medium` or higher, or `adaptive`/`max`, it is **left untouched** — dinotrust never lowers a stronger choice. **Unset is also left untouched** on purpose: an unset value means your model/provider default resolves (e.g. Claude 4.6 → `adaptive`), and forcing `medium` there would clobber a good default down.
 
-Why: this makes the agent *reason* every turn so it reliably applies the injection-defense rules instead of just acknowledging them — a deliberate tradeoff. If your previous setting was below medium, you'll notice the difference on simple turns.
+Why: this makes the agent *reason* every turn so it reliably applies the injection-defense rules instead of just acknowledging them — a deliberate tradeoff. If you had explicitly set thinking below medium, you'll notice the difference on simple turns.
 
 Check before assuming it's dinotrust:
 - **What was your `thinkingDefault` before install?** If it was already `medium`/`high`, dinotrust didn't change it — the slowdown is something else (model choice, longer prompt, or a slow provider).
