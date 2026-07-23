@@ -692,10 +692,17 @@ if d.get("contextInjection") != "always":
 # files. Without a minimum thinking floor, the agent may acknowledge the rules
 # but not reliably internalize and act on them — especially the injection-defense
 # patterns which require genuine reasoning to apply correctly. medium is the
-# safe floor. Skip if user already has a non-default value set.
-if d.get("thinkingDefault") in (None, "adaptive"):
+# safe FLOOR: raise to medium only if the current level is unset or BELOW medium
+# (off/none/minimal/low, or adaptive which itself falls back to medium on models
+# that don't support it). Leave anything AT or ABOVE medium (high/xhigh/max)
+# untouched — never lower a user's explicit stronger choice, only enforce the floor.
+_TD_RANK = {"off": 0, "none": 0, "minimal": 1, "low": 2, "adaptive": 3,
+            "medium": 3, "high": 4, "xhigh": 5, "max": 5}
+_cur_td = d.get("thinkingDefault")
+_cur_rank = _TD_RANK.get(_cur_td, -1)  # unset / unknown -> -1 (below floor)
+if _cur_rank < _TD_RANK["medium"]:
     d["thinkingDefault"] = "medium"
-    msgs.append("thinkingDefault -> medium (ensures security rules are internalized, not just acknowledged)")
+    msgs.append("thinkingDefault -> medium (security floor: raised from unset/below; ensures rules are internalized, not just acknowledged)")
 if msgs:
     json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
     json.load(open(path))  # validate
