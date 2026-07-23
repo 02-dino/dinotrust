@@ -508,6 +508,15 @@ Your instruction file may be getting truncated. Agents inject the config file in
 
 The installer warns you at install time if the projected size is over the cap. To confirm at runtime, ask the agent to quote a rule from near the end of the `dinotrust begin..end` block — if it can't, the block is being truncated. Fixes: trim the instruction file, or (on OpenClaw) raise `agents.defaults.bootstrapMaxChars`. Because dinotrust is a security ruleset, a truncated block is a silent enforcement gap, not just a cosmetic issue.
 
+**Responses feel slower after installing**
+Most likely cause: the OpenClaw installer sets `agents.defaults.thinkingDefault: medium` (only if you hadn't set it yourself). This makes the agent *reason* every turn so it reliably applies the injection-defense rules instead of just acknowledging them — a deliberate security tradeoff. If your previous setting was lower or unset, you'll notice the difference on simple turns.
+
+Check before assuming it's dinotrust:
+- **What was your `thinkingDefault` before install?** If it was already `medium`/`high`, dinotrust didn't change it — the slowdown is something else (model choice, longer prompt, or a slow provider).
+- **Which model are you on?** A slow or small model amplifies any per-turn reasoning; that's the model, not dinotrust.
+
+If you want it faster and accept the tradeoff, lower it yourself: set `agents.defaults.thinkingDefault` to `low` (or `adaptive`, which OpenClaw falls back to `medium` on models that don't support it). Note: the **code-veto enforcement (the block-tier) does not depend on thinking level at all** — lowering it only relaxes the compliance-dependent instruction/ask tiers, never the pre-tool-call block. The `medium` default is chosen because weaker models need the reasoning floor to enforce reliably.
+
 ---
 
 ## FAQ
