@@ -229,6 +229,32 @@ function stripQuoted(cmd: string): string {
 }
 
 /**
+ * `rm -rf` is critical BY DEFAULT, but wiping a throwaway scratch dir under /tmp
+ * is a routine, low-stakes build step (test fixtures, verify sandboxes). Gating
+ * every `rm -rf /tmp/<scratch>` behind an approval card creates a recurring
+ * away-from-screen stall (each distinct /tmp path = a new approval fingerprint,
+ * so a prior allow-always never matches the next one). Carve-out: if an `rm -rf`
+ * command touches ONLY paths under /tmp, downgrade to warn (skip approval). If
+ * ANY path arg is outside /tmp -- or no explicit path is present (ambiguous) --
+ * it stays critical. Conservative: requires >=1 explicit /tmp/<x> path AND zero
+ * non-/tmp filesystem paths. Bare `/tmp` (no child) and `/` are NOT scratch.
+ */
+function rmRfScratchOnly(cmd: string): boolean {
+  const scan = stripQuoted(cmd);
+  if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
+  const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
+  const paths = toks.filter(t => t.includes("/") && !t.startsWith("-"));
+  if (paths.length === 0) return false; // no explicit path -> ambiguous -> stay critical
+  let sawTmp = false;
+  for (const p of paths) {
+    const norm = p.replace(/\\/g, "/");
+    if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
+    return false; // any non-/tmp path (incl. bare "/tmp", "/", real dirs) -> NOT scratch-only
+  }
+  return sawTmp;
+}
+
+/**
  * ESCALATION / irreversible hit -> the only owner-facing APPROVAL trigger.
  * Covers: (a) critical/irreversible exec commands (rm -rf, force-push, DROP,
  * mkfs, dd, --hard, ...), and (b) writes (tool or exec-redirect) to an
@@ -244,8 +270,15 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
   if (call.toolName === "exec" && call.command) {
     // Scan with quoted literals removed so quoted-arg text can't false-positive.
     const scan = stripQuoted(call.command);
+    const scratchRm = rmRfScratchOnly(call.command);
     for (const pat of c.criticalExecPatterns) {
-      try { if (new RegExp(pat, "i").test(scan)) return `exec ~ /${pat}/`; } catch { /* skip bad regex */ }
+      try {
+        if (new RegExp(pat, "i").test(scan)) {
+          // /tmp-only `rm -rf` -> warn, not approve (see rmRfScratchOnly).
+          if (scratchRm && /\brm\b/.test(pat)) continue;
+          return `exec ~ /${pat}/`;
+        }
+      } catch { /* skip bad regex */ }
     }
     // WRITES to an escalation path -> approval. Reads (grep/cat) pass. See writeTargets.
     for (const wt of writeTargets(call.command)) {

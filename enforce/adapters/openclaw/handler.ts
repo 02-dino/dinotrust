@@ -305,6 +305,27 @@ function stripQuoted(cmd: string): string {
   return out;
 }
 
+// `rm -rf` is critical BY DEFAULT, but wiping a throwaway scratch dir under /tmp
+// is a routine build step. Gating every `rm -rf /tmp/<scratch>` behind approval
+// creates a recurring away-from-screen stall (each /tmp path = new fingerprint =
+// fresh prompt; allow-always never matches). Carve-out: if an `rm -rf` command
+// touches ONLY /tmp/<child> paths, downgrade to warn. Any non-/tmp path (or no
+// explicit path -> ambiguous) stays critical. Mirror of core/policy.ts.
+function rmRfScratchOnly(cmd: string): boolean {
+  const scan = stripQuoted(cmd);
+  if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
+  const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
+  const paths = toks.filter(t => t.includes("/") && !t.startsWith("-"));
+  if (paths.length === 0) return false;
+  let sawTmp = false;
+  for (const p of paths) {
+    const norm = p.replace(/\\/g, "/");
+    if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
+    return false;
+  }
+  return sawTmp;
+}
+
 // ESCALATION / irreversible detector -> the ONLY owner-facing APPROVAL trigger.
 // (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
 // target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
@@ -320,8 +341,15 @@ function escalationHit(event: any, c: Cfg): string | null {
   if (toolName === "exec") {
     const cmd = String((event?.params ?? {}).command ?? "");
     const scan = stripQuoted(cmd);
+    const scratchRm = rmRfScratchOnly(cmd);
     for (const pat of c.criticalExecPatterns) {
-      try { if (new RegExp(pat, "i").test(scan)) return `exec ~ /${pat}/`; } catch { /* bad regex ignored */ }
+      try {
+        if (new RegExp(pat, "i").test(scan)) {
+          // /tmp-only `rm -rf` -> warn, not approve (see rmRfScratchOnly).
+          if (scratchRm && /\brm\b/.test(pat)) continue;
+          return `exec ~ /${pat}/`;
+        }
+      } catch { /* bad regex ignored */ }
     }
     // exec WRITING to an escalation path (redirect / tee). Reads (grep/cat) pass.
     for (const wt of writeTargets(cmd)) {

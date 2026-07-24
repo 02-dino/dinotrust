@@ -71,6 +71,20 @@ function stripQuoted(cmd) {
   }
   return out;
 }
+function rmRfScratchOnly(cmd) {
+  const scan = stripQuoted(cmd);
+  if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
+  const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
+  const paths = toks.filter(t => t.includes("/") && !t.startsWith("-"));
+  if (paths.length === 0) return false;
+  let sawTmp = false;
+  for (const p of paths) {
+    const norm = p.replace(/\\/g, "/");
+    if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
+    return false;
+  }
+  return sawTmp;
+}
 function escalationHit(event) {
   const toolName = event.toolName;
   if (["write", "edit", "apply_patch"].includes(toolName)) {
@@ -79,7 +93,8 @@ function escalationHit(event) {
   if (toolName === "exec") {
     const cmd = String((event.params ?? {}).command ?? "");
     const scan = stripQuoted(cmd);
-    for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(scan)) return "exec:" + pat; } catch {} }
+    const scratchRm = rmRfScratchOnly(cmd);
+    for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(scan)) { if (scratchRm && /\brm\b/.test(pat)) continue; return "exec:" + pat; } } catch {} }
     for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, ESC_PATHS); if (h) return "exec-write:" + wt; }
   }
   return null;
@@ -154,7 +169,7 @@ const SELF = { sessionKey: "agent:analyst" }; // no senderId => agent-operated-b
 const STRANGER = { sessionKey: "agent:analyst:telegram:direct:999", senderId: "999" };
 
 // OWNER — never hard-blocked; critical actions require approval (are-you-sure)
-t("owner rm -rf -> approval", { toolName: "exec", params: { command: "rm -rf /tmp/x" } }, OWNER, false, "owner-approval");
+t("owner rm -rf (real path) -> approval", { toolName: "exec", params: { command: "rm -rf /root/data" } }, OWNER, false, "owner-approval");
 t("owner git push --force -> approval", { toolName: "exec", params: { command: "git push origin main --force" } }, OWNER, false, "owner-approval");
 t("owner write openclaw.json -> approval", { toolName: "write", params: { path: "/root/.openclaw/openclaw.json" } }, OWNER, false, "owner-approval");
 t("owner edit AGENTS.md -> warn (reversible doc)", { toolName: "edit", params: { path: "/x/AGENTS.md" } }, OWNER, false, "owner-warn");
@@ -172,6 +187,17 @@ t("owner echo quoted DROP TABLE -> pass", { toolName: "exec", params: { command:
 // operator OUTSIDE quotes still fires even with a quoted arg:
 t("owner destructive op with quoted path -> approval", { toolName: "exec", params: { command: `rm -rf "/tmp/some path"` } }, OWNER, false, "owner-approval");
 t("owner edit .env -> approval (write to critical path)", { toolName: "edit", params: { path: "/x/.env" } }, OWNER, false, "owner-approval");
+
+// ── rm -rf /tmp scratch carve-out (owner) ── /tmp-only -> warn/pass, else approval
+t("owner rm -rf /tmp/scratch -> pass (scratch carve-out)", { toolName: "exec", params: { command: "rm -rf /tmp/wftest" } }, OWNER, false, "owner-pass");
+t("owner rm -rf /tmp/x && mkdir -> pass (scratch carve-out)", { toolName: "exec", params: { command: "rm -rf /tmp/neuronfull && mkdir -p /tmp/neuronfull/memory" } }, OWNER, false, "owner-pass");
+t("owner rm -rf /tmp/a /tmp/b -> pass (all scratch)", { toolName: "exec", params: { command: "rm -rf /tmp/a /tmp/b" } }, OWNER, false, "owner-pass");
+t("owner rm -rf /root/x -> approval (real path stays critical)", { toolName: "exec", params: { command: "rm -rf /root/x" } }, OWNER, false, "owner-approval");
+t("owner rm -rf / -> approval (root stays critical)", { toolName: "exec", params: { command: "rm -rf /" } }, OWNER, false, "owner-approval");
+t("owner rm -rf /tmp -> approval (bare /tmp, no child, stays critical)", { toolName: "exec", params: { command: "rm -rf /tmp" } }, OWNER, false, "owner-approval");
+t("owner rm -rf /tmp/x /root/y -> approval (mixed = critical)", { toolName: "exec", params: { command: "rm -rf /tmp/x /root/y" } }, OWNER, false, "owner-approval");
+t("owner rm -rf $VAR -> approval (no explicit path, ambiguous)", { toolName: "exec", params: { command: "rm -rf $BUILD_DIR" } }, OWNER, false, "owner-approval");
+
 
 // SELF (agent-operated-by-owner, no senderId) — treated as owner, never blocked
 t("self exec", { toolName: "exec", params: { command: "python3 procedures/backup.py" } }, SELF, false, "owner-pass");

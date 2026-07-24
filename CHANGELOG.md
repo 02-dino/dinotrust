@@ -4,6 +4,25 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.22.0] — 2026-07-24
+
+### Changed
+- **`rm -rf` targeting ONLY `/tmp` scratch paths is now warn-not-approve.**
+  Previously every `rm -rf` matched `criticalExecPatterns` → owner approval card,
+  regardless of target. Resetting a throwaway build sandbox (`rm -rf /tmp/wftest`,
+  `rm -rf /tmp/x && mkdir …`) is a routine, low-stakes step, but each distinct
+  `/tmp` path produced a NEW approval fingerprint, so a prior `allow-always` never
+  matched the next one — a recurring, away-from-screen stall.
+  New `rmRfScratchOnly()` carve-out: an `rm -rf` command whose filesystem path
+  args are ALL under `/tmp/<child>` downgrades to warn (no approval). Guard is
+  otherwise untouched — conservative by construction:
+  - Requires ≥1 explicit `/tmp/<child>` path AND zero non-`/tmp` paths.
+  - Bare `/tmp` (no child), `/`, real dirs, mixed `/tmp`+real, and `rm -rf $VAR`
+    (no literal path → ambiguous) ALL stay critical → approval.
+  - Applies to the owner tier only; trusted/non-owner tiers unchanged.
+  Patched in `core/policy.ts` (canonical) + `adapters/openclaw/handler.ts`
+  (mirror). Regression tests added to both selftests.
+
 ## [1.21.1] — 2026-07-11
 
 ### Fixed
