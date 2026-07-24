@@ -134,6 +134,19 @@ case "$OPT_PLATFORM" in
       cp "$ENFORCE_DIR/adapters/openclaw/selftest.mjs" "$EXT_DIR/selftest.mjs" 2>/dev/null || true
       success "Plugin files installed."
     fi
+    # Companion bootstrap hook: auto-surfaces the DEGRADED (fail-open) state to the
+    # owner in plain language + auto-clears on recovery, so no one ever has to know
+    # a marker file exists. Directory auto-discovery loads it; no config entry.
+    HOOK_SRC="$ENFORCE_DIR/adapters/openclaw/hooks/dinotrust-degraded-alert"
+    HOOK_DST="${HOME}/.openclaw/hooks/dinotrust-degraded-alert"
+    if $OPT_DRY_RUN; then
+      info "[dry-run] would install degraded-alert hook -> $HOOK_DST"
+    elif [[ -d "$HOOK_SRC" ]]; then
+      mkdir -p "$HOOK_DST"
+      cp "$HOOK_SRC/handler.ts" "$HOOK_DST/handler.ts"
+      cp "$HOOK_SRC/HOOK.md" "$HOOK_DST/HOOK.md" 2>/dev/null || true
+      success "Degraded-alert bootstrap hook installed -> $HOOK_DST"
+    fi
     # Auto-merge the plugin entry into openclaw.json (idempotent, backed up).
     # Merge semantics: create plugins.entries.dinotrust-enforce if absent; if it
     # already exists (re-run / upgrade), update module + refresh config keys we

@@ -70,6 +70,39 @@ Change policy in one place → mirror in the others → re-run all three. See
 `../observability/core/PARITY.md` for the same discipline applied to the audit
 layer.
 
+## Fail-open visibility (never silently unprotected)
+
+The hook **fails open** on any internal error — an enforcement bug must never
+brick your tool loop. But failing open *silently* is dangerous: protection could
+quietly stop working while you still believe you're covered. So on any hook error
+the enforcer:
+
+- writes a durable `dinotrust-enforce-DEGRADED.json` marker next to the audit log
+  (throttled to 1/min, accumulates `count` + `firstSeen`/`lastSeen`),
+- emits a loud `evt:DEGRADED` critical audit line every time,
+- re-emits `evt:DEGRADED-carried` on restart if a prior marker survived.
+
+Still fails open (tools never brick) — but now **visibly**.
+
+### Auto-surfacing (OpenClaw): the owner never touches a file
+
+The OpenClaw adapter ships a companion bootstrap hook,
+`dinotrust-degraded-alert` (installed to `~/.openclaw/hooks/`), so a
+non-technical owner never has to know the marker exists:
+
+- **Enforcement breaks** → on the owner's next message, the agent is instructed to
+  warn them **in plain language** (no file paths, no error codes, no “delete this
+  file”), then answer normally.
+- **Recovers** → the marker **auto-clears** and the hook stays silent. A transient
+  blip that already healed never bothers the owner.
+- **Owner-only** → surfaces only to a matched owner id; other senders never see it.
+- **Conservative** → if recovery can't be *proven* (no healthy verdict after the
+  fault), it warns anyway — better a stale warning than a hidden bypass.
+
+Env overrides: `DINOTRUST_OWNER_IDS`, `DINOTRUST_DEGRADED_MARKER`,
+`DINOTRUST_LOG_FILE`. Fully fail-safe: any hook error is swallowed and never
+breaks bootstrap; zero-op when there's no marker.
+
 ## Install
 
 ```bash
