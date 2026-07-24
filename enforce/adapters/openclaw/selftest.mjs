@@ -9,6 +9,7 @@ const ESC_PATHS = ["**/openclaw.json", "**/.env"];          // owner write -> ap
 const DOC_PATHS = ["**/security_rules.md", "**/AGENTS.md"]; // owner write -> warn (reversible)
 const DEFAULT_TRUSTED_TOOLS = ["read", "write", "edit", "apply_patch", "exec", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
 let TRUSTED = []; // mutated per-test-block below (mirrors config.trustedIds)
+const OWNER_SELF_APPROVAL = "warn"; // noob-default: unattended agent-self criticals warn-log, don't hang
 
 function globToRe(glob) {
   let re = "";
@@ -144,7 +145,13 @@ function decide(event, ctx) {
   const protectedHit = anyProtected(event, PROTECTED);
   if (isOwner) {
     const esc = escalationHit(event);
-    if (esc) return { block: false, approval: true, why: "owner-approval" };
+    if (esc) {
+      // NOOB-DEFAULT ownerSelfApproval="warn": unattended agent-self (sender==null)
+      // warn-logs its own criticals instead of gating (no human to answer a card).
+      // Interactive owner (real sender) still gets the approval card.
+      if (OWNER_SELF_APPROVAL === "warn" && sender == null) return { block: false, why: "owner-warn" };
+      return { block: false, approval: true, why: "owner-approval" };
+    }
     const doc = criticalDocHit(event);
     if (doc) return { block: false, why: "owner-warn" };
     return { block: false, why: protectedHit ? "owner-warn" : "owner-pass" };
@@ -233,9 +240,12 @@ t("owner rm -rf /tmp/x /root/y -> approval (mixed = critical)", { toolName: "exe
 t("owner rm -rf $VAR -> approval (no explicit path, ambiguous)", { toolName: "exec", params: { command: "rm -rf $BUILD_DIR" } }, OWNER, false, "owner-approval");
 
 
-// SELF (agent-operated-by-owner, no senderId) — treated as owner, never blocked
+// SELF (agent-operated-by-owner, no senderId) — treated as owner, never blocked.
+// NOOB-DEFAULT ownerSelfApproval="warn": the UNATTENDED agent's own critical
+// actions WARN-LOG (no human to answer a card -> no hang) instead of gating.
 t("self exec", { toolName: "exec", params: { command: "python3 procedures/backup.py" } }, SELF, false, "owner-pass");
-t("self write config -> approval", { toolName: "write", params: { path: "/root/.openclaw/openclaw.json" } }, SELF, false, "owner-approval");
+t("self rm -rf real path -> warn (ownerSelfApproval=warn: unattended self, no hang)", { toolName: "exec", params: { command: "rm -rf /root/data" } }, SELF, false, "owner-warn");
+t("self write config -> warn (ownerSelfApproval=warn: unattended self, no hang)", { toolName: "write", params: { path: "/root/.openclaw/openclaw.json" } }, SELF, false, "owner-warn");
 t("self cat .env -> warn+pass (read)", { toolName: "exec", params: { command: "cat .env" } }, SELF, false, "owner-warn");
 
 // NON-OWNER — strict

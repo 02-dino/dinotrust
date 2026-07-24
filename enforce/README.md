@@ -70,6 +70,37 @@ Change policy in one place → mirror in the others → re-run all three. See
 `../observability/core/PARITY.md` for the same discipline applied to the audit
 layer.
 
+## Headless / unattended agents: no approval hangs (noob default)
+
+The **#1 "my agent got slow" cause**: when the agent runs a critical action on
+its OWN (autonomous loop, no human watching), an approval card has no one to
+answer it — so the turn suspends until the runtime's **30-minute** timeout, then
+fails open anyway. Pure latency, zero added safety.
+
+So the default is **`ownerSelfApproval: "warn"`**: the agent's own *unattended*
+critical actions (`rm -rf`, force-push, config writes, etc.) **warn-log instead
+of gating** — no hang. An **interactive owner** (a real chat message, real sender
+id) still gets the approval card. Set `"gate"` to restore always-suspend.
+
+Two more guards ship on by default:
+
+- **`approvalTimeoutMs` (default 90 000 = 90s)** — caps the approval card so even
+  when it *does* gate, a headless/unrouted install recovers fast instead of
+  freezing for 30 minutes.
+- **`pendingLedgerMaxLines` (default 500)** — prunes the append-only pending-
+  approvals ledger so the re-fire lookup can never grow into a per-critical-
+  action stall.
+
+```jsonc
+// openclaw.json -> plugins.entries[dinotrust-enforce].config (all optional)
+"ownerSelfApproval": "warn",   // "warn" (default) | "gate"
+"approvalTimeoutMs": 90000,     // cap the approval-card timeout (ms)
+"pendingLedgerMaxLines": 500    // cap the pending-approvals ledger
+```
+
+> Interactive-owner approval and non-owner blocking are **unchanged** — only the
+> *unattended agent's own* critical actions shift from gate → warn.
+
 ## Fail-open visibility (never silently unprotected)
 
 The hook **fails open** on any internal error — an enforcement bug must never

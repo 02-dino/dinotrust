@@ -60,6 +60,19 @@ type Cfg = {
   trustedIds: TrustedEntry[];
   logFile: string;
   enforce: boolean;
+  // NOOB-DEFAULT: when the AGENT ITSELF runs a critical action UNATTENDED
+  // (sender==null -> no human to answer an approval card), gating just suspends
+  // the turn until timeout and fails open anyway -> pure latency, zero added
+  // safety, and "my agent got slow". "warn" => the agent's OWN unattended
+  // criticals warn-log instead of hanging. INTERACTIVE owner still gets the card.
+  // "gate" restores the old always-suspend behavior.
+  ownerSelfApproval: "warn" | "gate";
+  // Cap the approval-card timeout so even when it DOES gate, a headless/unrouted
+  // install recovers fast (fails open) instead of freezing 30min (runtime default).
+  approvalTimeoutMs: number;
+  // Cap the append-only pending-approvals ledger so resolvePendingIfRefire's
+  // full-file O(n) read never becomes a per-critical-action stall.
+  pendingLedgerMaxLines: number;
 };
 
 // Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools.
@@ -102,6 +115,9 @@ const DEFAULTS: Cfg = {
   trustedIds: [],
   logFile: "",
   enforce: true,
+  ownerSelfApproval: "warn",   // noob-safe: agent's own UNATTENDED criticals warn-log, don't hang the turn
+  approvalTimeoutMs: 90_000,    // 90s cap (runtime default is 30min) so a headless gate can't freeze the agent
+  pendingLedgerMaxLines: 500,   // prune ledger to last 500 lines -> re-fire lookups stay O(small)
 };
 
 function cfg(raw: any): Cfg {
@@ -109,6 +125,9 @@ function cfg(raw: any): Cfg {
   for (const k of ["ownerIds", "criticalExecPatterns", "escalationPathGlobs", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds"] as const) {
     if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
   }
+  if (c.ownerSelfApproval !== "warn" && c.ownerSelfApproval !== "gate") c.ownerSelfApproval = DEFAULTS.ownerSelfApproval;
+  if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
+  if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
   return c;
 }
 
@@ -220,6 +239,19 @@ function execCommandOf(event: any): string {
 }
 
 // Append a PENDING intent line at escalation time.
+// Prune the append-only pending-approvals ledger to its last N lines so
+// resolvePendingIfRefire's full-file read never degrades into a per-critical-
+// action stall. Best-effort; a prune failure never blocks the append.
+function prunePendingLedger(c: Cfg, p: string) {
+  try {
+    const max = c.pendingLedgerMaxLines;
+    if (!(max > 0) || !fs.existsSync(p)) return;
+    const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean);
+    if (lines.length <= max) return;
+    fs.writeFileSync(p, lines.slice(lines.length - max).join("\n") + "\n");
+  } catch { /* silent by contract */ }
+}
+
 function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName: string; sessionKey: string; sender: string; hit: string }) {
   try {
     const p = pendingPath(c);
@@ -237,6 +269,7 @@ function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName:
       severity: "critical",
     };
     fs.appendFileSync(p, JSON.stringify(line) + "\n");
+    prunePendingLedger(c, p);
   } catch { /* silent by contract */ }
 }
 
@@ -548,20 +581,34 @@ export default definePluginEntry({
               audit(c, { evt: "owner-approval-resolved", rule: "R-escalation", toolName, sessionKey, sender: sender ?? "self", hit: esc, fp });
               return; // approved-resume: allow, no second card, no nudge
             }
-            audit(c, { evt: "owner-approval", rule: "R-escalation", toolName, sessionKey, sender: sender ?? "self", hit: esc, enforced: c.enforce });
-            if (c.enforce) {
-              // Log the PENDING intent BEFORE returning the card. If approved,
-              // the resume re-fire resolves it; if it expires, the sweep nudges.
-              recordPendingIntent(c, { fp, command: execCommandOf(event), toolName, sessionKey, sender: sender ?? "self", hit: esc });
-              return {
-                requireApproval: {
-                  title: `dinotrust: confirm critical action`,
-                  description: `This is irreversible/critical (${esc}). Are you sure? Reply /approve to proceed.`,
-                  severity: "critical",
-                  // Owner is trusted: unmet approval (no route / timeout) FAILS OPEN.
-                  timeoutBehavior: "allow",
-                },
-              };
+            // NOOB-DEFAULT (ownerSelfApproval="warn"): when the AGENT ITSELF runs
+            // the critical action UNATTENDED (sender==null -> no human to answer
+            // an approval card), gating only suspends the turn until timeout and
+            // fails open anyway -> pure latency, no added safety, "my agent got
+            // slow". Warn-log instead. An INTERACTIVE owner (real sender id) still
+            // gets the card. ownerSelfApproval="gate" restores always-suspend.
+            const unattendedAgentSelf = sender == null;
+            if (c.ownerSelfApproval === "warn" && unattendedAgentSelf) {
+              audit(c, { evt: "owner-warn", rule: "R-escalation-self", toolName, sessionKey, sender: "self", hit: esc, note: "ownerSelfApproval=warn: unattended agent critical action warn-logged, not gated" });
+            } else {
+              audit(c, { evt: "owner-approval", rule: "R-escalation", toolName, sessionKey, sender: sender ?? "self", hit: esc, enforced: c.enforce });
+              if (c.enforce) {
+                // Log the PENDING intent BEFORE returning the card. If approved,
+                // the resume re-fire resolves it; if it expires, the sweep nudges.
+                recordPendingIntent(c, { fp, command: execCommandOf(event), toolName, sessionKey, sender: sender ?? "self", hit: esc });
+                return {
+                  requireApproval: {
+                    title: `dinotrust: confirm critical action`,
+                    description: `This is irreversible/critical (${humanizeReason(esc)}). Are you sure? Reply /approve to proceed.`,
+                    severity: "critical",
+                    // Cap timeout (approvalTimeoutMs) so a headless/unrouted gate
+                    // recovers fast instead of freezing for the 30min default.
+                    timeoutMs: c.approvalTimeoutMs,
+                    // Owner is trusted: unmet approval (no route / timeout) FAILS OPEN.
+                    timeoutBehavior: "allow",
+                  },
+                };
+              }
             }
           }
           const doc = criticalDocHit(event, c);

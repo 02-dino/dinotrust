@@ -66,6 +66,16 @@ export type PolicyConfig = {
   trustedIds: TrustedEntry[];
   /** Master switch. false => dry-run (decide still returns verdicts, adapter logs but does not enforce). */
   enforce: boolean;
+  /**
+   * NOOB-DEFAULT: when the AGENT ITSELF runs a critical action UNATTENDED
+   * (senderId == null -> no human on the other end of an approval card), gating
+   * only suspends the turn until timeout and fails open anyway -> pure latency,
+   * zero added safety. "warn" => the agent's OWN unattended critical actions
+   * warn-log instead of gating (the #1 "my agent got slow" cause on headless /
+   * single-user installs). An INTERACTIVE owner (real senderId) STILL gets the
+   * approval card. "gate" restores the old always-suspend behavior.
+   */
+  ownerSelfApproval: "warn" | "gate";
 };
 
 export type TrustedEntry = {
@@ -116,6 +126,7 @@ export const DEFAULT_POLICY: PolicyConfig = {
   nonOwnerAllowedScripts: [], // empty by default; each install fills its own (e.g. analyst tools/)
   trustedIds: [], // empty by default; zero behavior change unless an install explicitly grants trust
   enforce: true,
+  ownerSelfApproval: "warn", // noob-safe: agent's own UNATTENDED criticals warn-log, don't hang the turn
 };
 
 /** Normalized tool call, produced by each adapter from its native event shape. */
@@ -387,7 +398,18 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
   // touches -- is allowed, with warn-only telemetry so the owner still SEES it.
   if (isOwner) {
     const esc = escalationHit(call, c);
-    if (esc) return { action: "approve", reason: `critical/irreversible: ${esc}` };
+    if (esc) {
+      // NOOB-DEFAULT (ownerSelfApproval="warn"): the AGENT ITSELF running a
+      // critical action UNATTENDED (senderId == null -> no human to answer an
+      // approval card) would only suspend the turn until timeout and fail open
+      // anyway -> pure latency, zero added safety. So warn-log instead of gating.
+      // An INTERACTIVE owner (real senderId in ownerIds) still gets "approve".
+      // ownerSelfApproval="gate" restores the old always-suspend behavior.
+      if (c.ownerSelfApproval === "warn" && senderId == null) {
+        return { action: "warn", reason: `critical/irreversible (unattended self, warn-not-gate): ${esc}` };
+      }
+      return { action: "approve", reason: `critical/irreversible: ${esc}` };
+    }
     const doc = criticalDocHit(call, c);
     if (doc) return { action: "warn", reason: `security-doc edit (reversible): ${doc}` };
     if (protectedHit) return { action: "warn", reason: `secret touch: ${protectedHit}` };

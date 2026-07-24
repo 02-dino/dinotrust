@@ -20,7 +20,9 @@ const OWNER = "1083618205", SELF = null, STRANGER = "999";
 
 // owner: allow / warn / approve
 t("owner normal exec", call("exec", { command: "ls -la" }), OWNER, "allow");
-t("owner rm -rf -> approve", call("exec", { command: "rm -rf /tmp/x" }), OWNER, "approve");
+// INTERACTIVE owner (real senderId) still gets the approval card -- only
+// UNATTENDED self (senderId==null) is warn-not-gate under ownerSelfApproval=warn.
+t("owner rm -rf real path -> approve (interactive owner still gated)", call("exec", { command: "rm -rf /root/data" }), OWNER, "approve");
 t("owner git push --force -> approve", call("exec", { command: "git push origin main --force" }), OWNER, "approve");
 t("owner write openclaw.json -> approve", call("write", { paths: ["/root/.openclaw/openclaw.json"] }), OWNER, "approve");
 t("owner write normal -> allow", call("write", { paths: ["/tmp/x.txt"] }), OWNER, "allow");
@@ -43,9 +45,11 @@ t("owner single-quoted dd if= -> allow (quoted, inert)", call("exec", { command:
 t("owner rm -rf quoted-path -> approve (operator unquoted)", call("exec", { command: `rm -rf "/tmp/some path"` }), OWNER, "approve");
 t("owner force-push after quoted arg -> approve (operator unquoted)", call("exec", { command: `git commit -m "wip" && git push origin main --force` }), OWNER, "approve");
 
-// self (agent-operated-by-owner)
+// self (agent-operated-by-owner). NOOB-DEFAULT ownerSelfApproval="warn":
+// the UNATTENDED agent's own critical actions warn-log (no human to answer a
+// card) instead of hanging the turn. senderId==null == self.
 t("self exec normal -> allow", call("exec", { command: "python3 procedures/backup.py" }), SELF, "allow");
-t("self rm -rf -> approve", call("exec", { command: "rm -rf x" }), SELF, "approve");
+t("self rm -rf -> warn (ownerSelfApproval=warn: unattended self, no hang)", call("exec", { command: "rm -rf x" }), SELF, "warn");
 
 // non-owner: strict
 t("stranger exec allowed script", call("exec", { command: "python3 tools/exchange_data.py price BTC" }), STRANGER, "allow");
