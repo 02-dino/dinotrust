@@ -75,12 +75,16 @@ function rmRfScratchOnly(cmd) {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
   const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
-  const paths = toks.filter(t => t.includes("/") && !t.startsWith("-"));
+  const paths = toks.filter(t =>
+    !t.startsWith("-") && (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)));
   if (paths.length === 0) return false;
+  const looksScratchVar = (t) =>
+    /tmp|temp|scratch|sandbox|dry|dryport|throwaway|workdir/i.test(t.replace(/^\$\{?/, "").replace(/\}$/, ""));
   let sawTmp = false;
   for (const p of paths) {
     const norm = p.replace(/\\/g, "/");
     if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
+    if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(norm) && looksScratchVar(norm)) { sawTmp = true; continue; }
     return false;
   }
   return sawTmp;
@@ -157,7 +161,37 @@ function decide(event, ctx) {
   return { block: true, why: "nonowner-default" };
 }
 
+// Mirror of handler.ts humanizeReason for a standalone assertion.
+function humanizeReason(esc) {
+  const m = /^exec ~ \/(.+)\/$/.exec(esc);
+  if (m) {
+    const pat = m[1];
+    const table = [
+      [/rm.*-.*r.*f/i, "permanently delete files/folders (rm -rf)"],
+      [/git.*push.*(--force|-f\b)/i, "force-push to git (can overwrite remote history)"],
+      [/--hard/i, "hard-reset git (discards uncommitted work)"],
+      [/DROP.*TABLE/i, "drop a database table (destroys data)"],
+      [/TRUNCATE/i, "truncate a database table (wipes all rows)"],
+      [/mkfs/i, "format a filesystem (erases a disk)"],
+      [/dd.*if=/i, "raw disk write with dd (can overwrite a drive)"],
+      [/:\(\)/, "a fork-bomb pattern (can hang the machine)"],
+      [/uninstall/i, "uninstall software"],
+    ];
+    for (const [re, phrase] of table) if (re.test(pat)) return `This command would ${phrase}.`;
+    return `This is a command flagged as risky (pattern: ${pat}).`;
+  }
+  const w = /^(write|exec-write) (.+) ~ (.+)$/.exec(esc);
+  if (w) return `This would write to a protected/critical file (${w[2]}) \u2014 editing it can brick or reconfigure the bot.`;
+  return `This action is flagged as critical/irreversible (${esc}).`;
+}
+
 let pass = 0, fail = 0;
+function h(name, esc, mustInclude) {
+  const out = humanizeReason(esc);
+  const ok = out.includes(mustInclude);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${JSON.stringify(out)}`);
+  ok ? pass++ : fail++;
+}
 function t(name, event, ctx, expectBlock, expectWhy) {
   const r = decide(event, ctx);
   const ok = r.block === expectBlock && (expectWhy ? r.why === expectWhy : true);
@@ -247,4 +281,12 @@ TRUSTED = [];
 t("back-compat: empty trustedIds unaffected", { toolName: "read", params: { path: "x" } }, T1, false, "nonowner-allowed-tool");
 
 console.log(`\n${pass} passed, ${fail} failed`);
+// ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
+h("humanize rm -rf", "exec ~ /rm\\s+-rf/", "permanently delete");
+h("humanize force-push", "exec ~ /git\\s+push.*--force/", "force-push to git");
+h("humanize DROP TABLE", "exec ~ /\\bDROP\\s+TABLE/", "drop a database table");
+h("humanize mkfs", "exec ~ /mkfs/", "format a filesystem");
+h("humanize protected write", "write /root/.openclaw/openclaw.json ~ **/openclaw.json", "protected/critical file");
+h("humanize unknown falls back", "exec ~ /somenovelpattern/", "flagged as risky");
+
 process.exit(fail ? 1 : 0);

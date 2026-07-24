@@ -243,13 +243,23 @@ function rmRfScratchOnly(cmd: string): boolean {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
   const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
-  const paths = toks.filter(t => t.includes("/") && !t.startsWith("-"));
+  // Path-like tokens: real path (contains '/') OR a shell-variable target
+  // ($VAR / ${VAR}). A variable is unresolvable at static-scan time, so it is
+  // treated as scratch ONLY when its NAME clearly signals a throwaway dir.
+  const paths = toks.filter(t =>
+    !t.startsWith("-") && (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)));
   if (paths.length === 0) return false; // no explicit path -> ambiguous -> stay critical
+  const looksScratchVar = (t: string): boolean => {
+    const name = t.replace(/^\$\{?/, "").replace(/\}$/, "");
+    return /tmp|temp|scratch|sandbox|dry|dryport|throwaway|workdir/i.test(name);
+  };
   let sawTmp = false;
   for (const p of paths) {
     const norm = p.replace(/\\/g, "/");
     if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
-    return false; // any non-/tmp path (incl. bare "/tmp", "/", real dirs) -> NOT scratch-only
+    // Shell-variable target whose NAME signals a throwaway scratch dir.
+    if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(norm) && looksScratchVar(norm)) { sawTmp = true; continue; }
+    return false; // any non-/tmp path (bare "/tmp", "/", real dirs, opaque $VAR) -> NOT scratch-only
   }
   return sawTmp;
 }

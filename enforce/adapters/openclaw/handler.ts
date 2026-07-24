@@ -315,15 +315,51 @@ function rmRfScratchOnly(cmd: string): boolean {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
   const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
-  const paths = toks.filter(t => t.includes("/") && !t.startsWith("-"));
+  // Real path (contains '/') OR a $VAR/${VAR} target. A variable is treated as
+  // scratch ONLY when its NAME clearly signals a throwaway dir (unresolvable at
+  // static-scan time). Mirror of core/policy.ts.
+  const paths = toks.filter(t =>
+    !t.startsWith("-") && (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)));
   if (paths.length === 0) return false;
+  const looksScratchVar = (t: string): boolean =>
+    /tmp|temp|scratch|sandbox|dry|dryport|throwaway|workdir/i.test(t.replace(/^\$\{?/, "").replace(/\}$/, ""));
   let sawTmp = false;
   for (const p of paths) {
     const norm = p.replace(/\\/g, "/");
     if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
+    if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(norm) && looksScratchVar(norm)) { sawTmp = true; continue; }
     return false;
   }
   return sawTmp;
+}
+
+// Translate a raw detector reason ("exec ~ /rm\s+-rf/", "write X ~ Y", ...) into
+// a plain-language sentence a non-technical owner can act on. Falls back to the
+// raw reason if nothing matches (never hides info).
+function humanizeReason(esc: string): string {
+  const m = /^exec ~ \/(.+)\/$/.exec(esc);
+  if (m) {
+    const pat = m[1];
+    // NOTE: `pat` is the raw regex-SOURCE string (e.g. literal "rm\\s+-rf"), so
+    // these matchers use `.*` not `\s` — the target contains a literal
+    // backslash-s, not whitespace.
+    const table: Array<[RegExp, string]> = [
+      [/rm.*-.*r.*f/i, "permanently delete files/folders (rm -rf)"],
+      [/git.*push.*(--force|-f\b)/i, "force-push to git (can overwrite remote history)"],
+      [/--hard/i, "hard-reset git (discards uncommitted work)"],
+      [/DROP.*TABLE/i, "drop a database table (destroys data)"],
+      [/TRUNCATE/i, "truncate a database table (wipes all rows)"],
+      [/mkfs/i, "format a filesystem (erases a disk)"],
+      [/dd.*if=/i, "raw disk write with dd (can overwrite a drive)"],
+      [/:\(\)/, "a fork-bomb pattern (can hang the machine)"],
+      [/uninstall/i, "uninstall software"],
+    ];
+    for (const [re, phrase] of table) if (re.test(pat)) return `This command would ${phrase}.`;
+    return `This is a command flagged as risky (pattern: ${pat}).`;
+  }
+  const w = /^(write|exec-write) (.+) ~ (.+)$/.exec(esc);
+  if (w) return `This would write to a protected/critical file (${w[2]}) — editing it can brick or reconfigure the bot.`;
+  return `This action is flagged as critical/irreversible (${esc}).`;
 }
 
 // ESCALATION / irreversible detector -> the ONLY owner-facing APPROVAL trigger.
