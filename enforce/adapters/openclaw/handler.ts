@@ -129,6 +129,61 @@ function audit(c: Cfg, obj: Record<string, unknown>) {
   } catch { /* silent by contract */ }
 }
 
+// ── DEGRADED-state surfacing ──────────────────────────────────────────────────
+// before_tool_call fails OPEN on error (an enforcement bug must never brick the
+// tool loop). Failing open SILENTLY means protection can quietly stop working
+// while the owner still believes they are covered. On any hook error we write a
+// durable DEGRADED marker (throttled) + a loud audit event so a bootstrap/health
+// path can warn the owner. This turns a silent fail-open into a visible one.
+function degradedMarkerPath(c: Cfg): string {
+  const base = logPath(c);
+  const dir = path.dirname(base);
+  const stem = path.basename(base).replace(/\.log$/i, "");
+  return path.join(dir, `${stem}-DEGRADED.json`);
+}
+
+const DEGRADED_THROTTLE_MS = 60 * 1000; // at most one marker write per minute
+let _lastDegradedWriteMs = 0;
+
+function recordDegraded(c: Cfg, err: unknown, whereContext: Record<string, unknown>) {
+  audit(c, { evt: "DEGRADED", severity: "critical", error: String(err), ...whereContext });
+  const now = Date.now();
+  if (now - _lastDegradedWriteMs < DEGRADED_THROTTLE_MS) return;
+  _lastDegradedWriteMs = now;
+  try {
+    const p = degradedMarkerPath(c);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    let count = 1;
+    let firstSeen = new Date().toISOString();
+    try {
+      const prior = JSON.parse(fs.readFileSync(p, "utf8"));
+      if (prior && typeof prior.count === "number") count = prior.count + 1;
+      if (prior && prior.firstSeen) firstSeen = prior.firstSeen;
+    } catch { /* no prior marker / unreadable -> fresh */ }
+    fs.writeFileSync(p, JSON.stringify({
+      status: "DEGRADED",
+      message: "dinotrust-enforce hit an error mid-verdict and FAILED OPEN. " +
+               "The tool was allowed through WITHOUT enforcement. Protection may be " +
+               "partially or fully bypassed until this is resolved.",
+      error: String(err),
+      firstSeen,
+      lastSeen: new Date().toISOString(),
+      count,
+      context: whereContext,
+      remediation: "Check the dinotrust-enforce log for evt:DEGRADED lines, fix the " +
+                   "fault, then delete this marker to clear the warning.",
+    }, null, 2) + "\n");
+  } catch { /* if we cannot even write the marker, the audit event above still fired */ }
+}
+
+function readDegradedMarker(c: Cfg): any | null {
+  try {
+    const p = degradedMarkerPath(c);
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch { return null; }
+}
+
 // ── Approval follow-up (A′: "confirmed-miss only") ────────────────────────────
 // When the hook escalates a critical action -> OpenClaw shows an approval card.
 // If APPROVED, OpenClaw resumes the SAME command in the SAME session, which
@@ -456,6 +511,10 @@ export default definePluginEntry({
   register(api: any) {
     const c = cfg(api?.pluginConfig ?? api?.config);
     audit(c, { evt: "register", enforce: c.enforce, ownerWarnOnly: c.ownerWarnOnly, agentFilter: c.agentFilter, hasPluginConfig: !!api?.pluginConfig });
+    const priorDegraded = readDegradedMarker(c);
+    if (priorDegraded) {
+      audit(c, { evt: "DEGRADED-carried", severity: "critical", count: priorDegraded.count, firstSeen: priorDegraded.firstSeen, lastSeen: priorDegraded.lastSeen });
+    }
 
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
@@ -599,7 +658,13 @@ export default definePluginEntry({
           if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner tool ${toolName} not allowlisted` };
         }
       } catch (err) {
-        audit(c, { evt: "error", error: String(err) });
+        // FAIL-OPEN, but LOUDLY: durable degraded marker + critical audit event
+        // so the silent-bypass window is surfaced to the owner, not swallowed.
+        recordDegraded(c, err, {
+          toolName: String(event?.toolName ?? ""),
+          sessionKey: String(ctx?.sessionKey ?? event?.sessionKey ?? ""),
+          phase: "before_tool_call",
+        });
       }
     }, { priority: 100 });
   },
