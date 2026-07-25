@@ -44,7 +44,9 @@ bootstrap. Zero-op when there's no marker.
 
 ## Env
 
-- `DINOTRUST_OWNER_IDS` — comma/space list; default `1083618205` (matches the
-  enforce plugin's default owner).
+- `DINOTRUST_OWNER_IDS` — comma/space list of owner sender ids. No hardcoded
+  default: the installer wires this from the ownerIds you choose at install time
+  (see install.sh). Unset => this operator-only degraded alert matches no sender
+  until configured (fail-closed, never ships one deployment's real id).
 - `DINOTRUST_DEGRADED_MARKER` — explicit marker path override.
 - `DINOTRUST_LOG_FILE` — audit log path (marker derived as `<log>-DEGRADED.json`).

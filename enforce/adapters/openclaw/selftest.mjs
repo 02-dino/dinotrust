@@ -1,7 +1,7 @@
 // Standalone logic self-test for owner-warn / non-owner-strict-allowlist model.
 const PROTECTED = ["**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/credentials", "**/secrets/**"];
 const MUTATING = ["exec", "write", "edit", "apply_patch"];
-const OWNERS = ["1083618205"];
+const OWNERS = ["111111"];
 const NONOWNER_TOOLS = ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
 const NONOWNER_SCRIPTS = ["exchange_data", "semantic_search", "defillama_search", "arkham_search", "consensus_search"];
 const CRIT_EXEC = ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "uninstall", "--hard\\b"];
@@ -205,7 +205,7 @@ function t(name, event, ctx, expectBlock, expectWhy) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${JSON.stringify(r)}`);
   ok ? pass++ : fail++;
 }
-const OWNER = { sessionKey: "agent:analyst:telegram:direct:1083618205", senderId: "1083618205" };
+const OWNER = { sessionKey: "agent:analyst:telegram:direct:111111", senderId: "111111" };
 const SELF = { sessionKey: "agent:analyst" }; // no senderId => agent-operated-by-owner
 const STRANGER = { sessionKey: "agent:analyst:telegram:direct:999", senderId: "999" };
 

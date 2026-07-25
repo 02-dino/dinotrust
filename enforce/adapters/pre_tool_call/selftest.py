@@ -7,10 +7,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 import handler  # noqa: E402
 
 CFG = dict(handler.DEFAULTS)
-CFG["ownerIds"] = ["1083618205"]
+CFG["ownerIds"] = ["111111"]
 CFG["nonOwnerAllowedScripts"] = ["exchange_data", "semantic_search", "consensus_search"]
 
-OWNER, SELF, STRANGER = "1083618205", None, "999"
+OWNER, SELF, STRANGER = "111111", None, "999"
 _pass = 0
 _fail = 0
 
@@ -72,7 +72,7 @@ t("stranger unknown tool", "some_write_tool", STRANGER, "block")
 
 # ── trusted/delegated tier (above non-owner, below owner) ──
 CFG_TRUSTED = dict(handler.DEFAULTS)
-CFG_TRUSTED["ownerIds"] = ["1083618205"]
+CFG_TRUSTED["ownerIds"] = ["111111"]
 CFG_TRUSTED["nonOwnerAllowedScripts"] = ["exchange_data", "semantic_search", "consensus_search"]
 CFG_TRUSTED["trustedIds"] = [
     {"id": "555555", "scopePathGlobs": ["workspace-bob/**"]},
@@ -101,11 +101,11 @@ tt("trusted exec: granted + allowlisted script -> allowed", "exec", "777777", "a
 tt("trusted exec: granted but script not allowlisted -> blocked", "exec", "777777", "block", command="python3 tools/arkham_search.py x")
 tt("trusted with no scopePathGlobs: any path allowed if tool allowed", "write", "777777", "allow", paths=["/etc/random/path.txt"])
 tt("non-trusted stranger still hits normal non-owner path", "write", "999999", "block", paths=["anywhere.txt"])
-tt("owner unaffected by trustedIds config", "write", "1083618205", "allow", paths=["anything.txt"])
+tt("owner unaffected by trustedIds config", "write", "111111", "allow", paths=["anything.txt"])
 
 # back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 CFG_BACKCOMPAT = dict(handler.DEFAULTS)
-CFG_BACKCOMPAT["ownerIds"] = ["1083618205"]
+CFG_BACKCOMPAT["ownerIds"] = ["111111"]
 action, reason = handler.decide("read", [], "", "555555", CFG_BACKCOMPAT)
 ok = action == "allow" and reason == "non-owner allowed tool"
 print(("PASS" if ok else "FAIL") + "  back-compat: empty trustedIds unaffected  -> %s (%s)" % (action, reason))

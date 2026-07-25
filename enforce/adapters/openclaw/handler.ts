@@ -73,7 +73,24 @@ type Cfg = {
   // Cap the append-only pending-approvals ledger so resolvePendingIfRefire's
   // full-file O(n) read never becomes a per-critical-action stall.
   pendingLedgerMaxLines: number;
+  // LLM-MEDIATED CRITICAL APPROVAL (v2 design). When true, a critical-tier hit on
+  // an owner/self turn is returned to the LLM as a BLOCK with a specific reason
+  // (naming the resolved target) instead of the old fail-open approval card. The
+  // LLM then either self-approves (ONLY if the owner's current-turn message shows
+  // explicit intent for THIS target -> re-issues with the self-approve marker,
+  // which the plugin RE-VERIFIES) or stops its turn and asks a specific question.
+  // This removes the 90s fail-OPEN clock on criticals: no answer => command never
+  // ran (fail-CLOSED backstop), the inverse of the old behavior. Set false to
+  // restore the legacy fail-open card.
+  llmMediatedCritical: boolean;
 };
+
+// Marker the LLM appends to a critical command to assert it re-issued the action
+// with the owner's explicit current-turn approval. The marker ALONE is NOT
+// trusted: the plugin independently re-checks current-turn owner intent before
+// honoring it. A jailbroken LLM can emit the marker, but cannot fabricate the
+// owner's platform-signed current-turn message that the re-check requires.
+const SELF_APPROVE_MARKER = "DINOTRUST_OWNER_APPROVED";
 
 // Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools.
 const DEFAULT_TRUSTED_TOOLS: string[] = [
@@ -118,6 +135,7 @@ const DEFAULTS: Cfg = {
   ownerSelfApproval: "warn",   // noob-safe: agent's own UNATTENDED criticals warn-log, don't hang the turn
   approvalTimeoutMs: 90_000,    // 90s cap (runtime default is 30min) so a headless gate can't freeze the agent
   pendingLedgerMaxLines: 500,   // prune ledger to last 500 lines -> re-fire lookups stay O(small)
+  llmMediatedCritical: true,    // v2: critical hits BLOCK w/ specific reason + fail-CLOSED, not fail-open card
 };
 
 function cfg(raw: any): Cfg {
@@ -128,6 +146,7 @@ function cfg(raw: any): Cfg {
   if (c.ownerSelfApproval !== "warn" && c.ownerSelfApproval !== "gate") c.ownerSelfApproval = DEFAULTS.ownerSelfApproval;
   if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
   if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
+  if (typeof c.llmMediatedCritical !== "boolean") c.llmMediatedCritical = DEFAULTS.llmMediatedCritical;
   return c;
 }
 
@@ -450,6 +469,103 @@ function humanizeReason(esc: string): string {
   return `This action is flagged as critical/irreversible (${esc}).`;
 }
 
+// ── LLM-MEDIATED CRITICAL APPROVAL helpers ─────────────────────────────────────
+
+// Resolve the target(s) of a critical action for a SPECIFIC block reason. For
+// exec, pull path-like tokens off the command line (post quote-strip) so the
+// message names the real path instead of a generic "files/folders". For
+// write/edit, targetPaths() already has them.
+function resolvedTargetsOf(event: any): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (v: unknown) => { const s = String(v || "").trim(); if (s && !seen.has(s)) { seen.add(s); out.push(s); } };
+  for (const tp of targetPaths(event)) push(tp);
+  if (String(event?.toolName ?? "") === "exec") {
+    const scan = stripQuoted(execCommandOf(event));
+    for (const t of scan.split(/[\s;|&><()]+/).filter(Boolean)) {
+      if (t.startsWith("-")) continue;
+      if (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)) push(t);
+    }
+  }
+  return out;
+}
+
+// Best-effort file count for a resolved dir target (so the block reason can say
+// "(47 files)"). Bounded + silent: never throw, cap the walk so a huge tree
+// can't stall the hook. Returns null when not a countable local dir.
+function targetFileCount(target: string): number | null {
+  try {
+    if (!target || target.includes("$") || !target.startsWith("/")) return null;
+    const st = fs.statSync(target);
+    if (!st.isDirectory()) return st.isFile() ? 1 : null;
+    let count = 0; const CAP = 2000; const stack = [target];
+    while (stack.length) {
+      const d = stack.pop()!;
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (e.isDirectory()) stack.push(path.join(d, e.name));
+        else { count++; if (count >= CAP) return CAP; }
+      }
+    }
+    return count;
+  } catch { return null; }
+}
+
+// Build the SPECIFIC block reason the LLM receives: humanized action + resolved
+// target(s) + file count where derivable. This is what fixes the owner's
+// "what file is deleted?" complaint — the card/block names the real target.
+function specificCriticalReason(event: any, esc: string): string {
+  const base = humanizeReason(esc);
+  const targets = resolvedTargetsOf(event).slice(0, 4);
+  if (targets.length === 0) return base;
+  const parts = targets.map(t => {
+    const n = targetFileCount(t);
+    return n != null ? `${t} (${n === 2000 ? "2000+" : n} file${n === 1 ? "" : "s"})` : t;
+  });
+  return `${base} Target: ${parts.join(", ")}.`;
+}
+
+// Extract the owner's CURRENT-TURN inbound message text from the hook event.
+// This is the checkable artifact a jailbreak cannot fabricate (it is platform-
+// signed and only present when the owner actually sent a message THIS turn).
+// Injection sourced from tool output / a file / a web page is NOT here.
+function currentTurnOwnerText(event: any, ctx: any): string {
+  const cand: unknown[] = [];
+  for (const src of [event?.metadata, event, ctx]) {
+    if (!src || typeof src !== "object") continue;
+    const s: any = src;
+    cand.push(s.content, s.body, s.bodyForAgent, s.text, s.message, s.inboundText, s.userText, s.transcript);
+  }
+  for (const v of cand) { if (typeof v === "string" && v.trim()) return v; }
+  return "";
+}
+
+// Deterministic, CONSERVATIVE current-turn-intent match. Returns true ONLY when
+// the owner's this-turn message clearly references the resolved target AND
+// signals a destructive/action intent. Unclear -> false (fall through to ask).
+// This is the self-approve KEY: it is checked by the plugin, never by the LLM.
+function ownerIntentMatches(ownerText: string, event: any, esc: string): boolean {
+  const text = (ownerText || "").toLowerCase();
+  if (text.length < 3) return false;
+  const targets = resolvedTargetsOf(event);
+  if (targets.length === 0) return false;
+  // (1) the owner's message must reference EVERY resolved target (by full path
+  //     or a distinctive basename segment >=4 chars). ALL targets, not any:
+  //     a chained command touching an unmentioned path must NOT self-approve.
+  for (const t of targets) {
+    const tl = t.toLowerCase();
+    const base = tl.split("/").filter(Boolean).pop() || tl;
+    const distinctive = base.length >= 4 ? base : tl;
+    if (!text.includes(tl) && !(distinctive.length >= 4 && text.includes(distinctive))) return false;
+  }
+  // (2) the owner's message must signal destructive/action intent (not just
+  //     mention the path in passing). Verb set is tied to the critical class.
+  const actionVerbs = /\b(delete|remove|rm|wipe|drop|truncate|reset|force[- ]?push|overwrite|erase|nuke|clear|destroy|format|uninstall|purge)\b/;
+  if (!actionVerbs.test(text)) return false;
+  return true;
+}
+
 // ESCALATION / irreversible detector -> the ONLY owner-facing APPROVAL trigger.
 // (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
 // target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
@@ -588,6 +704,38 @@ export default definePluginEntry({
             // slow". Warn-log instead. An INTERACTIVE owner (real sender id) still
             // gets the card. ownerSelfApproval="gate" restores always-suspend.
             const unattendedAgentSelf = sender == null;
+
+            // ── v2: LLM-MEDIATED CRITICAL APPROVAL (fail-CLOSED) ────────────────
+            // Replaces the legacy fail-OPEN card. On a critical-tier hit we BLOCK
+            // the tool and hand the LLM a SPECIFIC reason (naming the resolved
+            // target). The LLM either (a) self-approves — ONLY if it re-issues the
+            // command carrying SELF_APPROVE_MARKER AND the owner's current-turn
+            // message independently proves intent for THIS target (re-checked here,
+            // not trusted from the LLM) — or (b) stops its turn and asks. No answer
+            // => command never ran. A jailbroken LLM cannot fabricate the owner's
+            // platform-signed current-turn message the re-check requires.
+            if (c.enforce && c.llmMediatedCritical) {
+              const cmd = execCommandOf(event);
+              const ownerText = currentTurnOwnerText(event, ctx);
+              const markerPresent = cmd.includes(SELF_APPROVE_MARKER)
+                || ownerText.includes(SELF_APPROVE_MARKER);
+              const intentOk = ownerIntentMatches(ownerText, event, esc);
+              if (markerPresent && intentOk) {
+                audit(c, { evt: "owner-self-approve", rule: "R-escalation-llm-approved", toolName, sessionKey, sender: sender ?? "self", hit: esc, note: "current-turn owner intent verified + marker present" });
+                return; // proceed: verified explicit owner intent this turn
+              }
+              const reason = specificCriticalReason(event, esc);
+              const askHint = intentOk
+                ? `If the owner explicitly asked for this THIS turn, re-issue the exact command with the token ${SELF_APPROVE_MARKER} appended as a trailing comment (e.g. "# ${SELF_APPROVE_MARKER}"). Otherwise, STOP and ask the owner to confirm.`
+                : `Do NOT self-approve. STOP your turn and ask the owner a specific yes/no question naming this exact target, then wait for their next message. A missing answer must leave this UNEXECUTED.`;
+              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, intentOk, markerPresent, unattendedAgentSelf });
+              return {
+                block: true,
+                blockReason: `dinotrust: CRITICAL action blocked pending confirmation. ${reason} ${askHint}`,
+              };
+            }
+
+            // ── legacy path (llmMediatedCritical=false): warn-self or fail-open card
             if (c.ownerSelfApproval === "warn" && unattendedAgentSelf) {
               audit(c, { evt: "owner-warn", rule: "R-escalation-self", toolName, sessionKey, sender: "self", hit: esc, note: "ownerSelfApproval=warn: unattended agent critical action warn-logged, not gated" });
             } else {

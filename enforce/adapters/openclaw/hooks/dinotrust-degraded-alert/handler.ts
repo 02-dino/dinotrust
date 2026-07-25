@@ -27,7 +27,11 @@ function asString(v: unknown): string | undefined {
 function ownerIds(): string[] {
   const raw = (process.env.DINOTRUST_OWNER_IDS ?? "").trim();
   if (raw) return raw.split(/[,\s]+/).filter(Boolean);
-  return ["1083618205"]; // dinotrust-enforce default owner
+  // Generic distribution default: NO hardcoded owner id. The installer wires
+  // DINOTRUST_OWNER_IDS from the ownerIds chosen at install time (see install.sh
+  // + HOOK.md). Empty => this operator-only degraded alert simply doesn't match a
+  // sender until configured, rather than shipping one deployment's real id.
+  return [];
 }
 
 function senderId(context: Record<string, unknown>): string | undefined {

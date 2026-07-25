@@ -4,7 +4,7 @@
 import { decide, normalizeConfig } from "./policy.ts";
 
 const CFG = normalizeConfig({
-  ownerIds: ["1083618205"],
+  ownerIds: ["111111"],
   nonOwnerAllowedScripts: ["exchange_data", "semantic_search", "consensus_search"],
 });
 
@@ -16,7 +16,7 @@ function t(name, c, sender, expect) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
   ok ? pass++ : fail++;
 }
-const OWNER = "1083618205", SELF = null, STRANGER = "999";
+const OWNER = "111111", SELF = null, STRANGER = "999";
 
 // owner: allow / warn / approve
 t("owner normal exec", call("exec", { command: "ls -la" }), OWNER, "allow");
@@ -67,7 +67,7 @@ t("stranger unknown tool", call("some_write_tool"), STRANGER, "block");
 
 // ── trusted/delegated tier (above non-owner, below owner) ──
 const CFG_TRUSTED = normalizeConfig({
-  ownerIds: ["1083618205"],
+  ownerIds: ["111111"],
   nonOwnerAllowedScripts: ["exchange_data", "semantic_search", "consensus_search"],
   trustedIds: [
     { id: "555555", scopePathGlobs: ["workspace-bob/**"] },
@@ -92,7 +92,7 @@ tt("trusted exec: granted + allowlisted script -> allowed", call("exec", { comma
 tt("trusted exec: granted but script not allowlisted -> blocked", call("exec", { command: "python3 tools/arkham_search.py x" }), "777777", "block");
 tt("trusted with no scopePathGlobs: any path allowed if tool allowed", call("write", { paths: ["/etc/random/path.txt"] }), "777777", "allow");
 tt("non-trusted stranger still hits normal non-owner path", call("write", { paths: ["anywhere.txt"] }), "999999", "block");
-tt("owner unaffected by trustedIds config", call("write", { paths: ["anything.txt"] }), "1083618205", "allow");
+tt("owner unaffected by trustedIds config", call("write", { paths: ["anything.txt"] }), "111111", "allow");
 
 // back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 const v = decide(call("read"), "555555", CFG);
