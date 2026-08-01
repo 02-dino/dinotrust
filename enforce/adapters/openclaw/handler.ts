@@ -471,20 +471,80 @@ function humanizeReason(esc: string): string {
 
 // ── LLM-MEDIATED CRITICAL APPROVAL helpers ─────────────────────────────────────
 
-// Resolve the target(s) of a critical action for a SPECIFIC block reason. For
-// exec, pull path-like tokens off the command line (post quote-strip) so the
-// message names the real path instead of a generic "files/folders". For
-// write/edit, targetPaths() already has them.
+// Parse the REAL argv operands of every `rm` invocation in a (possibly compound)
+// command, and NOTHING ELSE. This is the fix for the false-positive blast-radius
+// bug: the old resolver scraped every path-shaped token off the WHOLE command
+// line — so a chained `source .env && ... rm -rf dir` reported `.env`, a github
+// URL, and `/dev/null` as "deletion targets", inflating the blast radius and
+// producing scary, wrong approval prompts (-> alert fatigue -> reflexive
+// approve -> LESS safe). We now:
+//   • split the command on shell separators (; | & && ||) into segments,
+//   • keep only segments whose FIRST word is `rm` (bare or path/ e.g. /bin/rm),
+//   • within an rm segment take only its operands (skip flags, stop at a
+//     redirection/pipe boundary),
+//   • exclude URLs, /dev/null, /dev/*, process-substitution and option-values,
+//   • resolve relative operands against the exec cwd when known (else leave
+//     relative, clearly not-absolute, so downstream never mislabels them).
+// Runs on the quote-stripped command so a quoted "...rm -rf..." literal is inert.
+function rmArgvTargets(cmd: string, cwd?: string): string[] {
+  const scan = stripQuoted(cmd);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    let s = raw.trim();
+    if (!s) return;
+    if (s.startsWith("-")) return;                       // flag
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return;       // URL (http://, https://, git://, ssh://)
+    if (s === "/dev/null" || /^\/dev\//.test(s)) return;  // device nodes are not deletable-tree targets
+    if (s.startsWith("<(") || s.startsWith(">(")) return; // process substitution
+    // resolve relative -> absolute against exec cwd when we know it
+    if (cwd && !s.startsWith("/") && !/^\$\{?[A-Za-z_]/.test(s)) {
+      try { s = path.resolve(cwd, s); } catch { /* leave relative */ }
+    }
+    if (!seen.has(s)) { seen.add(s); out.push(s); }
+  };
+  // Split into shell segments; a new segment starts after ; | & (and && ||).
+  const segments = scan.split(/(?:\|\||&&|[;|&\n])/);
+  for (const seg of segments) {
+    const toks = seg.trim().split(/\s+/).filter(Boolean);
+    if (toks.length === 0) continue;
+    const first = toks[0];
+    const isRm = first === "rm" || /(^|\/)rm$/.test(first);
+    if (!isRm) continue;
+    for (let i = 1; i < toks.length; i++) {
+      const t = toks[i];
+      if (t === "--") continue;            // end-of-options marker
+      if (t.startsWith("-")) continue;     // flag (rm has no option that takes a separate value)
+      if (/^[<>]/.test(t)) break;          // redirection -> operands end
+      push(t);
+    }
+  }
+  return out;
+}
+
+// Resolve the target(s) of a critical action for a SPECIFIC block reason. For an
+// `rm` exec we parse ONLY the rm argv (rmArgvTargets) so the message names the
+// REAL delete targets and nothing else. For a non-rm critical exec we fall back
+// to the old path-token scan (that class — mkfs/dd/etc — still wants the broad
+// hint). For write/edit, targetPaths() already has them.
 function resolvedTargetsOf(event: any): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (v: unknown) => { const s = String(v || "").trim(); if (s && !seen.has(s)) { seen.add(s); out.push(s); } };
   for (const tp of targetPaths(event)) push(tp);
   if (String(event?.toolName ?? "") === "exec") {
-    const scan = stripQuoted(execCommandOf(event));
-    for (const t of scan.split(/[\s;|&><()]+/).filter(Boolean)) {
-      if (t.startsWith("-")) continue;
-      if (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)) push(t);
+    const cmd = execCommandOf(event);
+    const cwd = String((event?.params ?? {}).cwd ?? "").trim() || undefined;
+    const scan = stripQuoted(cmd);
+    // If this command contains an `rm`, the delete targets are ONLY its argv.
+    if (/(^|[\s;|&(])(?:\/\S*\/)?rm\s/.test(scan)) {
+      for (const t of rmArgvTargets(cmd, cwd)) push(t);
+    } else {
+      // Non-rm critical exec: keep the broad path-token hint.
+      for (const t of scan.split(/[\s;|&><()]+/).filter(Boolean)) {
+        if (t.startsWith("-")) continue;
+        if (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)) push(t);
+      }
     }
   }
   return out;
