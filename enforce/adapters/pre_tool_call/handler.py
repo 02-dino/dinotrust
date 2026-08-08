@@ -43,6 +43,11 @@ DEFAULTS = {
         # on `grep rmtree`); only their call/removal forms are matched.
         r"\bos\.remove\b", r"\bos\.unlink\b", r"os\.removedirs",
         r"find\s+.*-delete\b", r"truncate\s+-s\s*0\b", r"\bunlink\s+/",
+        # Non-rm destructive tools + rm variants the `rm\s+-rf` pattern missed.
+        # Anchored to command position ((?:^|[;&|]) + optional whitespace) so a
+        # read-only mention (`grep rmdir`, `history | grep shred`) stays inert.
+        r"(?:^|[;&|]\s*)rm\s+-[a-z]*r", r"(?:^|[;&|]\s*)rmdir\s+",
+        r"git\s+clean\s+-[a-z]*f", r"(?:^|[;&|]\s*)shred\s+",
     ],
     # Owner write/edit/exec-write here -> approval (privilege-escalation / brick risk).
     "escalationPathGlobs": ["**/openclaw.json", "**/.env"],

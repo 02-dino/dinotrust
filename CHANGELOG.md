@@ -4,6 +4,32 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.23.1] — 2026-08-08
+
+### Security — hardened the destructive-command gate beyond `rm -rf`
+
+Follow-up to 1.23.0. Added the non-`rm` delete tools + `rm` variants the
+original `rm\s+-rf` pattern missed, all anchored to command position so
+read-only mentions stay inert:
+
+- **`rm -r` (without `-f`), `rmdir`, `git clean -f…`, `shred`** now BLOCK.
+  Previously `rm\s+-rf` matched only the exact `-rf` form — `rm -r dir`,
+  `rmdir /path`, `git clean -fdx` (wipes untracked files), and `shred` all
+  passed un-gated.
+- Patterns are anchored `(?:^|[;&|]\s*)` so `grep rmdir`, `history | grep
+  shred`, `shredder_tool.py`, `my_rmdir_notes` do NOT false-positive.
+- Applied to both `enforce/core/policy.ts` and the `pre_tool_call` Python
+  adapter. Selftests: 54 + 48 pass, 0 fail. Verified 11 must-block / 11
+  must-pass cases, zero false positives.
+
+> Scope note: `curl | bash` (download-execute) is a distinct threat class and
+> is deliberately NOT gated here — blocking all pipe-to-shell would break
+> routine installs. Base64/heredoc-piped interpreter payloads (where the delete
+> verb lives in upstream data, invisible to any static scan) remain a known
+> residual surface, called out honestly rather than papered over.
+
+---
+
 ## [1.23.0] — 2026-08-08
 
 ### Security — closed an interpreter-delete bypass of the critical-action gate

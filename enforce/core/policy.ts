@@ -122,6 +122,11 @@ export const DEFAULT_POLICY: PolicyConfig = {
     // `grep rmtree`); only their call/removal forms are matched.
     "\\bos\\.remove\\b", "\\bos\\.unlink\\b", "os\\.removedirs",
     "find\\s+.*-delete\\b", "truncate\\s+-s\\s*0\\b", "\\bunlink\\s+/",
+    // Non-rm destructive tools + rm variants the `rm\\s+-rf` pattern missed.
+    // Anchored to command position ((?:^|[;&|]) + optional ws) so a read-only
+    // mention (`grep rmdir`, `history | grep shred`) stays inert.
+    "(?:^|[;&|]\\s*)rm\\s+-[a-z]*r", "(?:^|[;&|]\\s*)rmdir\\s+",
+    "git\\s+clean\\s+-[a-z]*f", "(?:^|[;&|]\\s*)shred\\s+",
   ],
   escalationPathGlobs: ["**/openclaw.json", "**/.env"],
   criticalPathGlobs: ["**/security_rules.md", "**/AGENTS.md"],
