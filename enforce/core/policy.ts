@@ -327,6 +327,25 @@ function interpreterDeleteHit(cmd: string): string | null {
   return null;
 }
 
+// Opaque piped/heredoc interpreter sink. When a code interpreter is the SINK of a
+// pipe (`... | python3`) or reads a heredoc/stdin-dash (`python3 <<EOF`,
+// `python3 - <<X`, `python3 <<< "..."`, bare `python3 -`) with NO script-file arg,
+// the actual program lives in upstream/heredoc DATA that no static scan can see --
+// the way to smuggle shutil.rmtree(...) past the inline (-c) detector. Treated as
+// critical. `cat data.json | python3 process.py` is NOT flagged (has a script arg).
+const _CODE_INTERP = "(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
+const PIPE_SINK_RE = new RegExp(
+  "\\|\\s*(?:sudo\\s+|env\\s+\\S+=\\S+\\s+)*" + _CODE_INTERP +
+  "(?:\\s+-\\S*)*\\s*(?:$|[;&|<>])", "i");
+const HEREDOC_SINK_RE = new RegExp(
+  "\\b" + _CODE_INTERP + "\\b(?:\\s+-)?\\s*(?:<<-?\\s*[\"'\\w]|<<<)", "i");
+function pipedInterpreterSink(cmd: string): string | null {
+  if (!cmd) return null;
+  if (PIPE_SINK_RE.test(cmd)) return "exec ~ opaque-piped-interpreter (code from pipe, unreviewable)";
+  if (HEREDOC_SINK_RE.test(cmd)) return "exec ~ opaque-heredoc-interpreter (code from heredoc/stdin, unreviewable)";
+  return null;
+}
+
 function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
   if (["write", "edit", "apply_patch"].includes(call.toolName)) {
     for (const p of call.paths) { const h = matchesGlob(p, c.escalationPathGlobs); if (h) return `write ${p} ~ ${h}`; }
@@ -336,6 +355,9 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
     // the -c/-e payload). Closes the shutil.rmtree/-c bypass.
     const interpHit = interpreterDeleteHit(call.command);
     if (interpHit) return interpHit;
+    // Opaque piped/heredoc interpreter (code from upstream data, unreviewable).
+    const sinkHit = pipedInterpreterSink(call.command);
+    if (sinkHit) return sinkHit;
     // Scan with quoted literals removed so quoted-arg text can't false-positive.
     const scan = stripQuoted(call.command);
     const scratchRm = rmRfScratchOnly(call.command);

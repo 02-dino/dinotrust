@@ -246,6 +246,38 @@ def interpreter_delete_hit(command):
             return "exec ~ interpreter-inline-delete (%s)" % name
     return None
 
+# Interpreters that execute whatever code they are fed. When one of these is the
+# SINK of a pipe (`... | python3`) or reads a heredoc/stdin dash (`python3 <<EOF`,
+# `python3 - <<X`) with NO script-file argument, the actual program lives in
+# upstream/heredoc DATA that no static command scan can see -- the classic way to
+# smuggle `shutil.rmtree(...)` past the inline (-c) detector. We treat that opaque
+# form as critical. A normal `cat data.json | python3 process.py` is NOT flagged
+# (it has a script-file arg, so the code is on disk and reviewable).
+_CODE_INTERPRETERS = r"(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)"
+# pipe-sink: a `|` (not `||`) immediately followed by an interpreter, then either
+# end-of-command or only flags/redirects -- i.e. no script-file positional.
+_PIPE_SINK_RE = re.compile(
+    r"\|\s*(?:sudo\s+|env\s+\S+=\S+\s+)*" + _CODE_INTERPRETERS +
+    r"(?:\s+-\S*)*\s*(?:$|[;&|<>])",
+    re.I,
+)
+# heredoc / stdin-dash: `python3 <<EOF`, `python3 <<-EOF`, `python3 - <<X`,
+# `python3 <<< "..."` (herestring), or a bare `python3 -` reading stdin.
+_HEREDOC_SINK_RE = re.compile(
+    r"\b" + _CODE_INTERPRETERS + r"\b(?:\s+-)?\s*(?:<<-?\s*[\"'\w]|<<<)",
+    re.I,
+)
+
+def piped_interpreter_sink(command):
+    """Flag an interpreter fed opaque code via pipe/heredoc with no script arg."""
+    if not command:
+        return None
+    if _PIPE_SINK_RE.search(command):
+        return "exec ~ opaque-piped-interpreter (code from pipe, unreviewable)"
+    if _HEREDOC_SINK_RE.search(command):
+        return "exec ~ opaque-heredoc-interpreter (code from heredoc/stdin, unreviewable)"
+    return None
+
 def escalation_hit(tool, paths, command, cfg):
     """ESCALATION / irreversible -> the only owner-facing APPROVAL trigger.
     (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs

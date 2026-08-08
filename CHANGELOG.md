@@ -4,6 +4,40 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.24.0] — 2026-08-08
+
+### Security — closed the opaque piped/heredoc interpreter bypass
+
+The last residual surface flagged in 1.23.0/1.23.1: when a delete verb lives in
+UPSTREAM DATA fed to an interpreter (not on the command line), no static command
+scan can see it. New detector `pipedInterpreterSink()` /
+`piped_interpreter_sink()` treats an interpreter fed opaque code as critical:
+
+- **BLOCK:** a code interpreter (`python|py|node|deno|bun|perl|ruby|php|bash|sh|
+  zsh`) that is the SINK of a pipe (`base64 -d <<< … | python3`, `cat evil.py |
+  python3`, `curl … | python3`), OR reads a heredoc / stdin-dash
+  (`python3 <<EOF`, `python3 - <<X`, `python3 <<< "…"`, bare `echo x | python3 -`),
+  with NO script-file argument.
+- **PASS (no false positive):** `cat data.json | python3 process.py` (script arg
+  = code on disk, reviewable), `python3 -m pytest`, `python3 manage.py migrate`,
+  `echo hi | python3 -c "…"` (already covered by the inline detector),
+  `cat a | jq . | python3 tool.py`, `a || python3 fallback.py`, `ls | wc -l`.
+- Rationale: a pipe/heredoc interpreter with no script file is inherently opaque
+  — the exact way to smuggle `shutil.rmtree(…)` past the inline `-c` detector.
+  Treating the opaque FORM as critical closes the class without needing to see
+  the (unseeable) payload.
+- Both layers (`enforce/core/policy.ts` + `pre_tool_call` Python adapter).
+  Verified 13 must-block / 11 must-pass, 0 false positives. Selftests: 54 + 48
+  pass, 0 fail.
+
+> Remaining by-design tradeoff: `curl | bash` (download-execute) stays un-gated
+> — a distinct threat class where blanket gating would break routine installs.
+> The delete-gate now covers rm-syntax (1.22–), interpreter inline-code (1.23.0),
+> non-rm shell delete tools (1.23.1), and opaque piped/heredoc interpreters
+> (1.24.0).
+
+---
+
 ## [1.23.1] — 2026-08-08
 
 ### Security — hardened the destructive-command gate beyond `rm -rf`
