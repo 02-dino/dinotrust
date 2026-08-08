@@ -114,6 +114,14 @@ export const DEFAULT_POLICY: PolicyConfig = {
   criticalExecPatterns: [
     "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
     "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", "uninstall", "--hard\\b",
+    // Interpreter/tool deletes that appear UNQUOTED on the command line (so they
+    // survive stripQuoted). Interpreter INLINE-CODE deletes hidden inside
+    // `-c "..."`/`-e "..."` are caught separately by interpreterDeleteHit()
+    // (raw pre-strip scan), because stripQuoted removes the quoted payload.
+    // Bare `rmtree`/`unlink` are intentionally NOT here (they'd false-positive on
+    // `grep rmtree`); only their call/removal forms are matched.
+    "\\bos\\.remove\\b", "\\bos\\.unlink\\b", "os\\.removedirs",
+    "find\\s+.*-delete\\b", "truncate\\s+-s\\s*0\\b", "\\bunlink\\s+/",
   ],
   escalationPathGlobs: ["**/openclaw.json", "**/.env"],
   criticalPathGlobs: ["**/security_rules.md", "**/AGENTS.md"],
@@ -284,11 +292,45 @@ function rmRfScratchOnly(cmd: string): boolean {
  * edits (security_rules.md / AGENTS.md) are deliberately NOT here; see
  * criticalDocHit.
  */
+
+// Interpreter INLINE-CODE delete detector. stripQuoted() removes the payload of
+// `python3 -c "..."` / `node -e "..."` / `perl -e '...'` BEFORE the pattern scan
+// (by design: keeps `git commit -m "...rm -rf..."` inert). That same stripping
+// hides a real `python3 -c "shutil.rmtree(x)"`. So we scan the RAW (pre-strip)
+// command, but ONLY when it is an interpreter inline-code invocation (-c/-e/-eval),
+// and ONLY for delete verbs INSIDE that payload. Closes the shutil.rmtree/-c
+// bypass without re-flagging quoted mentions in ordinary commands.
+function interpreterDeleteHit(cmd: string): string | null {
+  const interp = /\b(python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)\b[^\n]*?\s-(?:c|e|eval|\-eval)\b/i;
+  if (!interp.test(cmd)) return null;
+  const deleteVerbs: Array<[RegExp, string]> = [
+    [/shutil\.rmtree/i, "shutil.rmtree"],
+    [/\bos\.remove(dirs)?\s*\(/i, "os.remove"],
+    [/\bos\.unlink\s*\(/i, "os.unlink"],
+    [/\bos\.rmdir\s*\(/i, "os.rmdir"],
+    [/\.unlink\s*\(/i, "Path.unlink"],
+    [/\brmtree\s*\(/i, "rmtree"],
+    [/fs\.rm(Sync)?\s*\(/i, "fs.rm"],
+    [/fs\.unlink(Sync)?\s*\(/i, "fs.unlink"],
+    [/fs\.rmdir(Sync)?\s*\(/i, "fs.rmdir"],
+    [/\bunlink\b/i, "unlink"],
+    [/File\.delete|FileUtils\.rm|Dir\.delete/i, "ruby File/Dir delete"],
+  ];
+  for (const [re, name] of deleteVerbs) {
+    if (re.test(cmd)) return `exec ~ interpreter-inline-delete (${name})`;
+  }
+  return null;
+}
+
 function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
   if (["write", "edit", "apply_patch"].includes(call.toolName)) {
     for (const p of call.paths) { const h = matchesGlob(p, c.escalationPathGlobs); if (h) return `write ${p} ~ ${h}`; }
   }
   if (call.toolName === "exec" && call.command) {
+    // Raw-scan for interpreter inline-code deletes FIRST (stripQuoted would eat
+    // the -c/-e payload). Closes the shutil.rmtree/-c bypass.
+    const interpHit = interpreterDeleteHit(call.command);
+    if (interpHit) return interpHit;
     // Scan with quoted literals removed so quoted-arg text can't false-positive.
     const scan = stripQuoted(call.command);
     const scratchRm = rmRfScratchOnly(call.command);

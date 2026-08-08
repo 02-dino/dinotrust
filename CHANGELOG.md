@@ -4,6 +4,37 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.23.0] — 2026-08-08
+
+### Security — closed an interpreter-delete bypass of the critical-action gate
+
+- **Interpreter inline-code deletes (`python3 -c "shutil.rmtree(...)"`, `node -e
+  "fs.rmSync(...)"`, `perl -e 'unlink ...'`, etc.) are now BLOCKED like `rm -rf`.**
+  Previously the critical-exec gate only pattern-matched `rm`-shaped commands, so
+  the same destruction expressed through an interpreter's `-c`/`-e` payload sailed
+  through un-gated. Root cause: `criticalExecPatterns` runs on the *quote-stripped*
+  command (so a quoted `git commit -m "...rm -rf..."` stays inert) — but that same
+  stripping erases an interpreter's `-c "..."` payload, hiding a real delete.
+- **New detector `interpreterDeleteHit()` / `interpreter_delete_hit()`** scans the
+  RAW (pre-strip) command, but ONLY when it is an interpreter inline-code
+  invocation (`python|py|node|deno|bun|perl|ruby|php|bash|sh|zsh … -c|-e|-eval`),
+  and ONLY for delete verbs inside the payload (`shutil.rmtree`, `os.remove/unlink/
+  rmdir`, `Path.unlink()`, `fs.rm/unlink/rmdir(Sync)`, `rmtree()`, `unlink`,
+  ruby `File.delete`/`FileUtils.rm`). No false positive on `grep rmtree`,
+  `git commit -m "remove shutil.rmtree call"`, or `python3 script.py`.
+- Also added UNQUOTED-form deletes to `criticalExecPatterns` (`os.remove(`,
+  `os.unlink(`, `os.removedirs`, `find … -delete`, `truncate -s 0`, `unlink /path`)
+  for the non-interpreter cases that survive quote-stripping.
+- Applied across all layers: OpenClaw plugin (`enforce/core/policy.ts`) and the
+  `pre_tool_call` Python adapter (`handler.py`). Selftests: 54 + 48 pass, 0 fail.
+
+> Behavioral note for agents: a gate BLOCK is a stop, not an obstacle. When a
+> critical action is blocked, emit the native approval and wait — never re-express
+> the same effect through a syntax the matcher misses. This release removes the
+> syntax loophole that made that anti-pattern possible.
+
+---
+
 ## [1.22.0] — 2026-07-24
 
 ### Changed

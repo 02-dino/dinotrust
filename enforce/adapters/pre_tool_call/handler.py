@@ -35,6 +35,14 @@ DEFAULTS = {
     "criticalExecPatterns": [
         r"rm\s+-rf", r"git\s+push.*--force", r"git\s+push.*-f\b", r"\bDROP\s+TABLE",
         r"\bTRUNCATE\b", r"mkfs", r"dd\s+if=", r"uninstall", r"--hard\b",
+        # Interpreter/tool deletes that appear UNQUOTED on the command line (so
+        # they survive strip_quoted). Interpreter INLINE-CODE deletes hidden inside
+        # `-c "..."`/`-e "..."` are caught separately by interpreter_delete_hit()
+        # (raw pre-strip scan), because strip_quoted removes the quoted payload.
+        # Bare `rmtree`/`unlink` are intentionally NOT here (they'd false-positive
+        # on `grep rmtree`); only their call/removal forms are matched.
+        r"\bos\.remove\b", r"\bos\.unlink\b", r"os\.removedirs",
+        r"find\s+.*-delete\b", r"truncate\s+-s\s*0\b", r"\bunlink\s+/",
     ],
     # Owner write/edit/exec-write here -> approval (privilege-escalation / brick risk).
     "escalationPathGlobs": ["**/openclaw.json", "**/.env"],
@@ -201,6 +209,38 @@ def strip_quoted(cmd):
             i += 1
     return "".join(out)
 
+# Interpreter INLINE-CODE delete verbs. strip_quoted() removes the payload of
+# `python3 -c "..."` / `node -e "..."` BEFORE the pattern scan (keeps quoted-arg
+# mentions inert), which also hides a real `python3 -c "shutil.rmtree(x)"`. So we
+# scan the RAW command, but ONLY on interpreter inline-code invocations and ONLY
+# for delete verbs. Closes the shutil.rmtree/-c bypass.
+_INTERP_RE = re.compile(
+    r"\b(python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)\b[^\n]*?\s-(?:c|e|eval|\-eval)\b",
+    re.I,
+)
+_INTERP_DELETE_VERBS = [
+    (re.compile(r"shutil\.rmtree", re.I), "shutil.rmtree"),
+    (re.compile(r"\bos\.remove(dirs)?\s*\(", re.I), "os.remove"),
+    (re.compile(r"\bos\.unlink\s*\(", re.I), "os.unlink"),
+    (re.compile(r"\bos\.rmdir\s*\(", re.I), "os.rmdir"),
+    (re.compile(r"\.unlink\s*\(", re.I), "Path.unlink"),
+    (re.compile(r"\brmtree\s*\(", re.I), "rmtree"),
+    (re.compile(r"fs\.rm(Sync)?\s*\(", re.I), "fs.rm"),
+    (re.compile(r"fs\.unlink(Sync)?\s*\(", re.I), "fs.unlink"),
+    (re.compile(r"fs\.rmdir(Sync)?\s*\(", re.I), "fs.rmdir"),
+    (re.compile(r"\bunlink\b", re.I), "unlink"),
+    (re.compile(r"File\.delete|FileUtils\.rm|Dir\.delete", re.I), "ruby File/Dir delete"),
+]
+
+def interpreter_delete_hit(command):
+    """Flag interpreter inline-code (-c/-e) deletes on the RAW command (pre-strip)."""
+    if not command or not _INTERP_RE.search(command):
+        return None
+    for rx, name in _INTERP_DELETE_VERBS:
+        if rx.search(command):
+            return "exec ~ interpreter-inline-delete (%s)" % name
+    return None
+
 def escalation_hit(tool, paths, command, cfg):
     """ESCALATION / irreversible -> the only owner-facing APPROVAL trigger.
     (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
@@ -212,6 +252,11 @@ def escalation_hit(tool, paths, command, cfg):
             if h:
                 return "write %s ~ %s" % (p, h)
     if tool in EXEC_TOOLS and command:
+        # Raw-scan for interpreter inline-code deletes FIRST (strip_quoted would
+        # eat the -c/-e payload). Closes the shutil.rmtree/-c bypass.
+        ih = interpreter_delete_hit(command)
+        if ih:
+            return ih
         scan = strip_quoted(command)
         for pat in cfg["criticalExecPatterns"]:
             try:
