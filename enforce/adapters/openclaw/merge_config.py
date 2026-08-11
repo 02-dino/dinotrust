@@ -62,8 +62,18 @@ def main():
     if not isinstance(entry, dict):
         entry = {}
 
-    # keys we own
-    entry["module"] = module
+    # keys we own.
+    # NOTE: OpenClaw (>=2026.7) auto-discovers extension-dir plugins from
+    # ~/.openclaw/extensions/<name>/ and its plugin-entry SCHEMA REJECTS a
+    # `module` key (validation error: 'plugins.entries.dinotrust-enforce:
+    # Invalid input' -> gateway won't load / config invalid). So we must NOT
+    # write `module` for the auto-discovered install. We only preserve an
+    # existing `module` if the user's current entry already had one (older
+    # runtimes that DID key on module); we never introduce it fresh.
+    if module and entry.get("module"):
+        entry["module"] = module  # keep pre-existing module (legacy schema)
+    else:
+        entry.pop("module", None)  # extension-dir install: no module key
     entry["enabled"] = True
     hooks = entry.get("hooks")
     if not isinstance(hooks, dict):

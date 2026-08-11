@@ -4,6 +4,14 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.25.1] — 2026-08-11
+
+**Installer config-merge fix — stop writing a `module` key the OpenClaw schema rejects.**
+### Fixed
+- **`enforce/install.sh` (OpenClaw platform) no longer produces an invalid `openclaw.json`.** The config merger (`merge_config.py`) unconditionally wrote `plugins.entries.dinotrust-enforce.module = <path>`, but OpenClaw (>=2026.7) auto-discovers extension-dir plugins from `~/.openclaw/extensions/<name>/` and its plugin-entry schema **rejects** a `module` key — producing `plugins.entries.dinotrust-enforce: Invalid input` on `config validate`, which would block the gateway from loading the (freshly-synced) enforce build. The merger now omits `module` for the auto-discovered install and only preserves a pre-existing `module` if the user's current entry already had one (legacy runtimes). All other owned keys (`enabled`, `hooks.allowConversationAccess`, `config.ownerIds/agentFilter/enforce/nonOwnerAllowedScripts/trustedIds`) are unchanged. Merge remains idempotent + backed-up.
+
+---
+
 ## [1.25.0] — 2026-08-10
 
 ### UX + Security — reply-scoped critical approval (a plain “yes” now clears additive writes)
