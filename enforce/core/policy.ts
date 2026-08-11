@@ -379,6 +379,40 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
 }
 
 /**
+ * SEVERITY of an escalationHit() reason string: "additive" vs "destructive".
+ *
+ * WHY: the owner-approval re-verify used to demand the owner's own words carry a
+ * DESTRUCTIVE verb (delete|wipe|nuke...) for EVERY critical hit. That permanently
+ * blocked a non-technical owner from approving a benign ADDITIVE write (adding a
+ * key line to .env), since there is no natural phrasing a noob would use. This
+ * classifier lets the adapter apply a REPLY-SCOPED "yes" clearance to additive
+ * hits (plain "yes") while destructive hits require a stronger, guard-PROMPTED
+ * affirmative token ("yes delete") — friction preserved, but the owner is never
+ * permanently stuck.
+ *
+ * ADDITIVE  = a config/secret file WRITE that adds/sets content (.env key-add,
+ *             append/create). Reversible-ish, low blast radius.
+ * DESTRUCTIVE = irreversible data/history loss or brick risk: rm -rf, git
+ *             force-push, --hard reset, DROP/TRUNCATE, mkfs/dd, uninstall,
+ *             interpreter inline-delete, opaque piped-interpreter sink, AND any
+ *             write to openclaw.json (crash-loop risk -> treat as destructive).
+ *
+ * Conservative by default: anything not clearly additive is destructive.
+ */
+export type EscalationSeverity = "additive" | "destructive";
+export function escalationSeverity(esc: string): EscalationSeverity {
+  const s = (esc || "").toLowerCase();
+  // openclaw.json write -> destructive tier (a broken config crash-loops the bot).
+  if (/\bopenclaw\.json\b/.test(s)) return "destructive";
+  // A plain tool/exec WRITE to an escalation path (e.g. .env) is additive.
+  // escalationHit emits these as "write <p> ~ <glob>" or "exec-write <p> ~ <glob>".
+  if (/^(write|exec-write)\s/.test(s)) return "additive";
+  // Everything else from escalationHit is a critical EXEC pattern (rm -rf, force
+  // push, DROP TABLE, interpreter-delete, piped sink...) -> destructive.
+  return "destructive";
+}
+
+/**
  * SECURITY-DOC hit -> owner gets `warn` telemetry only (reversible: git +
  * backups), never approval/block. A write (tool or exec-redirect) to a
  * criticalPathGlobs doc (security_rules.md / AGENTS.md). Used to (a) warn the

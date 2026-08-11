@@ -290,6 +290,70 @@ t("owner unaffected by TRUSTED config", { toolName: "write", params: { path: "an
 TRUSTED = [];
 t("back-compat: empty trustedIds unaffected", { toolName: "read", params: { path: "x" } }, T1, false, "nonowner-allowed-tool");
 
+// ── REPLY-SCOPED APPROVAL (noob path): additive="yes", destructive="yes delete" ──
+// Standalone mirror of handler.ts escSeverity/isAffirmative/isStrongAffirmative +
+// the reply-clearance gate. Verifies the SIGNED-reply + tier-affirmative + open-
+// pending-for-target logic without touching disk (pending presence is a param).
+function escSeverity(esc) {
+  const s = (esc || "").toLowerCase();
+  if (/\bopenclaw\.json\b/.test(s)) return "destructive";
+  if (/^(write|exec-write)\s/.test(s)) return "additive";
+  return "destructive";
+}
+function isAffirmative(text) {
+  const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
+  if (!t || t.length > 24) return false;
+  return /^(y|ya|yes|yep|yeah|yup|ok|okay|oke|sure|do it|go|go ahead|proceed|approve|approved|confirm|confirmed|lanjut|boleh|iya|ya lanjut|ya boleh)$/.test(t);
+}
+function isStrongAffirmative(text) {
+  const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
+  if (!t || t.length > 32) return false;
+  return /^(yes|ya|ok|okay|confirm|approve)\s+(delete|remove|rm|wipe|drop|truncate|reset|force[- ]?push|overwrite|erase|nuke|destroy|format|uninstall|purge|do it|really)$/.test(t);
+}
+// clears? given: escalation reason, owner reply text, is-signed-reply, open-pending-exists.
+function replyClears(esc, ownerText, isReply, openPending) {
+  if (!isReply || !openPending) return false;
+  const tier = escSeverity(esc);
+  const ok = tier === "additive"
+    ? (isAffirmative(ownerText) || isStrongAffirmative(ownerText))
+    : isStrongAffirmative(ownerText);
+  return ok;
+}
+function rc(name, esc, ownerText, isReply, openPending, expectClear) {
+  const got = replyClears(esc, ownerText, isReply, openPending);
+  const ok = got === expectClear;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> clears=${got}`);
+  ok ? pass++ : fail++;
+}
+const ADD = "write /x/.env ~ **/.env";          // additive tier
+const DESTROY = "exec ~ /rm\\s+-rf/";           // destructive tier
+const OJSON = "write /root/.openclaw/openclaw.json ~ **/openclaw.json"; // destructive (crash-loop)
+// additive: plain "yes" as a signed reply w/ open pending -> CLEARS
+rc("additive + reply + 'yes' + pending -> clears", ADD, "yes", true, true, true);
+rc("additive + reply + 'ya' + pending -> clears", ADD, "ya", true, true, true);
+rc("additive + reply + 'lanjut' + pending -> clears", ADD, "lanjut", true, true, true);
+// additive but NOT a signed reply -> blocked (jailbreak-proofing: needs signed reply)
+rc("additive + 'yes' but NOT a reply -> blocked", ADD, "yes", false, true, false);
+// additive + reply + 'yes' but NO open pending (LLM can't fabricate a ledger row) -> blocked
+rc("additive + reply + 'yes' + NO pending -> blocked", ADD, "yes", true, false, false);
+// additive + 'no' reply -> blocked
+rc("additive + reply + 'no' -> blocked", ADD, "no", true, true, false);
+// destructive: plain 'yes' is NOT enough -> blocked (friction preserved)
+rc("destructive + reply + plain 'yes' -> blocked (needs strong token)", DESTROY, "yes", true, true, false);
+// destructive: 'yes delete' (guard-prompted strong token) -> CLEARS
+rc("destructive + reply + 'yes delete' + pending -> clears", DESTROY, "yes delete", true, true, true);
+rc("destructive + reply + 'yes force-push' + pending -> clears", "exec ~ /git\\s+push.*--force/", "yes force-push", true, true, true);
+// openclaw.json = destructive tier: plain 'yes' blocked, 'yes overwrite' clears
+rc("openclaw.json + reply + plain 'yes' -> blocked (destructive tier)", OJSON, "yes", true, true, false);
+rc("openclaw.json + reply + 'yes overwrite' -> clears", OJSON, "yes overwrite", true, true, true);
+// destructive + 'yes delete' but NOT a reply -> blocked
+rc("destructive + 'yes delete' but NOT a reply -> blocked", DESTROY, "yes delete", false, true, false);
+// severity classifier sanity
+function sv(name, esc, expect) { const got = escSeverity(esc); const ok = got === expect; console.log(`${ok?"PASS":"FAIL"}  ${name}  -> ${got}`); ok?pass++:fail++; }
+sv(".env write = additive", ADD, "additive");
+sv("rm -rf = destructive", DESTROY, "destructive");
+sv("openclaw.json = destructive", OJSON, "destructive");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
 h("humanize rm -rf", "exec ~ /rm\\s+-rf/", "permanently delete");

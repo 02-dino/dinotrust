@@ -271,7 +271,7 @@ function prunePendingLedger(c: Cfg, p: string) {
   } catch { /* silent by contract */ }
 }
 
-function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName: string; sessionKey: string; sender: string; hit: string }) {
+function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName: string; sessionKey: string; sender: string; hit: string; targets?: string[]; severity?: string }) {
   try {
     const p = pendingPath(c);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -285,6 +285,9 @@ function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName:
       sessionKey: o.sessionKey,
       sender: o.sender,
       hit: o.hit,
+      // Resolved target paths (for reply-scoped clearance matching) + tier.
+      targets: (o.targets || []).slice(0, 8),
+      escTier: o.severity || "critical",
       severity: "critical",
     };
     fs.appendFileSync(p, JSON.stringify(line) + "\n");
@@ -626,6 +629,95 @@ function ownerIntentMatches(ownerText: string, event: any, esc: string): boolean
   return true;
 }
 
+// -- REPLY-SCOPED APPROVAL (noob-usable, jailbreak-proof) ----------------------
+// The path+verb re-check above permanently blocks a non-technical owner: they
+// reply "yes", which carries no path and no destructive verb. Fix: a SIGNED
+// reply to the guard's own confirmation question, whose text is an affirmative,
+// clears the pending critical action. Tiering:
+//   additive  (.env key-add, append/create) -> plain "yes" affirmative clears.
+//   destructive (rm -rf, force-push, openclaw.json...) -> requires a STRONGER,
+//     guard-PROMPTED token ("yes delete" / "yes force-push") so a reflexive "yes"
+//     cannot fat-finger an irreversible op. The guard TELLS the owner the phrase.
+// Jailbreak-proof: the owner's reply_to_id is platform-signed (the LLM cannot
+// forge WHICH message the owner replied to), AND an OPEN pending-ledger entry for
+// THIS target must exist (the LLM cannot fabricate a ledger row it didn't cause).
+
+// Severity of an escalationHit() reason string (mirror of policy.escalationSeverity).
+function escSeverity(esc: string): "additive" | "destructive" {
+  const s = (esc || "").toLowerCase();
+  if (/\bopenclaw\.json\b/.test(s)) return "destructive"; // crash-loop risk
+  if (/^(write|exec-write)\s/.test(s)) return "additive";  // .env key-add etc
+  return "destructive";                                     // rm -rf, force-push...
+}
+
+// Plain affirmative (additive tier). Small, deterministic allowlist. Anchored so
+// "no"/"not now"/"nope" never match. Multilingual affirmatives kept conservative.
+function isAffirmative(text: string): boolean {
+  const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
+  if (!t || t.length > 24) return false; // a long sentence is not a bare confirm
+  return /^(y|ya|yes|yep|yeah|yup|ok|okay|oke|sure|do it|go|go ahead|proceed|approve|approved|confirm|confirmed|lanjut|boleh|iya|ya lanjut|ya boleh)$/.test(t);
+}
+
+// Stronger affirmative for the DESTRUCTIVE tier: "yes <verb>" where <verb> is one
+// of the guard-prompted destructive verbs. The guard names the exact token in its
+// block message, so the owner never has to KNOW it -- they read it and reply it.
+function isStrongAffirmative(text: string): boolean {
+  const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
+  if (!t || t.length > 32) return false;
+  return /^(yes|ya|ok|okay|confirm|approve)\s+(delete|remove|rm|wipe|drop|truncate|reset|force[- ]?push|overwrite|erase|nuke|destroy|format|uninstall|purge|do it|really)$/.test(t);
+}
+
+// Extract the platform-signed reply_to id from the inbound event, if any. Only a
+// genuine reply (owner tapped "reply" on the guard's question) has this. The LLM
+// cannot fabricate it -- it is set by the channel, not the model.
+function replyToId(event: any, ctx: any): string | null {
+  for (const src of [event?.metadata, event, ctx]) {
+    if (!src || typeof src !== "object") continue;
+    const s: any = src;
+    for (const k of ["reply_to_id", "replyToId", "reply_to", "inReplyTo", "in_reply_to", "quotedMessageId", "quoted_message_id"]) {
+      const v = s[k];
+      if (v != null && String(v).trim()) return String(v).trim();
+    }
+  }
+  return null;
+}
+
+// Is there an OPEN pending critical intent for THIS target+session in-window?
+// (Reuses the same ledger + RESOLVE_WINDOW_MS the resume path uses.) Target match
+// is basename-or-fullpath so a re-render of the path still matches. Returns the
+// matched intentId (to write a RESOLVED marker) or null.
+function openPendingForTarget(c: Cfg, sessionKey: string, targets: string[]): string | null {
+  try {
+    const p = pendingPath(c);
+    if (!fs.existsSync(p)) return null;
+    const now = Date.now();
+    const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean);
+    const resolved = new Set<string>();
+    for (const ln of lines) { let o: any; try { o = JSON.parse(ln); } catch { continue; } if (o?.kind === "resolved" && o.intentId) resolved.add(o.intentId); }
+    const tnorm = targets.map(t => t.toLowerCase());
+    const tbase = tnorm.map(t => t.split("/").filter(Boolean).pop() || t);
+    let best: { intentId: string; tsMs: number } | null = null;
+    for (const ln of lines) {
+      let o: any; try { o = JSON.parse(ln); } catch { continue; }
+      if (o?.kind !== "pending" || !o.intentId) continue;
+      if (o.sessionKey !== sessionKey) continue;
+      if (resolved.has(o.intentId)) continue;
+      const tsMs = Date.parse(o.tsIssued);
+      if (isNaN(tsMs) || now - tsMs > RESOLVE_WINDOW_MS) continue;
+      const hay = String(o.hit || "").toLowerCase() + " " + String(o.command || "").toLowerCase() + " " + (Array.isArray(o.targets) ? o.targets.join(" ").toLowerCase() : "");
+      const match = tnorm.some(t => hay.includes(t)) || tbase.some(b => b.length >= 4 && hay.includes(b));
+      if (!match) continue;
+      if (!best || tsMs > best.tsMs) best = { intentId: o.intentId, tsMs };
+    }
+    return best ? best.intentId : null;
+  } catch { return null; }
+}
+
+// Append a RESOLVED marker for a reply-approved pending intent (best-effort).
+function markPendingResolved(c: Cfg, intentId: string) {
+  try { fs.appendFileSync(pendingPath(c), JSON.stringify({ kind: "resolved", intentId, tsResolved: new Date().toISOString(), via: "reply-scoped" }) + "\n"); } catch { /* best-effort */ }
+}
+
 // ESCALATION / irreversible detector -> the ONLY owner-facing APPROVAL trigger.
 // (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
 // target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
@@ -777,6 +869,33 @@ export default definePluginEntry({
             if (c.enforce && c.llmMediatedCritical) {
               const cmd = execCommandOf(event);
               const ownerText = currentTurnOwnerText(event, ctx);
+              const tier = escSeverity(esc);
+              const targets = resolvedTargetsOf(event);
+
+              // ── (0) REPLY-SCOPED CLEARANCE (noob path) ──────────────────────
+              // A SIGNED reply to the guard's own confirmation question, whose
+              // text is a tier-appropriate affirmative, clears an OPEN pending
+              // critical for THIS target. additive -> plain "yes"; destructive ->
+              // stronger guard-prompted token ("yes delete"). The reply_to_id is
+              // platform-signed (LLM can't forge which msg the owner replied to)
+              // and an open ledger row for this target must already exist (LLM
+              // can't fabricate a row it didn't cause).
+              const isReply = replyToId(event, ctx) != null;
+              if (isReply) {
+                const affirmativeForTier = tier === "additive"
+                  ? (isAffirmative(ownerText) || isStrongAffirmative(ownerText))
+                  : isStrongAffirmative(ownerText);
+                if (affirmativeForTier) {
+                  const pendingId = openPendingForTarget(c, sessionKey, targets);
+                  if (pendingId) {
+                    markPendingResolved(c, pendingId);
+                    audit(c, { evt: "owner-reply-approve", rule: "R-escalation-reply-scoped", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, pendingId, note: "signed reply + tier-affirmative + open pending-for-target" });
+                    return; // proceed: reply-scoped owner confirmation verified
+                  }
+                }
+              }
+
+              // ── (1) LEGACY path+verb self-approve (advanced/LLM-mediated) ────
               const markerPresent = cmd.includes(SELF_APPROVE_MARKER)
                 || ownerText.includes(SELF_APPROVE_MARKER);
               const intentOk = ownerIntentMatches(ownerText, event, esc);
@@ -784,11 +903,19 @@ export default definePluginEntry({
                 audit(c, { evt: "owner-self-approve", rule: "R-escalation-llm-approved", toolName, sessionKey, sender: sender ?? "self", hit: esc, note: "current-turn owner intent verified + marker present" });
                 return; // proceed: verified explicit owner intent this turn
               }
+
+              // ── (2) BLOCK + record pending so a later reply can clear it ─────
               const reason = specificCriticalReason(event, esc);
-              const askHint = intentOk
-                ? `If the owner explicitly asked for this THIS turn, re-issue the exact command with the token ${SELF_APPROVE_MARKER} appended as a trailing comment (e.g. "# ${SELF_APPROVE_MARKER}"). Otherwise, STOP and ask the owner to confirm.`
-                : `Do NOT self-approve. STOP your turn and ask the owner a specific yes/no question naming this exact target, then wait for their next message. A missing answer must leave this UNEXECUTED.`;
-              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, intentOk, markerPresent, unattendedAgentSelf });
+              // Tell the owner the EXACT phrase to reply. additive -> "yes";
+              // destructive -> a stronger token they just read, no need to know it.
+              const replyHint = tier === "additive"
+                ? `To approve: REPLY "yes" to this question.`
+                : `This is IRREVERSIBLE. To approve: REPLY "yes delete" to this question (a plain "yes" is NOT enough for a destructive action).`;
+              const askHint = `Do NOT self-approve. STOP your turn and ask the owner a specific yes/no question naming this exact target. ${replyHint} A missing answer must leave this UNEXECUTED.`;
+              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf });
+              // Record the pending intent (with targets+tier) so the owner's next
+              // signed affirmative reply can resolve it via openPendingForTarget.
+              recordPendingIntent(c, { fp, command: cmd, toolName, sessionKey, sender: sender ?? "self", hit: esc, targets, severity: tier });
               return {
                 block: true,
                 blockReason: `dinotrust: CRITICAL action blocked pending confirmation. ${reason} ${askHint}`,

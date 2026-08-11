@@ -4,6 +4,61 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.25.0] — 2026-08-10
+
+### UX + Security — reply-scoped critical approval (a plain “yes” now clears additive writes)
+
+Closes a real usability gap in the v2 LLM-mediated critical path. The self-approve
+re-check `ownerIntentMatches()` is a KEYWORD matcher: it required the owner’s
+current-turn message to contain the target PATH **and** a destructive verb
+(`delete|remove|wipe|drop|…`). A non-technical owner who simply replies “yes”
+satisfies neither — so **additive** critical writes (e.g. adding one key line to
+`.env`) were effectively ALWAYS blocked: the escape hatch existed but was
+unreachable by the exact user it was meant for. (`.env`’s basename `env` is 3
+chars, below the ≥4-char distinctive-name gate, so even naming the file failed.)
+
+New **reply-scoped clearance**, checked BEFORE the legacy path+verb path:
+
+- **Severity classifier** `escalationSeverity()` tags each critical hit as
+  **additive** (config/`.env` key-add, append/create) or **destructive**
+  (`rm -rf`, force-push, `openclaw.json` = crash-loop risk). Conservative:
+  anything not clearly additive → destructive.
+- **Additive tier → plain “yes” clears.** A bare affirmative
+  (`yes|ok|do it|go ahead|ya|boleh|lanjut|…`) **that is a signed reply**
+  (`reply_to_id` present) to the guard’s pending block, with an OPEN ledger entry
+  for that target in-window, clears the action. No path, no verb, no magic string.
+- **Destructive tier → friction preserved.** Still requires a STRONGER,
+  guard-PROMPTED token (`yes delete` / `yes force-push` / `yes overwrite`) as a
+  signed reply. The guard TELLS the owner the exact phrase, so they’re never
+  stuck — but a reflexive “yes” can’t fat-finger an irreversible op.
+- **Legacy path+verb self-approve** (marker + `ownerIntentMatches`) retained
+  unchanged as a fallback.
+
+Why it stays jailbreak-proof (three signed conditions, all required):
+
+- The affirmative must be a **platform-signed reply** to the guard’s OWN pending
+  block about the EXACT target — a jailbroken LLM cannot forge which message the
+  owner replied to.
+- An OPEN pending-ledger row for that target must **pre-exist** — the LLM cannot
+  fabricate a row it didn’t legitimately create at block-time.
+- Destructive ops keep the stronger-token requirement — blast radius contained.
+
+`recordPendingIntent` now persists `targets[]` + `escTier` so a later reply can
+match. Both layers (`enforce/core/policy.ts` classifier +
+`enforce/adapters/openclaw/handler.ts` decision branch). Verified: **selftest 69
+pass / 0 fail** (15 new reply-scoped cases — additive+reply+yes clears;
+additive-not-a-reply blocks; additive+no-open-pending blocks; destructive+plain
+“yes” blocks; destructive+“yes delete” clears; `openclaw.json`=destructive). tsc:
+0 non-ambient errors.
+
+> Design note: the strict path+verb self-approve was correct for *jailbreak*
+> resistance but miscalibrated for benign additive writes — it treated “append a
+> line” like “destroy the file.” Reply-scoping fixes the calibration without
+> weakening the destructive tier: friction where you want it (irreversible),
+> one-tap “yes” where you don’t (additive), and the block-tier veto unchanged.
+
+---
+
 ## [1.24.0] — 2026-08-08
 
 ### Security — closed the opaque piped/heredoc interpreter bypass

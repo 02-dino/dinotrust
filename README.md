@@ -28,7 +28,7 @@ dinotrust does this in **two layers**, with **zero infrastructure** — no proxy
 - **Verifies ownership** via platform metadata (Telegram user ID, Discord user ID, etc.) — not chat claims
 - **Blocks non-owners** from write/delete/exec operations, config access, and credential exposure
 - **Rejects injection attempts** — override claims, encoded commands, hypothetical bypasses, multi-turn escalation
-- **Enforces at the tool boundary** — on supported runtimes, a `before_tool_call` / `pre_tool_call` hook blocks a disallowed tool *before it runs* (non-owner write/exec, secret reads) and asks the owner to confirm critical/irreversible actions (`rm -rf`, force-push, config writes)
+- **Enforces at the tool boundary** — on supported runtimes, a `before_tool_call` / `pre_tool_call` hook blocks a disallowed tool *before it runs* (non-owner write/exec, secret reads) and asks the owner to confirm critical/irreversible actions (`rm -rf`, force-push, config writes). The owner clears the block by **replying to the confirmation** — a plain “yes” for an additive write (adding a key line to `.env`), or a guard-prompted token like “yes delete” for a destructive one
 - **Supports 4 runtimes with full enforcement** — OpenClaw, Hermes, Claude Code, OpenAI Codex CLI. Runtimes without a pre-tool veto are not supported (instruction-only would be compliance-dependent — you're better served by a system built for them)
 - **Customizable non-owner access** — profile presets (private-assistant, market-analyst) or fully custom: you define exactly what non-owners may do, the refusal message, and which files are off-limits
 
@@ -153,6 +153,26 @@ setup is respected), validated by re-parsing the JSON, and skipped cleanly if
 `python3` is missing (with a warning telling you to wire it manually). Result:
 dinotrust escalations reach you as an approval card instead of being silently
 denied.
+
+**Clearing a critical-action block — just reply.** When the enforce hook stops a
+critical/irreversible action, the owner approves it by **replying to the agent’s
+confirmation message**:
+
+- **Additive writes** (adding a key line to `.env`, appending to a config): a
+  plain **“yes”** (or `ok` / `go ahead` / `ya` / `boleh` / `lanjut`) as a reply
+  clears it. No path, no verb, no magic string — designed for a non-technical
+  owner.
+- **Destructive actions** (`rm -rf`, force-push, overwriting `openclaw.json`):
+  the agent prompts you for a stronger token — reply **“yes delete”** /
+  **“yes force-push”** / **“yes overwrite”**. The friction is deliberate: a
+  reflexive “yes” can’t fat-finger an irreversible op.
+
+This stays jailbreak-proof because clearance requires **all three**: your reply
+is platform-**signed** (`reply_to_id` — the LLM can’t forge which message you
+replied to), an **open pending record for that exact target** must already exist
+(the LLM can’t fabricate one), and the affirmative must match the action’s tier.
+A compromised model claiming “the owner said yes” gets nowhere without your
+signed reply. (Added in 1.25.0 — see the [CHANGELOG](CHANGELOG.md).)
 
 The optional **observability** audit layer, when enabled, adds a small
 report script + a cron/hook entry (see [Observability](#observability-audit-layer)).
