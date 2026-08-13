@@ -4,6 +4,22 @@ All notable changes to dinotrust are documented here.
 
 ---
 
+## [1.26.0] — 2026-08-13
+
+**Multi-agent owner scoping — one plugin entry, per-agent owners.**
+
+### Added
+- **`config.agentOwners` map** — resolve owners per agent from a SINGLE plugin entry. Keys are sessionKey substrings (same match style as `agentFilter`, e.g. `"agent:analyst"`); values are that agent's owner id list. A new `pickAgentOwners(sessionKey, cfg)` resolver picks the owner list for the current sessionKey, falling back to flat `ownerIds` when the map is absent/empty or no key matches. Wired at every owner-check site (`core/policy.ts` `decide()`, `adapters/openclaw/handler.ts` `before_tool_call`).
+
+### Fixed
+- **Installer no longer CLOBBERS an existing agent when installing dinotrust for a 2nd agent.** dinotrust owner config lives in the single `plugins.entries["dinotrust-enforce"]` slot (OpenClaw allows one entry per plugin id). The old `merge_config.py` overwrote flat `config.ownerIds` + `config.agentFilter`, so installing for a 2nd agent (e.g. kttal) DROPPED the 1st agent's ownership (analyst lost dinotrust). The merger now MERGES the installing agent's owners into `config.agentOwners["<agentFilter>"]`, migrating any pre-existing flat single-agent entry into the map on first multi-agent touch (so the earlier agent is preserved), clearing `agentFilter` (the map scopes now), and dropping flat `ownerIds` for one source of truth. Idempotent; owner-less re-runs never wipe a mapping.
+
+### Back-compat
+- Single-agent installs are UNCHANGED: omit `agentOwners` (or install with empty `AGENTF`) and behavior is identical to the flat `ownerIds` model. All existing selftests green + 8 new multi-agent owner-resolution cases (adapter `selftest.mjs` 77/0) + 14 new `merge_config.py` scenario tests (fresh / 2nd-agent-no-clobber / flat-migration / idempotent / owner-less-preserve / legacy-back-compat).
+
+### Ops note (deploy ordering — learned the hard way)
+- When migrating a LIVE install to the map schema: deploy the new bundle **and restart the gateway** BEFORE patching config to `agentFilter:""` + `agentOwners`. Patching config first while the OLD in-memory bundle is still running (it reads flat `ownerIds`, now empty) resolves nobody as owner and locks the agent out of its own gated tools until a restart reloads the new bundle.
+
 ## [1.25.1] — 2026-08-11
 
 **Installer config-merge fix — stop writing a `module` key the OpenClaw schema rejects.**

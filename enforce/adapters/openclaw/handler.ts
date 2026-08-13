@@ -44,6 +44,10 @@ type TrustedEntry = {
 type Cfg = {
   agentFilter: string;
   ownerIds: string[];
+  // Multi-agent owner map: sessionKey-substring key (e.g. "agent:analyst") ->
+  // that agent's owner id list. Present = resolver scopes owners per agent;
+  // absent/empty = identical to flat ownerIds (single-agent back-compat).
+  agentOwners?: Record<string, string[]>;
   ownerWarnOnly: boolean;
   criticalExecPatterns: string[];
   // Privilege-escalation / brick-risk paths: owner write here -> approval.
@@ -107,6 +111,7 @@ const DEFAULTS: Cfg = {
   // config in openclaw.json fills these.
   agentFilter: "",
   ownerIds: [],
+  agentOwners: {},
   ownerWarnOnly: true,
   // Owner is warn-only EXCEPT these critical/irreversible actions -> requireApproval
   // ("are you sure?") even for the owner. Regex strings, tested against exec command.
@@ -143,11 +148,28 @@ function cfg(raw: any): Cfg {
   for (const k of ["ownerIds", "criticalExecPatterns", "escalationPathGlobs", "criticalPathGlobs", "protectedGlobs", "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds"] as const) {
     if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
   }
+  if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
   if (c.ownerSelfApproval !== "warn" && c.ownerSelfApproval !== "gate") c.ownerSelfApproval = DEFAULTS.ownerSelfApproval;
   if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
   if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
   if (typeof c.llmMediatedCritical !== "boolean") c.llmMediatedCritical = DEFAULTS.llmMediatedCritical;
   return c;
+}
+
+// Multi-agent owner scoping. Resolve the effective owner id list for a given
+// sessionKey: substring-match sessionKey against the agentOwners map keys (same
+// style as agentFilter, e.g. "agent:analyst") and return that agent's owner
+// list. Falls back to the flat ownerIds when the map is absent/empty or nothing
+// matches -> single-agent installs behave EXACTLY as before. This is the ONE
+// place owner-scoping is decided, so every call site stays consistent.
+function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
+  const map = c.agentOwners;
+  if (map && typeof map === "object" && !Array.isArray(map)) {
+    for (const key of Object.keys(map)) {
+      if (key && sessionKey.includes(key) && Array.isArray(map[key])) return map[key];
+    }
+  }
+  return c.ownerIds;
 }
 
 function findTrusted(senderId: string, c: Cfg): TrustedEntry | null {
@@ -824,7 +846,11 @@ export default definePluginEntry({
 
         const toolName: string = String(event?.toolName ?? ctx?.toolName ?? "");
         const sender = resolveSenderId(event, ctx);
-        const isOwner = sender == null || c.ownerIds.includes(sender);
+        // Multi-agent owner scoping: resolve the effective owner list for this
+        // sessionKey via the agentOwners map (falls back to flat ownerIds when
+        // the map is absent/empty or nothing matches -> single-agent back-compat).
+        const owners = pickAgentOwners(sessionKey, c);
+        const isOwner = sender == null || owners.includes(sender);
         const protectedHit = anyProtected(event, c.protectedGlobs);
         const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c) : null;
 

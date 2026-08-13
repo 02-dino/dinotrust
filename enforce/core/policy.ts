@@ -19,6 +19,15 @@
 export type PolicyConfig = {
   /** Verified owner identity ids (platform sender ids). */
   ownerIds: string[];
+  /**
+   * Per-agent owner map for MULTI-AGENT installs. Keys are sessionKey
+   * substrings (same match style as agentFilter, e.g. "agent:analyst"),
+   * values are that agent's owner id list. When present, the resolver picks
+   * the owner list for the current sessionKey; falls back to flat `ownerIds`
+   * when the map is absent/empty or no key matches. BACK-COMPAT: omit it and
+   * behavior is identical to the single-agent flat `ownerIds` model.
+   */
+  agentOwners?: Record<string, string[]>;
   /** When true (default) owner is never hard-blocked, only warn-logged — except critical* below. */
   ownerWarnOnly: boolean;
   /** Regex strings: critical/irreversible exec commands -> requireApproval even for owner. */
@@ -110,6 +119,7 @@ export const DEFAULT_TRUSTED_TOOLS: string[] = [
 
 export const DEFAULT_POLICY: PolicyConfig = {
   ownerIds: [],
+  agentOwners: {},
   ownerWarnOnly: true,
   criticalExecPatterns: [
     "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
@@ -164,7 +174,25 @@ export function normalizeConfig(raw: Partial<PolicyConfig> | undefined | null): 
     "mutatingTools", "nonOwnerAllowedTools", "nonOwnerAllowedScripts", "trustedIds",
   ];
   for (const k of arrKeys) if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULT_POLICY as any)[k];
+  if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
   return c;
+}
+
+/**
+ * Resolve the effective owner id list for a given sessionKey.
+ * Multi-agent: substring-match sessionKey against `agentOwners` keys (same
+ * style as agentFilter) and return that agent's owner list. Falls back to the
+ * flat `ownerIds` when the map is absent/empty or nothing matches. This is the
+ * ONE place owner-scoping is decided, so every call site stays consistent.
+ */
+export function pickAgentOwners(sessionKey: string, c: PolicyConfig): string[] {
+  const map = c.agentOwners;
+  if (map && typeof map === "object") {
+    for (const key of Object.keys(map)) {
+      if (key && sessionKey.includes(key) && Array.isArray(map[key])) return map[key];
+    }
+  }
+  return c.ownerIds;
 }
 
 /** Minimal glob -> RegExp. ** = any incl '/', * = any except '/'. */
@@ -489,9 +517,13 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
  * THE decision. Pure function: (call, senderId, config) -> Verdict.
  * senderId === null  => internal/self turn (agent-operated-by-owner) => treated as owner.
  */
-export function decide(call: ToolCall, senderId: string | null, config: PolicyConfig): Verdict {
+export function decide(call: ToolCall, senderId: string | null, config: PolicyConfig, sessionKey: string = ""): Verdict {
   const c = config;
-  const isOwner = senderId == null || c.ownerIds.includes(senderId);
+  // Multi-agent owner scoping: resolve the effective owner list for this
+  // sessionKey (agentOwners map -> flat ownerIds fallback). sessionKey="" +
+  // no map = identical to the single-agent flat ownerIds path (back-compat).
+  const owners = pickAgentOwners(sessionKey, c);
+  const isOwner = senderId == null || owners.includes(senderId);
   const protectedHit = anyProtected(call, c.protectedGlobs);
 
   // ── OWNER / agent-operated-by-owner ──

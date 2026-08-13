@@ -286,6 +286,35 @@ t("trusted with no scopePathGlobs: any path allowed if tool allowed", { toolName
 t("non-trusted stranger still hits normal non-owner path", { toolName: "write", params: { path: "anywhere.txt" } }, STRANGER, true, "nonowner-mutate");
 t("owner unaffected by TRUSTED config", { toolName: "write", params: { path: "anything.txt" } }, OWNER, false, "owner-pass");
 
+// -- MULTI-AGENT owner scoping (agentOwners map) --
+// Mirror of pickAgentOwners: resolve effective owner list for a sessionKey via
+// the agentOwners map, falling back to the flat owner list when no key matches.
+function pickAgentOwners(sessionKey, agentOwners, flatOwners) {
+  if (agentOwners && typeof agentOwners === "object" && !Array.isArray(agentOwners)) {
+    for (const key of Object.keys(agentOwners)) {
+      if (key && sessionKey.includes(key) && Array.isArray(agentOwners[key])) return agentOwners[key];
+    }
+  }
+  return flatOwners;
+}
+// Standalone owner-resolution assertion (isolates the map logic from decide()).
+function ta(name, sessionKey, sender, agentOwners, flatOwners, expectOwner) {
+  const owners = pickAgentOwners(sessionKey, agentOwners, flatOwners);
+  const isOwner = sender == null || owners.includes(sender);
+  const ok = isOwner === expectOwner;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> isOwner=${isOwner} owners=${JSON.stringify(owners)}`);
+  ok ? pass++ : fail++;
+}
+const AO = { "agent:analyst": ["1083618205"], "agent:kttal": ["6285709780804"] };
+ta("multiagent: analyst-sender=dino -> owner", "agent:analyst:telegram:direct:1083618205", "1083618205", AO, [], true);
+ta("multiagent: analyst-sender=niki -> non-owner", "agent:analyst:telegram:direct:6285709780804", "6285709780804", AO, [], false);
+ta("multiagent: kttal-sender=niki -> owner", "agent:kttal:telegram:direct:6285709780804", "6285709780804", AO, [], true);
+ta("multiagent: kttal-sender=dino -> non-owner", "agent:kttal:telegram:direct:1083618205", "1083618205", AO, [], false);
+ta("multiagent: no-map -> flat ownerIds (owner)", "agent:analyst:telegram:direct:111111", "111111", {}, ["111111"], true);
+ta("multiagent: no-map -> flat ownerIds (non-owner)", "agent:analyst:telegram:direct:999", "999", {}, ["111111"], false);
+ta("multiagent: map present but no key match -> flat fallback", "agent:unknown:telegram:direct:111111", "111111", AO, ["111111"], true);
+ta("multiagent: agent-operated-by-owner (no sender) -> owner regardless of map", "agent:analyst", null, AO, [], true);
+
 // back-compat: empty TRUSTED -> byte-identical to pre-trusted-tier behavior
 TRUSTED = [];
 t("back-compat: empty trustedIds unaffected", { toolName: "read", params: { path: "x" } }, T1, false, "nonowner-allowed-tool");

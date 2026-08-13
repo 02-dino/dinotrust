@@ -84,13 +84,54 @@ def main():
     cfg = entry.get("config")
     if not isinstance(cfg, dict):
         cfg = {}
-    if owners:
-        cfg["ownerIds"] = owners
-    elif "ownerIds" not in cfg:
-        cfg["ownerIds"] = []
-    cfg["nonOwnerAllowedScripts"] = scripts
+
+    # ---- Multi-agent owner scoping (agentOwners map) ----
+    # dinotrust owner config lives in a SINGLE plugin entry (one entry per
+    # plugin id). The OLD behavior overwrote flat cfg.ownerIds + cfg.agentFilter,
+    # so installing for a 2nd agent CLOBBERED the 1st (analyst loses dinotrust,
+    # the new agent gets it). Fix: MERGE the installing agent's owners into
+    # cfg.agentOwners["<agentFilter>"] keyed by the agent-scope substring (AGENTF,
+    # e.g. "agent:analyst"), so N agents coexist in one entry.
+    #
+    # AGENTF present (the normal agent-scoped install):
+    #   - migrate any pre-existing flat (ownerIds + agentFilter) into the map on
+    #     first multi-agent touch so the earlier agent is NOT dropped;
+    #   - upsert this agent's owners at cfg.agentOwners[AGENTF];
+    #   - clear cfg.agentFilter ("") — the map does the scoping now — and drop the
+    #     flat cfg.ownerIds so there is ONE source of truth.
+    # AGENTF empty (legacy / all-agents install): keep the old flat behavior
+    #   verbatim (full back-compat; single-agent installs are unchanged).
     if agentf:
-        cfg["agentFilter"] = agentf
+        agent_owners = cfg.get("agentOwners")
+        if not isinstance(agent_owners, dict):
+            agent_owners = {}
+        # Migrate a pre-existing flat single-agent entry into the map so the
+        # earlier install is preserved, not clobbered.
+        prev_flat_owners = cfg.get("ownerIds")
+        prev_flat_filter = cfg.get("agentFilter")
+        if (
+            isinstance(prev_flat_owners, list) and prev_flat_owners
+            and isinstance(prev_flat_filter, str) and prev_flat_filter
+            and prev_flat_filter not in agent_owners
+        ):
+            agent_owners[prev_flat_filter] = prev_flat_owners
+        # Upsert THIS agent's owners (only when we were actually given some;
+        # an owner-less re-run must not wipe an existing mapping).
+        if owners:
+            agent_owners[agentf] = owners
+        elif agentf not in agent_owners:
+            agent_owners[agentf] = []
+        cfg["agentOwners"] = agent_owners
+        # Map is now the single source of truth: neutralize the flat keys.
+        cfg["agentFilter"] = ""
+        cfg.pop("ownerIds", None)
+    else:
+        # Legacy flat path (no agent scope): unchanged behavior.
+        if owners:
+            cfg["ownerIds"] = owners
+        elif "ownerIds" not in cfg:
+            cfg["ownerIds"] = []
+    cfg["nonOwnerAllowedScripts"] = scripts
     # don't silently disable an already-enabled enforcement on upgrade
     prev = cfg.get("enforce")
     if prev is True and not enforce and not shadow_ok:
