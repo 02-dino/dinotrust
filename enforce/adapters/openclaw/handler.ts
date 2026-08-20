@@ -832,7 +832,9 @@ export default definePluginEntry({
   name: "dinotrust enforce",
   description: "Code-level enforcement floor: owner warn-only, non-owner strict with allowlist. Beneath the dinotrust AGENTS.md instruction layer.",
   register(api: any) {
-    const c = cfg(api?.pluginConfig ?? api?.config);
+    // OpenClaw passes plugins.entries[id] as pluginConfig ({ enabled, config, hooks });
+    // unwrap .config like dinomem-recall-gate — flat merge without this leaves agentOwners/ownerIds empty.
+    const c = cfg(api?.pluginConfig?.config ?? api?.pluginConfig ?? api?.config);
     audit(c, { evt: "register", enforce: c.enforce, ownerWarnOnly: c.ownerWarnOnly, agentFilter: c.agentFilter, hasPluginConfig: !!api?.pluginConfig });
     const priorDegraded = readDegradedMarker(c);
     if (priorDegraded) {
