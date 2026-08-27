@@ -131,7 +131,15 @@ def main():
             cfg["ownerIds"] = owners
         elif "ownerIds" not in cfg:
             cfg["ownerIds"] = []
-    cfg["nonOwnerAllowedScripts"] = scripts
+    # Merge installer-supplied scripts with existing user entries (union, deduped).
+    # Overwrite was wrong: nonOwnerAllowedScripts is user-authored, not product-shipped.
+    # A reinstall without --allow-scripts must not silently wipe the operator's list.
+    prev_scripts = cfg.get("nonOwnerAllowedScripts")
+    if isinstance(prev_scripts, list):
+        merged = list(dict.fromkeys(prev_scripts + scripts))  # stable, deduped
+    else:
+        merged = scripts
+    cfg["nonOwnerAllowedScripts"] = merged
     # don't silently disable an already-enabled enforcement on upgrade
     prev = cfg.get("enforce")
     if prev is True and not enforce and not shadow_ok:
