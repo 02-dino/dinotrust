@@ -123,7 +123,15 @@ export const DEFAULT_POLICY: PolicyConfig = {
   ownerWarnOnly: true,
   criticalExecPatterns: [
     "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
-    "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", "uninstall", "--hard\\b",
+    "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=",
+    // INVOCATION-ANCHORED uninstall/remove: matches only when the teardown verb
+    // is the program being RUN (start-of-cmd / after ;|& / pkg-mgr subcommand /
+    // bash uninstall.sh / ./uninstall.sh), NOT when "uninstall" merely appears as
+    // an ARGUMENT to a read tool (grep/sed/awk/cat/bash -n .../uninstall.sh). Fixes
+    // a chronic false-positive: inspecting a file named uninstall.sh tripped the
+    // gate. A real `apt remove` / `bash uninstall.sh` still blocks. (34/34 matrix.)
+    "(^|[|;&]|&&|\\|\\|)\\s*(sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*([a-z0-9_./-]*/)?(apt(-get)?\\s+(remove|purge|autoremove)\\b|dpkg\\s+(-r\\b|-P\\b|--remove\\b|--purge\\b)|(npm|pnpm|yarn|pip[0-9.]*|gem|brew|pacman|snap|cargo)\\s+(uninstall|remove|rm|-R)\\b|make\\s+uninstall\\b|uninstall\\b)|(^|\\s)(bash|sh|source|\\.)\\s+([^\\s;|&]*/)?uninstall(\\.sh)?(\\s|$)|(^|\\s)\\./([^\\s;|&]*/)?uninstall\\.sh(\\s|$)",
+    "--hard\\b",
     // Interpreter/tool deletes that appear UNQUOTED on the command line (so they
     // survive stripQuoted). Interpreter INLINE-CODE deletes hidden inside
     // `-c "..."`/`-e "..."` are caught separately by interpreterDeleteHit()
