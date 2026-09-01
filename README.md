@@ -172,7 +172,7 @@ is platform-**signed** (`reply_to_id` — the LLM can’t forge which message yo
 replied to), an **open pending record for that exact target** must already exist
 (the LLM can’t fabricate one), and the affirmative must match the action’s tier.
 A compromised model claiming “the owner said yes” gets nowhere without your
-signed reply. (Added in 1.25.0 — see the [CHANGELOG](CHANGELOG.md).)
+signed reply. (Added in 1.25.0 — see the [Releases](https://github.com/02-dino/dinotrust/releases).)
 
 The optional **observability** audit layer, when enabled, adds a small
 report script + a cron/hook entry (see [Observability](#observability-audit-layer)).
@@ -185,7 +185,7 @@ dinotrust/
 ├── security_rules.md the instruction-layer template (filled by installer)
 ├── enforce/          the code-level pre_tool_call layer + per-runtime adapters
 ├── observability/    optional independent audit layer
-├── README.md · CHANGELOG.md · VERSION · LICENSE
+├── README.md · LICENSE
 ```
 
 The instruction layer edits only the marked block in your config file —

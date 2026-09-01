@@ -18,11 +18,12 @@ echo ""
 
 cd "$REPO_DIR"
 
-PREV_VERSION="$(cat VERSION 2>/dev/null || echo unknown)"
+# Version = the git tag (single source of truth; we ship via GitHub Releases).
+PREV_VERSION="$(git describe --tags --always 2>/dev/null | sed 's/^[vV]//' || echo unknown)"
 echo -e "${CYAN}→${NC} Current: v${PREV_VERSION}"
 echo -e "${CYAN}→${NC} Pulling latest..."
-git pull
-NEW_VERSION="$(cat VERSION 2>/dev/null || echo unknown)"
+git pull --tags
+NEW_VERSION="$(git describe --tags --always 2>/dev/null | sed 's/^[vV]//' || echo unknown)"
 
 if [[ "$PREV_VERSION" == "$NEW_VERSION" ]]; then
   echo -e "${GREEN}✓${NC} Already on the latest (v${NEW_VERSION}). Re-running installer to reconcile state."

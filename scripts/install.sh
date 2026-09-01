@@ -8,8 +8,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 RULES_TEMPLATE="$REPO_DIR/security_rules.md"
-VERSION_FILE="$REPO_DIR/VERSION"
-VERSION="$(cat "$VERSION_FILE" 2>/dev/null || echo "unknown")"
+# Version = the git tag (single source of truth, since we ship via GitHub
+# Releases now). No manual VERSION file to drift/forget-to-bump. Falls back to
+# nearest tag + commits-ahead (git describe), then "unknown" if repo is tagless.
+VERSION="$(git -C "$REPO_DIR" describe --tags --always 2>/dev/null | sed 's/^[vV]//' || echo "unknown")"
+[ -n "$VERSION" ] || VERSION="unknown"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
