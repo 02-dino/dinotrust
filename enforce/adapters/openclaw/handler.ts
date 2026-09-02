@@ -38,7 +38,12 @@ type TrustedEntry = {
   id: string;
   allowedTools?: string[];
   allowedScripts?: string[];
+  // Path-confinement for MUTATING tools only (write/edit/apply_patch); read/
+  // memory/web stay unscoped for cross-agent collaboration. Mirror of policy.ts.
   scopePathGlobs?: string[];
+  // Agent-confinement: entry applies only when sessionKey matches one of these
+  // keys (e.g. "agent:ads"); unset -> every agent. Mirror of policy.ts.
+  scopeAgents?: string[];
 };
 
 type Cfg = {
@@ -172,8 +177,17 @@ function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
   return c.ownerIds;
 }
 
-function findTrusted(senderId: string, c: Cfg): TrustedEntry | null {
-  for (const t of c.trustedIds) if (t.id === senderId) return t;
+// Match senderId AND (if set) scopeAgents against the current sessionKey, so a
+// trusted karyawan on a shared gateway is trusted only inside their own agent.
+function findTrusted(senderId: string, c: Cfg, sessionKey: string): TrustedEntry | null {
+  for (const t of c.trustedIds) {
+    if (t.id !== senderId) continue;
+    if (t.scopeAgents && t.scopeAgents.length > 0) {
+      const inAgent = t.scopeAgents.some((k) => k && sessionKey.includes(k));
+      if (!inAgent) continue; // not in a scoped agent -> fall through to non-owner
+    }
+    return t;
+  }
   return null;
 }
 
@@ -854,7 +868,7 @@ export default definePluginEntry({
         const owners = pickAgentOwners(sessionKey, c);
         const isOwner = sender == null || owners.includes(sender);
         const protectedHit = anyProtected(event, c.protectedGlobs);
-        const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c) : null;
+        const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c, sessionKey) : null;
 
         // ===== OWNER / agent-operated-by-owner: ALL ACCESS =====
         // Only friction is approval on genuinely critical/irreversible or
@@ -994,8 +1008,12 @@ export default definePluginEntry({
             if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted blocked (protected resource)` };
             return;
           }
-          // Path confinement, if this entry sets it.
-          if (trusted.scopePathGlobs && trusted.scopePathGlobs.length > 0) {
+          // Path confinement, if this entry sets it. READ/WRITE ASYMMETRY:
+          // only MUTATING tools (write/edit/apply_patch) are confined to the
+          // workspace; read/memory/web carry paths but stay UNSCOPED so cross-
+          // agent read collaboration works. exec is gated by allowedScripts.
+          if (trusted.scopePathGlobs && trusted.scopePathGlobs.length > 0
+              && c.mutatingTools.includes(toolName) && toolName !== "exec") {
             const tp = targetPaths(event);
             if (tp.length > 0) {
               const outOfScope = tp.some((p) => !matchesProtected(p, trusted.scopePathGlobs!));

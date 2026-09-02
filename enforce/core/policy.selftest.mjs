@@ -73,10 +73,12 @@ const CFG_TRUSTED = normalizeConfig({
     { id: "555555", scopePathGlobs: ["workspace-bob/**"] },
     { id: "666666", allowedTools: ["read", "write"], allowedScripts: ["exchange_data"] },
     { id: "777777", allowedTools: ["read", "write", "exec"], allowedScripts: ["exchange_data"] },
+    // scopeAgents: trusted only inside agent:ads on a shared gateway
+    { id: "888888", scopeAgents: ["agent:ads"], scopePathGlobs: ["workspace-ads/**"] },
   ],
 });
-function tt(name, c, sender, expect) {
-  const v = decide(c, sender, CFG_TRUSTED);
+function tt(name, c, sender, expect, sessionKey = "") {
+  const v = decide(c, sender, CFG_TRUSTED, sessionKey);
   const ok = v.action === expect;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
   ok ? pass++ : fail++;
@@ -93,6 +95,14 @@ tt("trusted exec: granted but script not allowlisted -> blocked", call("exec", {
 tt("trusted with no scopePathGlobs: any path allowed if tool allowed", call("write", { paths: ["/etc/random/path.txt"] }), "777777", "allow");
 tt("non-trusted stranger still hits normal non-owner path", call("write", { paths: ["anywhere.txt"] }), "999999", "block");
 tt("owner unaffected by trustedIds config", call("write", { paths: ["anything.txt"] }), "111111", "allow");
+// ── read/write asymmetry: scopePathGlobs confines MUTATING tools only ──
+tt("trusted scope: READ outside scope path ALLOWED (cross-agent collab)", call("read", { paths: ["workspace-alice/shared.db"] }), "555555", "allow");
+tt("trusted scope: memory_get outside scope ALLOWED", call("memory_get", { paths: ["workspace-alice/x.md"] }), "555555", "allow");
+tt("trusted scope: EDIT outside scope still BLOCKED (mutating)", call("edit", { paths: ["workspace-alice/x.md"] }), "555555", "block");
+// ── scopeAgents: trusted only inside its agent lane ──
+tt("scopeAgents: in-agent write allowed", call("write", { paths: ["workspace-ads/x.md"] }), "888888", "allow", "agent:ads:telegram:direct:1");
+tt("scopeAgents: WRONG agent -> falls through to non-owner block", call("write", { paths: ["workspace-ads/x.md"] }), "888888", "block", "agent:sosmed:telegram:direct:1");
+tt("scopeAgents: in-agent read cross-workspace allowed", call("read", { paths: ["workspace-sosmed/shared.db"] }), "888888", "allow", "agent:ads:telegram:direct:1");
 
 // back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 const v = decide(call("read"), "555555", CFG);

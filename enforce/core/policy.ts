@@ -107,8 +107,24 @@ export type TrustedEntry = {
    * is allowedScripts, same mechanism as non-owner, to avoid unreliable
    * path-extraction from arbitrary shell commands.
    * Omitted -> no path restriction (pure tool-allowlist trusted grant).
+   *
+   * READ/WRITE ASYMMETRY: this path-confinement fires ONLY for MUTATING tools
+   * (write/edit/apply_patch — see mutatingTools). read/memory_search/web are
+   * NEVER path-blocked, so a scoped karyawan can still READ shared/other-agent
+   * data for cross-agent collaboration while their WRITES stay in their own
+   * workspace. (exec is gated by allowedScripts, not path, as before.)
    */
   scopePathGlobs?: string[];
+  /**
+   * Optional agent confinement ("trusted ONLY inside these agents"). On a
+   * SHARED gateway that enforces many agents under one dinotrust instance
+   * (agentFilter=""), a bare sender-id match would make this karyawan trusted
+   * in EVERY agent on that gateway. When scopeAgents is set, the entry applies
+   * only when the sessionKey matches one of these keys (same substring match as
+   * agentOwners keys, e.g. "agent:ads"); outside them the sender falls through
+   * to the strict non-owner path. Omitted -> applies on every agent (back-compat).
+   */
+  scopeAgents?: string[];
 };
 
 /** Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools. */
@@ -479,9 +495,18 @@ export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolea
   return false;
 }
 
-/** Finds a config.trustedIds entry matching senderId, or null. */
-function findTrusted(senderId: string, c: PolicyConfig): TrustedEntry | null {
-  for (const t of c.trustedIds) if (t.id === senderId) return t;
+/** Finds a config.trustedIds entry matching senderId AND (if the entry sets
+ * scopeAgents) the current agent's sessionKey, or null. sessionKey substring
+ * match mirrors pickAgentOwners so "agent:ads" scopes to that agent lane. */
+function findTrusted(senderId: string, c: PolicyConfig, sessionKey: string): TrustedEntry | null {
+  for (const t of c.trustedIds) {
+    if (t.id !== senderId) continue;
+    if (t.scopeAgents && t.scopeAgents.length > 0) {
+      const inAgent = t.scopeAgents.some((k) => k && sessionKey.includes(k));
+      if (!inAgent) continue; // trusted, but not in one of its scoped agents -> fall through to non-owner
+    }
+    return t;
+  }
   return null;
 }
 
@@ -495,9 +520,14 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
   const protectedHit = anyProtected(call, c.protectedGlobs);
   if (protectedHit) return { action: "block", reason: `non-owner protected resource: ${protectedHit}` };
 
-  // Path confinement, if this entry sets it: any call carrying a path must
-  // match, or it's out of scope. Tools with no path are unaffected.
-  if (entry.scopePathGlobs && entry.scopePathGlobs.length > 0 && call.paths.length > 0) {
+  // Path confinement, if this entry sets it. READ/WRITE ASYMMETRY: only the
+  // MUTATING tools (write/edit/apply_patch) are confined to the workspace;
+  // read/memory_search/web carry paths but stay UNSCOPED so cross-agent
+  // collaboration (read shared / other-agent data) still works. exec is gated
+  // by allowedScripts below, not by this path check.
+  if (entry.scopePathGlobs && entry.scopePathGlobs.length > 0
+      && call.paths.length > 0 && c.mutatingTools.includes(call.toolName)
+      && call.toolName !== "exec") {
     const inScope = call.paths.every((p) => matchesGlob(p, entry.scopePathGlobs!));
     if (!inScope) return { action: "block", reason: `trusted: ${entry.id} path outside scope (${entry.scopePathGlobs!.join(", ")})` };
   }
@@ -561,7 +591,7 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
 
   // ── TRUSTED / delegated (above non-owner, below owner) ──
   if (senderId != null && c.trustedIds.length > 0) {
-    const entry = findTrusted(senderId, c);
+    const entry = findTrusted(senderId, c, sessionKey);
     if (entry) return decideTrusted(call, entry, c);
   }
 
