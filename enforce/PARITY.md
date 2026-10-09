@@ -5,6 +5,31 @@ resolve sibling imports at hook-load time, so it INLINES the policy engine.
 Any change to the enforcement decision MUST land in BOTH files, and BOTH
 selftests must pass (enforce/core/policy.selftest.mjs + adapters/openclaw/selftest.mjs).
 
+## FOUR surfaces, not two (a pattern lives in all of them)
+
+Two-file parity is NOT enough for `criticalExecPatterns`. The same pattern list
+is duplicated across FOUR places, and a change that lands in fewer than four
+leaves the gate misfiring while the repo looks fixed:
+
+1. `enforce/core/policy.ts`                        -> DEFAULT_POLICY
+2. `enforce/adapters/openclaw/handler.ts`           -> inlined DEFAULT_POLICY
+3. `enforce/adapters/openclaw/openclaw.plugin.json` -> configSchema default
+4. `enforce/adapters/openclaw/selftest.mjs`         -> CRIT_EXEC fixture
+
+Measured failure (2026-10-09): the invocation-anchored teardown-verb pattern was
+landed in (1) ONLY. Surfaces (2)(3)(4) kept the loose one-word string, so
+`git status` in any repo containing a teardown script stayed fail-closed for
+weeks while `policy.ts` read as already fixed. A plain-substring truncate
+pattern likewise blocked an unrelated `docker run --auto-trunc*` CLI flag. Both
+expired as unconfirmed approval cards -> the commands never ran at all.
+
+Rule: when touching `criticalExecPatterns`, grep ALL FOUR for the old string and
+confirm zero remain. A pattern must be anchored to the ACTION (SQL statement
+shape; verb in invocation position after `^`/`;`/`&&`, or a package-manager
+subcommand), never a bare substring -- a read-only command that merely MENTIONS
+a destructive word must pass, or the gate fails closed on safe work and trains
+the operator to ignore it.
+
 ## Shared contract (keep byte-parallel)
 - TrustedEntry fields: id, allowedTools, allowedScripts, scopePathGlobs, scopeAgents
 - findTrusted(senderId, cfg, sessionKey): matches id AND (if set) scopeAgents
@@ -14,6 +39,7 @@ selftests must pass (enforce/core/policy.selftest.mjs + adapters/openclaw/selfte
   paths but are NOT path-scoped -> cross-agent read collaboration stays open.
   exec is gated by allowedScripts, not path.
 - protectedGlobs / escalation / criticalDoc ALWAYS win over a trusted grant.
+- criticalExecPatterns: action-anchored, mirrored across all FOUR surfaces above.
 
 When you change any of the above here, mirror it in the other file and re-run
 both selftests before commit.
