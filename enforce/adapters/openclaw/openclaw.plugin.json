@@ -30,7 +30,7 @@
       "criticalExecPatterns": {
         "type": "array",
         "items": { "type": "string" },
-        "default": ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", "uninstall", "--hard\\b"],
+        "default": ["rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "\\bTRUNCATE\\s+TABLE\\b", "(?<![-\\w])TRUNCATE\\s+(ONLY\\s+)?\\S+\\s*;", "mkfs", "dd\\s+if=", "(^|[|;&]|&&|\\|\\|)\\s*(sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*([a-z0-9_./-]*/)?(apt(-get)?\\s+(remove|purge|autoremove)\\b|dpkg\\s+(-r\\b|-P\\b|--remove\\b|--purge\\b)|(npm|pnpm|yarn|pip[0-9.]*|gem|brew|pacman|snap|cargo)\\s+(uninstall|remove|rm|-R)\\b|make\\s+uninstall\\b|uninstall\\b)|(^|\\s)(bash|sh|source|\\.)\\s+([^\\s;|&]*/)?uninstall(\\.sh)?(\\s|$)|(^|\\s)\\./([^\\s;|&]*/)?uninstall\\.sh(\\s|$)", "--hard\\b"],
         "description": "Regex patterns for critical/irreversible exec commands. Owner gets requireApproval (are-you-sure) instead of silent pass; non-owner is already blocked from exec anyway."
       },
       "escalationPathGlobs": {

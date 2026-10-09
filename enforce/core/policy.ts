@@ -139,7 +139,11 @@ export const DEFAULT_POLICY: PolicyConfig = {
   ownerWarnOnly: true,
   criticalExecPatterns: [
     "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
-    "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=",
+    // SQL-ANCHORED truncate: the destructive action is `TRUNCATE TABLE x` or the
+    // bare `TRUNCATE x;` statement form. A plain \bTRUNCATE\b also matched harmless
+    // CLI flags (TEI's --auto-truncate), fail-closing an entire unrelated command.
+    "\\bTRUNCATE\\s+TABLE\\b", "(?<![-\\w])TRUNCATE\\s+(ONLY\\s+)?\\S+\\s*;",
+    "mkfs", "dd\\s+if=",
     // INVOCATION-ANCHORED uninstall/remove: matches only when the teardown verb
     // is the program being RUN (start-of-cmd / after ;|& / pkg-mgr subcommand /
     // bash uninstall.sh / ./uninstall.sh), NOT when "uninstall" merely appears as

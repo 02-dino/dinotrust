@@ -122,7 +122,18 @@ const DEFAULTS: Cfg = {
   // ("are you sure?") even for the owner. Regex strings, tested against exec command.
   criticalExecPatterns: [
     "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
-    "\\bTRUNCATE\\b", "mkfs", "dd\\s+if=", ":\\(\\)\\s*\\{", "uninstall", "--hard\\b",
+    // SQL-ANCHORED truncate: the destructive action is `TRUNCATE TABLE x` or the
+    // bare `TRUNCATE x;` statement form. A plain \bTRUNCATE\b also matched harmless
+    // CLI flags (TEI's --auto-truncate), fail-closing an entire unrelated command.
+    "\\bTRUNCATE\\s+TABLE\\b", "(?<![-\\w])TRUNCATE\\s+(ONLY\\s+)?\\S+\\s*;",
+    "mkfs", "dd\\s+if=", ":\\(\\)\\s*\\{",
+    // INVOCATION-ANCHORED uninstall/remove: matches only when the teardown verb is
+    // the program being RUN (start-of-cmd / after ;|&& / pkg-mgr subcommand / bash
+    // uninstall.sh / ./uninstall.sh), NOT when "uninstall" merely appears as an
+    // ARGUMENT to a read tool (git/grep/sed/cat/ls). Fixes a chronic false positive:
+    // inspecting a repo that merely CONTAINS uninstall.sh tripped the gate.
+    "(^|[|;&]|&&|\\|\\|)\\s*(sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*([a-z0-9_./-]*/)?(apt(-get)?\\s+(remove|purge|autoremove)\\b|dpkg\\s+(-r\\b|-P\\b|--remove\\b|--purge\\b)|(npm|pnpm|yarn|pip[0-9.]*|gem|brew|pacman|snap|cargo)\\s+(uninstall|remove|rm|-R)\\b|make\\s+uninstall\\b|uninstall\\b)|(^|\\s)(bash|sh|source|\\.)\\s+([^\\s;|&]*/)?uninstall(\\.sh)?(\\s|$)|(^|\\s)\\./([^\\s;|&]*/)?uninstall\\.sh(\\s|$)",
+    "--hard\\b",
   ],
   // Owner write/edit/exec-write to these paths -> requireApproval: genuine
   // privilege-escalation / brick risk (runtime+plugin config, secrets).
