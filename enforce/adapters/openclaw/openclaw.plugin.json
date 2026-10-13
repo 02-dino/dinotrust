@@ -63,6 +63,11 @@
         "default": ["exchange_data", "semantic_search", "semantic_search_cli", "defillama_search", "arkham_search", "consensus_search", "news_consensus", "docs_search", "session_search", "graph_search"],
         "description": "Non-owner exec allowlist: exec permitted ONLY when it runs one of these read-only tool scripts under tools/. Any other non-owner exec is blocked."
       },
+      "auditAllowedNonOwnerTools": {
+        "type": "boolean",
+        "default": false,
+        "description": "OBSERVABILITY, not enforcement. An ALLOWED non-owner tool returns before any audit() call, so a tool that is ITSELF a security boundary (e.g. a scoped peer-memory read handing a stranger their own record) leaves ZERO trace -- \"did a non-owner read their rep, and when\" is unanswerable from logs. Turning this on emits evt:allow rule:R-nonowner-tool for those calls. The DECISION is identical either way; off by default because this is the hot path."
+      },
       "logFile": {
         "type": "string",
         "default": "",

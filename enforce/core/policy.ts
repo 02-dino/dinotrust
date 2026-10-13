@@ -58,6 +58,19 @@ export type PolicyConfig = {
   /** Non-owner exec allowlist: exec permitted only if it runs one of these read-only scripts. */
   nonOwnerAllowedScripts: string[];
   /**
+   * OBSERVABILITY, not enforcement. An ALLOWED non-owner tool short-circuits
+   * before any audit sink is reached, so a tool that is ITSELF a security
+   * boundary (e.g. a scoped peer-memory read that hands a stranger their own
+   * record) leaves ZERO trace: "did a non-owner read their rep, and when" is
+   * unanswerable from logs. Measured on a live box: the only allow events in the
+   * whole log came from the exec-script rule -- allowed TOOLS were invisible by
+   * construction. OFF by default: one build is typically shared by several agent
+   * configs and this is the hot path, so opting in per-config keeps every other
+   * agent byte-identical in behaviour. Adapters read this flag; the decision
+   * itself is UNCHANGED either way.
+   */
+  auditAllowedNonOwnerTools: boolean;
+  /**
    * Trusted/delegated ids: a per-individual tier ABOVE non-owner, BELOW owner.
    * Empty by default -> zero behavior change for every existing install.
    * Each entry is independently configured (no shared named roles) so one
@@ -175,6 +188,7 @@ export const DEFAULT_POLICY: PolicyConfig = {
   mutatingTools: ["exec", "write", "edit", "apply_patch"],
   nonOwnerAllowedTools: ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"],
   nonOwnerAllowedScripts: [], // empty by default; each install fills its own (e.g. analyst tools/)
+  auditAllowedNonOwnerTools: false, // opt-in per config; see the Cfg doc for why it is off by default
   trustedIds: [], // empty by default; zero behavior change unless an install explicitly grants trust
   enforce: true,
   ownerSelfApproval: "warn", // noob-safe: agent's own UNATTENDED criticals warn-log, don't hang the turn
@@ -203,6 +217,7 @@ export function normalizeConfig(raw: Partial<PolicyConfig> | undefined | null): 
   ];
   for (const k of arrKeys) if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULT_POLICY as any)[k];
   if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
+  if (typeof c.auditAllowedNonOwnerTools !== "boolean") c.auditAllowedNonOwnerTools = DEFAULT_POLICY.auditAllowedNonOwnerTools;
   return c;
 }
 

@@ -63,6 +63,16 @@ type Cfg = {
   mutatingTools: string[];
   nonOwnerAllowedTools: string[];
   nonOwnerAllowedScripts: string[];
+  // OBSERVABILITY, not enforcement. An ALLOWED non-owner tool returns before any
+  // audit() call, so a tool that is itself a security boundary (e.g. a scoped
+  // peer-memory read that hands a stranger their own record) leaves ZERO trace:
+  // "did a non-owner read their rep, and when" is unanswerable from logs.
+  // Measured on a live box: the only allow events in the whole log came from
+  // R-nonowner-script (exec) -- allowed TOOLS were invisible by construction.
+  // OFF by default: one enforce build is typically shared by several agent
+  // configs, and this is the hot path, so opting in per-config keeps every other
+  // agent byte-identical in behaviour.
+  auditAllowedNonOwnerTools: boolean;
   // Trusted/delegated ids: per-individual tier ABOVE non-owner, BELOW owner.
   // Empty by default -> zero behavior change. See policy.ts TrustedEntry doc
   // for the full ceiling rules (protectedGlobs + escalation/doc hits always win).
@@ -146,6 +156,7 @@ const DEFAULTS: Cfg = {
   ],
   mutatingTools: ["exec", "write", "edit", "apply_patch"],
   nonOwnerAllowedTools: ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"],
+  auditAllowedNonOwnerTools: false,   // opt-in per config; see Cfg doc for why it is off by default
   nonOwnerAllowedScripts: [
     "exchange_data", "semantic_search", "defillama_search", "arkham_search",
     "consensus_search", "news_consensus", "docs_search", "session_search", "graph_search",
@@ -169,6 +180,7 @@ function cfg(raw: any): Cfg {
   if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
   if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
   if (typeof c.llmMediatedCritical !== "boolean") c.llmMediatedCritical = DEFAULTS.llmMediatedCritical;
+  if (typeof c.auditAllowedNonOwnerTools !== "boolean") c.auditAllowedNonOwnerTools = DEFAULTS.auditAllowedNonOwnerTools;
   return c;
 }
 
@@ -1075,7 +1087,11 @@ export default definePluginEntry({
           if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner blocked (protected resource)` };
         }
         // 2. explicitly allowed non-mutating tools -> pass
-        if (c.nonOwnerAllowedTools.includes(toolName)) return;
+        if (c.nonOwnerAllowedTools.includes(toolName)) {
+          // Log-only: the decision is unchanged, we just stop it being invisible.
+          if (c.auditAllowedNonOwnerTools) audit(c, { evt: "allow", rule: "R-nonowner-tool", toolName, sessionKey, sender });
+          return;
+        }
         // 3. exec -> only allowlisted read-only tools/ scripts
         if (toolName === "exec") {
           if (execRunsAllowedScript(event, c.nonOwnerAllowedScripts)) {

@@ -40,6 +40,16 @@ the operator to ignore it.
   exec is gated by allowedScripts, not path.
 - protectedGlobs / escalation / criticalDoc ALWAYS win over a trusted grant.
 - criticalExecPatterns: action-anchored, mirrored across all FOUR surfaces above.
+- auditAllowedNonOwnerTools: observability flag, mirrored across all FOUR surfaces
+  (policy.ts DEFAULT_POLICY + Cfg, handler.ts inlined DEFAULT_POLICY + Cfg,
+  openclaw.plugin.json configSchema, pre_tool_call/handler.py DEFAULTS).
+  It changes NO decision -- an allowed non-owner tool stays allowed either way.
+  WHY it exists: an allowed non-owner tool returns BEFORE any audit() call, so a
+  tool that is itself a security boundary (a scoped peer-memory read handing a
+  stranger their own record) leaves zero trace, and "did a non-owner read their
+  rep, and when" is unanswerable from logs. Measured on a live box: every allow
+  event in the whole log came from the exec-script rule; allowed TOOLS were
+  invisible by construction. Default false because this is the hot path.
 
 When you change any of the above here, mirror it in the other file and re-run
 both selftests before commit.

@@ -63,6 +63,12 @@ DEFAULTS = {
                              "memory_search", "memory_get",
                              "Read", "WebSearch", "WebFetch", "Grep", "Glob"],
     "nonOwnerAllowedScripts": [],
+    # OBSERVABILITY, not enforcement. An ALLOWED non-owner tool returns before any
+    # audit sink is reached, so a tool that is ITSELF a security boundary (e.g. a
+    # scoped peer-memory read handing a stranger their own record) leaves ZERO
+    # trace: "did a non-owner read their rep, and when" is unanswerable from logs.
+    # OFF by default -> zero behavior change; the DECISION is identical either way.
+    "auditAllowedNonOwnerTools": False,
     # Trusted/delegated ids: per-individual tier ABOVE non-owner, BELOW owner.
     # Empty by default -> zero behavior change for every existing install.
     # Each entry: {"id": "...", "allowedTools": [...]?, "allowedScripts": [...]?,
