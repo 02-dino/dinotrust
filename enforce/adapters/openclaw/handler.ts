@@ -474,6 +474,19 @@ function stripQuoted(cmd: string): string {
   return out;
 }
 
+// Strip shell COMMENTS (`# ...` to end of line) before operand extraction. WHY:
+// a comment is not argv -- the shell never passes it to `rm`. Without this, a
+// command like `rm -rf /path # DINOTRUST_OWNER_APPROVED` yields the bogus
+// targets ["#", "DINOTRUST_OWNER_APPROVED"], and because ownerIntentMatches()
+// requires the owner's message to reference EVERY target, self-approve became
+// unreachable the moment the LLM appended the marker the protocol TOLD it to
+// append (measured 2026-10-15: markerPresent:true + intentOk:false). A `#` only
+// opens a comment at the start of a word, so require line-start or whitespace
+// before it; `/path/#name` and `$#` stay intact.
+function stripComments(cmd: string): string {
+  return cmd.replace(/(^|\s)#[^\n]*/g, "$1");
+}
+
 // `rm -rf` is critical BY DEFAULT, but wiping a throwaway scratch dir under /tmp
 // is a routine build step. Gating every `rm -rf /tmp/<scratch>` behind approval
 // creates a recurring away-from-screen stall (each /tmp path = new fingerprint =
@@ -549,7 +562,7 @@ function humanizeReason(esc: string): string {
 //     relative, clearly not-absolute, so downstream never mislabels them).
 // Runs on the quote-stripped command so a quoted "...rm -rf..." literal is inert.
 function rmArgvTargets(cmd: string, cwd?: string): string[] {
-  const scan = stripQuoted(cmd);
+  const scan = stripComments(stripQuoted(cmd));
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (raw: string) => {
@@ -597,7 +610,7 @@ function resolvedTargetsOf(event: any): string[] {
   if (String(event?.toolName ?? "") === "exec") {
     const cmd = execCommandOf(event);
     const cwd = String((event?.params ?? {}).cwd ?? "").trim() || undefined;
-    const scan = stripQuoted(cmd);
+    const scan = stripComments(stripQuoted(cmd));
     // If this command contains an `rm`, the delete targets are ONLY its argv.
     if (/(^|[\s;|&(])(?:\/\S*\/)?rm\s/.test(scan)) {
       for (const t of rmArgvTargets(cmd, cwd)) push(t);
@@ -977,7 +990,10 @@ export default definePluginEntry({
                 ? `To approve: REPLY "yes" to this question.`
                 : `This is IRREVERSIBLE. To approve: REPLY "yes delete" to this question (a plain "yes" is NOT enough for a destructive action).`;
               const askHint = `Do NOT self-approve. STOP your turn and ask the owner a specific yes/no question naming this exact target. ${replyHint} A missing answer must leave this UNEXECUTED.`;
-              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf });
+              // isReply/ownerTextLen are DIAGNOSTIC: the reply-scoped clearance
+              // path is invisible in the log when it silently no-ops, so record
+              // why it declined (no reply id? owner text not a bare affirmative?).
+              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, targets: targets.slice(0, 4) });
               // Record the pending intent (with targets+tier) so the owner's next
               // signed affirmative reply can resolve it via openPendingForTarget.
               recordPendingIntent(c, { fp, command: cmd, toolName, sessionKey, sender: sender ?? "self", hit: esc, targets, severity: tier });
