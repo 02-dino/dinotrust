@@ -383,6 +383,71 @@ sv(".env write = additive", ADD, "additive");
 sv("rm -rf = destructive", DESTROY, "destructive");
 sv("openclaw.json = destructive", OJSON, "destructive");
 
+// ── INBOUND RELAY (message_received -> before_tool_call) ──────────────────────
+// before_tool_call carries NO message text/reply id on this host, so the owner
+// approval paths read a TTL'd latch instead. Envelope under test (owner-approved
+// 2026-10-15): TTL 2min, single-use, FULL-PATH match, same sender. Mirrors the
+// handler helpers; every miss must fail CLOSED (no approval).
+const TTL = 120 * 1000;
+function mkRelay() {
+  const map = new Map();
+  return {
+    record: (sk, m) => map.set(sk, m),
+    peek: (sk, sender, now = Date.now()) => {
+      const m = map.get(sk);
+      if (!m) return null;
+      if (now - m.tsMs > TTL) { map.delete(sk); return null; }
+      if (sender != null && m.senderId != null && m.senderId !== sender) return null;
+      return m;
+    },
+    consume: (sk) => map.delete(sk),
+  };
+}
+// full-path variant of ownerIntentMatches' target check (requireFullPath=true)
+function intentOkFullPath(text, targets) {
+  const t = (text || "").toLowerCase();
+  if (t.length < 3 || targets.length === 0) return false;
+  for (const tg of targets) if (!t.includes(tg.toLowerCase())) return false;
+  return /\b(delete|remove|rm|wipe|drop|truncate|reset|force[- ]?push|overwrite|erase|nuke|clear|destroy|format|uninstall|purge)\b/.test(t);
+}
+function rl(name, got, want) {
+  const ok = got === want;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${got}`);
+  ok ? pass++ : fail++;
+}
+const SK = "agent:analyst:telegram:direct:1083618205";
+const TGT = ["/usr/lib/node_modules/9router/app/logs"];
+const now = Date.now();
+
+// TTL
+let r = mkRelay();
+r.record(SK, { text: "yes delete /usr/lib/node_modules/9router/app/logs", replyToId: "1", senderId: "1083618205", tsMs: now });
+rl("relay: fresh message is readable", r.peek(SK, "1083618205", now) != null, true);
+rl("relay: 119s old still valid", r.peek(SK, "1083618205", now + 119e3) != null, true);
+rl("relay: 121s old EXPIRED (fail-closed)", r.peek(SK, "1083618205", now + 121e3) != null, false);
+
+// single-use
+r = mkRelay();
+r.record(SK, { text: "yes delete /x", replyToId: "1", senderId: "1083618205", tsMs: now });
+rl("relay: readable before consume", r.peek(SK, "1083618205", now) != null, true);
+r.consume(SK);
+rl("relay: burned after consume (one approval = one command)", r.peek(SK, "1083618205", now) != null, false);
+
+// sender binding
+r = mkRelay();
+r.record(SK, { text: "yes delete /x", replyToId: "1", senderId: "1083618205", tsMs: now });
+rl("relay: wrong sender rejected", r.peek(SK, "999999", now) != null, false);
+rl("relay: other session is isolated", r.peek("agent:analyst:telegram:direct:999", "1083618205", now) != null, false);
+
+// FULL-PATH requirement (the relayed-text tightening)
+rl("relay intent: exact full path + verb -> ok", intentOkFullPath("yes delete /usr/lib/node_modules/9router/app/logs", TGT), true);
+rl("relay intent: basename only -> REJECTED (too loose for cached text)", intentOkFullPath("yes delete logs", TGT), false);
+rl("relay intent: path but NO action verb -> rejected", intentOkFullPath("what is in /usr/lib/node_modules/9router/app/logs", TGT), false);
+rl("relay intent: verb but different path -> rejected", intentOkFullPath("yes delete /etc/passwd", TGT), false);
+rl("relay intent: multi-target, only one mentioned -> rejected", intentOkFullPath("yes delete /a/b", ["/a/b", "/c/d"]), false);
+rl("relay intent: multi-target, both mentioned -> ok", intentOkFullPath("yes delete /a/b and /c/d", ["/a/b", "/c/d"]), true);
+rl("relay intent: empty text -> rejected", intentOkFullPath("", TGT), false);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
 h("humanize rm -rf", "exec ~ /rm\\s+-rf/", "permanently delete");

@@ -661,11 +661,70 @@ function specificCriticalReason(event: any, esc: string): string {
   return `${base} Target: ${parts.join(", ")}.`;
 }
 
-// Extract the owner's CURRENT-TURN inbound message text from the hook event.
-// This is the checkable artifact a jailbreak cannot fabricate (it is platform-
-// signed and only present when the owner actually sent a message THIS turn).
-// Injection sourced from tool output / a file / a web page is NOT here.
-function currentTurnOwnerText(event: any, ctx: any): string {
+// ── INBOUND MESSAGE RELAY (message_received -> before_tool_call) ─────────────
+// WHY THIS EXISTS: before_tool_call's payload carries NO inbound message text
+// and no reply id. Measured 2026-10-15 on OpenClaw 2026.7.1 — the host types are
+//   PluginHookBeforeToolCallEvent = { toolName, params, toolKind, toolInputKind,
+//                                     runId, toolCallId, derivedPaths }
+//   PluginHookToolContext         = { agentId, sessionKey, sessionId, runId,
+//                                     trace, toolCallId, getSessionExtension,
+//                                     channelId }
+// Neither has `content` or `replyToId`, so currentTurnOwnerText() always returned
+// "" and replyToId() always null => intentOk could never be true and BOTH owner
+// approval paths (reply-scoped + marker self-approve) were structurally dead.
+// Audit proof: every owner-critical-block carried ownerTextLen:0, isReply:false,
+// and owner-reply-approve / owner-self-approve never fired once in production.
+// `message_received` DOES carry content/replyToId/senderId/sessionKey, so we
+// latch it there and read it here.
+//
+// SECURITY ENVELOPE (owner-approved 2026-10-15). A cached message authorizes a
+// command that arrives LATER, so the envelope is deliberately narrow:
+//   TTL 2 min   — a stale "yes delete /x" cannot clear an unrelated rm later.
+//   single-use  — consumed the instant it grants; one approval = one command.
+//   exact path  — the message must contain the FULL target path; basename
+//                 matching is too loose once the text is no longer same-turn.
+//   same sender — the cached senderId must equal the turn's resolved sender.
+// Fail-CLOSED everywhere: anything missing/expired/mismatched => no approval.
+const OWNER_MSG_TTL_MS = 120 * 1000;
+const OWNER_MSG_MAX_SESSIONS = 256; // bound the map; this is a cache, not a log
+type InboundMsg = { text: string; replyToId: string | null; senderId: string | null; tsMs: number };
+const lastInbound = new Map<string, InboundMsg>();
+
+// Drop expired rows (and trim oldest if the map somehow grows unbounded).
+function pruneInbound(now: number) {
+  for (const [k, v] of lastInbound) if (now - v.tsMs > OWNER_MSG_TTL_MS) lastInbound.delete(k);
+  if (lastInbound.size > OWNER_MSG_MAX_SESSIONS) {
+    const rows = [...lastInbound.entries()].sort((a, b) => a[1].tsMs - b[1].tsMs);
+    for (let i = 0; i < rows.length - OWNER_MSG_MAX_SESSIONS; i++) lastInbound.delete(rows[i][0]);
+  }
+}
+
+function recordInbound(sessionKey: string, m: InboundMsg) {
+  if (!sessionKey) return;
+  pruneInbound(m.tsMs);
+  lastInbound.set(sessionKey, m);
+}
+
+// Read WITHOUT consuming: the gate must be able to evaluate and still decline.
+// Returns null when absent, expired, or sent by someone other than this turn's
+// resolved sender (sender spoofing / cross-session bleed guard).
+function peekInbound(sessionKey: string, sender: string | null): InboundMsg | null {
+  if (!sessionKey) return null;
+  const m = lastInbound.get(sessionKey);
+  if (!m) return null;
+  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { lastInbound.delete(sessionKey); return null; }
+  if (sender != null && m.senderId != null && m.senderId !== sender) return null;
+  return m;
+}
+
+// Burn the latch the moment it grants approval (single-use).
+function consumeInbound(sessionKey: string) { lastInbound.delete(sessionKey); }
+
+// Extract the owner's CURRENT-TURN inbound message text. The hook event itself
+// never carries it on this host (see relay note above), so `relayed` — the
+// TTL'd, sender-matched latch from message_received — is the real source; the
+// event/ctx scan is kept as a no-cost fast path for hosts that DO inline it.
+function currentTurnOwnerText(event: any, ctx: any, relayed?: InboundMsg | null): string {
   const cand: unknown[] = [];
   for (const src of [event?.metadata, event, ctx]) {
     if (!src || typeof src !== "object") continue;
@@ -673,6 +732,7 @@ function currentTurnOwnerText(event: any, ctx: any): string {
     cand.push(s.content, s.body, s.bodyForAgent, s.text, s.message, s.inboundText, s.userText, s.transcript);
   }
   for (const v of cand) { if (typeof v === "string" && v.trim()) return v; }
+  if (relayed && relayed.text.trim()) return relayed.text;
   return "";
 }
 
@@ -680,7 +740,11 @@ function currentTurnOwnerText(event: any, ctx: any): string {
 // the owner's this-turn message clearly references the resolved target AND
 // signals a destructive/action intent. Unclear -> false (fall through to ask).
 // This is the self-approve KEY: it is checked by the plugin, never by the LLM.
-function ownerIntentMatches(ownerText: string, event: any, esc: string): boolean {
+// `requireFullPath` tightens (1) from "full path OR distinctive basename" to
+// full path ONLY. Set when the text came from the TTL'd relay latch rather than
+// the same tool call: a basename like "logs" is far too easy to hit by accident
+// in a 2-minute-old sentence that was never written about THIS command.
+function ownerIntentMatches(ownerText: string, event: any, esc: string, requireFullPath = false): boolean {
   const text = (ownerText || "").toLowerCase();
   if (text.length < 3) return false;
   const targets = resolvedTargetsOf(event);
@@ -690,6 +754,7 @@ function ownerIntentMatches(ownerText: string, event: any, esc: string): boolean
   //     a chained command touching an unmentioned path must NOT self-approve.
   for (const t of targets) {
     const tl = t.toLowerCase();
+    if (requireFullPath) { if (!text.includes(tl)) return false; continue; }
     const base = tl.split("/").filter(Boolean).pop() || tl;
     const distinctive = base.length >= 4 ? base : tl;
     if (!text.includes(tl) && !(distinctive.length >= 4 && text.includes(distinctive))) return false;
@@ -742,7 +807,7 @@ function isStrongAffirmative(text: string): boolean {
 // Extract the platform-signed reply_to id from the inbound event, if any. Only a
 // genuine reply (owner tapped "reply" on the guard's question) has this. The LLM
 // cannot fabricate it -- it is set by the channel, not the model.
-function replyToId(event: any, ctx: any): string | null {
+function replyToId(event: any, ctx: any, relayed?: InboundMsg | null): string | null {
   for (const src of [event?.metadata, event, ctx]) {
     if (!src || typeof src !== "object") continue;
     const s: any = src;
@@ -751,7 +816,7 @@ function replyToId(event: any, ctx: any): string | null {
       if (v != null && String(v).trim()) return String(v).trim();
     }
   }
-  return null;
+  return relayed?.replyToId ?? null;
 }
 
 // Is there an OPEN pending critical intent for THIS target+session in-window?
@@ -891,6 +956,28 @@ export default definePluginEntry({
       audit(c, { evt: "DEGRADED-carried", severity: "critical", count: priorDegraded.count, firstSeen: priorDegraded.firstSeen, lastSeen: priorDegraded.lastSeen });
     }
 
+    // Latch the owner's inbound message so before_tool_call can see it at all.
+    // before_tool_call's payload carries no message text/reply id on this host
+    // (see INBOUND MESSAGE RELAY note), so without this subscription BOTH owner
+    // approval paths are dead code. Wrapped in try/catch: a throw here must never
+    // break message intake — worst case the approval paths stay unavailable.
+    api.on("message_received", async (event: any, ctx: any) => {
+      try {
+        const sessionKey = String(event?.sessionKey ?? ctx?.sessionKey ?? "");
+        if (!sessionKey) return;
+        if (c.agentFilter && !sessionKey.includes(c.agentFilter)) return;
+        const text = String(event?.content ?? "");
+        const rid = event?.replyToId ?? event?.replyToIdFull ?? null;
+        const sid = event?.senderId ?? event?.from ?? null;
+        recordInbound(sessionKey, {
+          text,
+          replyToId: rid != null && String(rid).trim() ? String(rid).trim() : null,
+          senderId: sid != null && String(sid).trim() ? String(sid).trim() : null,
+          tsMs: Date.now(),
+        });
+      } catch { /* never break message intake */ }
+    });
+
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
         const sessionKey: string = String(ctx?.sessionKey ?? event?.sessionKey ?? "");
@@ -946,7 +1033,13 @@ export default definePluginEntry({
             // platform-signed current-turn message the re-check requires.
             if (c.enforce && c.llmMediatedCritical) {
               const cmd = execCommandOf(event);
-              const ownerText = currentTurnOwnerText(event, ctx);
+              // relayed = TTL'd, sender-matched latch from message_received.
+              // relayedOnly => the text did NOT come from this tool call, so the
+              // marker path must demand a FULL-PATH mention (basename is too
+              // loose for text that may be up to OWNER_MSG_TTL_MS old).
+              const relayed = peekInbound(sessionKey, sender);
+              const ownerText = currentTurnOwnerText(event, ctx, relayed);
+              const relayedOnly = !!relayed && ownerText === relayed.text;
               const tier = escSeverity(esc);
               const targets = resolvedTargetsOf(event);
 
@@ -958,7 +1051,7 @@ export default definePluginEntry({
               // platform-signed (LLM can't forge which msg the owner replied to)
               // and an open ledger row for this target must already exist (LLM
               // can't fabricate a row it didn't cause).
-              const isReply = replyToId(event, ctx) != null;
+              const isReply = replyToId(event, ctx, relayed) != null;
               if (isReply) {
                 const affirmativeForTier = tier === "additive"
                   ? (isAffirmative(ownerText) || isStrongAffirmative(ownerText))
@@ -967,7 +1060,8 @@ export default definePluginEntry({
                   const pendingId = openPendingForTarget(c, sessionKey, targets);
                   if (pendingId) {
                     markPendingResolved(c, pendingId);
-                    audit(c, { evt: "owner-reply-approve", rule: "R-escalation-reply-scoped", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, pendingId, note: "signed reply + tier-affirmative + open pending-for-target" });
+                    consumeInbound(sessionKey); // single-use: one approval, one command
+                    audit(c, { evt: "owner-reply-approve", rule: "R-escalation-reply-scoped", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, pendingId, relayed: relayedOnly, note: "signed reply + tier-affirmative + open pending-for-target" });
                     return; // proceed: reply-scoped owner confirmation verified
                   }
                 }
@@ -976,9 +1070,10 @@ export default definePluginEntry({
               // ── (1) LEGACY path+verb self-approve (advanced/LLM-mediated) ────
               const markerPresent = cmd.includes(SELF_APPROVE_MARKER)
                 || ownerText.includes(SELF_APPROVE_MARKER);
-              const intentOk = ownerIntentMatches(ownerText, event, esc);
+              const intentOk = ownerIntentMatches(ownerText, event, esc, relayedOnly);
               if (markerPresent && intentOk) {
-                audit(c, { evt: "owner-self-approve", rule: "R-escalation-llm-approved", toolName, sessionKey, sender: sender ?? "self", hit: esc, note: "current-turn owner intent verified + marker present" });
+                consumeInbound(sessionKey); // single-use: burn the latch on grant
+                audit(c, { evt: "owner-self-approve", rule: "R-escalation-llm-approved", toolName, sessionKey, sender: sender ?? "self", hit: esc, relayed: relayedOnly, note: "current-turn owner intent verified + marker present" });
                 return; // proceed: verified explicit owner intent this turn
               }
 
@@ -993,7 +1088,7 @@ export default definePluginEntry({
               // isReply/ownerTextLen are DIAGNOSTIC: the reply-scoped clearance
               // path is invisible in the log when it silently no-ops, so record
               // why it declined (no reply id? owner text not a bare affirmative?).
-              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, targets: targets.slice(0, 4) });
+              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, relayed: relayedOnly, targets: targets.slice(0, 4) });
               // Record the pending intent (with targets+tier) so the owner's next
               // signed affirmative reply can resolve it via openPendingForTarget.
               recordPendingIntent(c, { fp, command: cmd, toolName, sessionKey, sender: sender ?? "self", hit: esc, targets, severity: tier });
