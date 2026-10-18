@@ -561,17 +561,28 @@ function humanizeReason(esc: string): string {
 //   • resolve relative operands against the exec cwd when known (else leave
 //     relative, clearly not-absolute, so downstream never mislabels them).
 // Runs on the quote-stripped command so a quoted "...rm -rf..." literal is inert.
+// Shared operand filter: tokens that can never be a deletable local target.
+// WHY IT IS SHARED: the rm-argv parser and the non-rm critical-exec scan must
+// agree on what counts as a target, and they did not. The non-rm path collected
+// /dev/null and bare non-path words, and because ownerIntentMatches() requires
+// the owner's message to name EVERY resolved target, approval became
+// unsatisfiable by construction (measured 2026-10-18: owner would have had to
+// write "/dev/null" in a sentence to approve a teardown script).
+function isTargetToken(s: string): boolean {
+  if (!s) return false;
+  if (s.startsWith("-")) return false;                       // flag
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return false;       // URL (http://, git://, ssh://)
+  if (s === "/dev/null" || /^\/dev\//.test(s)) return false;  // device nodes are not deletable trees
+  if (s.startsWith("<(") || s.startsWith(">(")) return false; // process substitution
+  return true;
+}
 function rmArgvTargets(cmd: string, cwd?: string): string[] {
   const scan = stripComments(stripQuoted(cmd));
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (raw: string) => {
     let s = raw.trim();
-    if (!s) return;
-    if (s.startsWith("-")) return;                       // flag
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return;       // URL (http://, https://, git://, ssh://)
-    if (s === "/dev/null" || /^\/dev\//.test(s)) return;  // device nodes are not deletable-tree targets
-    if (s.startsWith("<(") || s.startsWith(">(")) return; // process substitution
+    if (!isTargetToken(s)) return;
     // resolve relative -> absolute against exec cwd when we know it
     if (cwd && !s.startsWith("/") && !/^\$\{?[A-Za-z_]/.test(s)) {
       try { s = path.resolve(cwd, s); } catch { /* leave relative */ }
@@ -615,9 +626,14 @@ function resolvedTargetsOf(event: any): string[] {
     if (/(^|[\s;|&(])(?:\/\S*\/)?rm\s/.test(scan)) {
       for (const t of rmArgvTargets(cmd, cwd)) push(t);
     } else {
-      // Non-rm critical exec: keep the broad path-token hint.
+      // Non-rm critical exec (uninstall/mkfs/dd/force-push...): broad path-token
+      // hint, but through the SAME operand filter as the rm path. WHY: without
+      // it this branch collected /dev/null and other non-targets, and since
+      // ownerIntentMatches() demands the owner name EVERY resolved target, the
+      // owner would have had to write "/dev/null" to approve a teardown script
+      // -- approval unsatisfiable by construction (measured 2026-10-18).
       for (const t of scan.split(/[\s;|&><()]+/).filter(Boolean)) {
-        if (t.startsWith("-")) continue;
+        if (!isTargetToken(t)) continue;
         if (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)) push(t);
       }
     }
@@ -686,13 +702,22 @@ function specificCriticalReason(event: any, esc: string): string {
 //   same sender — the cached senderId must equal the turn's resolved sender.
 // Fail-CLOSED everywhere: anything missing/expired/mismatched => no approval.
 const OWNER_MSG_TTL_MS = 120 * 1000;
+// Hard ceiling for an ADOPTED latch (see peekInbound). A turn that runs longer
+// than this is pathological; the latch dies rather than living forever.
+const OWNER_MSG_ADOPTED_MAX_MS = 30 * 60 * 1000;
 const OWNER_MSG_MAX_SESSIONS = 256; // bound the map; this is a cache, not a log
-type InboundMsg = { text: string; replyToId: string | null; senderId: string | null; tsMs: number };
+// runId = the turn that ADOPTED this message (null until a turn claims it).
+type InboundMsg = { text: string; replyToId: string | null; senderId: string | null; tsMs: number; runId: string | null };
 const lastInbound = new Map<string, InboundMsg>();
 
 // Drop expired rows (and trim oldest if the map somehow grows unbounded).
+// An ADOPTED row is exempt from the short TTL -- its lifetime is the turn, not
+// the clock -- but still capped by OWNER_MSG_ADOPTED_MAX_MS.
 function pruneInbound(now: number) {
-  for (const [k, v] of lastInbound) if (now - v.tsMs > OWNER_MSG_TTL_MS) lastInbound.delete(k);
+  for (const [k, v] of lastInbound) {
+    const limit = v.runId != null ? OWNER_MSG_ADOPTED_MAX_MS : OWNER_MSG_TTL_MS;
+    if (now - v.tsMs > limit) lastInbound.delete(k);
+  }
   if (lastInbound.size > OWNER_MSG_MAX_SESSIONS) {
     const rows = [...lastInbound.entries()].sort((a, b) => a[1].tsMs - b[1].tsMs);
     for (let i = 0; i < rows.length - OWNER_MSG_MAX_SESSIONS; i++) lastInbound.delete(rows[i][0]);
@@ -708,12 +733,26 @@ function recordInbound(sessionKey: string, m: InboundMsg) {
 // Read WITHOUT consuming: the gate must be able to evaluate and still decline.
 // Returns null when absent, expired, or sent by someone other than this turn's
 // resolved sender (sender spoofing / cross-session bleed guard).
-function peekInbound(sessionKey: string, sender: string | null): InboundMsg | null {
+// TURN-SCOPED (D1, 2026-10-18). The wall-clock TTL now only decides whether a
+// turn may ADOPT a message; once adopted the latch is valid for that WHOLE turn.
+// WHY: the TTL was wall-clock while a turn can run many minutes of tool calls,
+// so a long turn guaranteed its own approval expired mid-flight -- the more work
+// a command needed, the more certain the owner's "yes" was dead before reaching
+// the gate. Measured: owner sent "yes delete" 06:11 UTC, the blocks landed
+// 06:17-06:18 UTC, every one of them relayed:false.
+// This is STRICTER at the other end: a different turn can never reuse an adopted
+// latch, even one second old -- previously any turn within 2 min could.
+function peekInbound(sessionKey: string, sender: string | null, runId: string | null): InboundMsg | null {
   if (!sessionKey) return null;
   const m = lastInbound.get(sessionKey);
   if (!m) return null;
-  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { lastInbound.delete(sessionKey); return null; }
   if (sender != null && m.senderId != null && m.senderId !== sender) return null;
+  if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { lastInbound.delete(sessionKey); return null; }
+  // Already claimed by a turn -> only THAT turn may read it.
+  if (m.runId != null) return m.runId === runId ? m : null;
+  // Unclaimed -> the short TTL gates adoption.
+  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { lastInbound.delete(sessionKey); return null; }
+  if (runId) m.runId = runId; // adopt: bind to this turn for its full duration
   return m;
 }
 
@@ -974,6 +1013,7 @@ export default definePluginEntry({
           replyToId: rid != null && String(rid).trim() ? String(rid).trim() : null,
           senderId: sid != null && String(sid).trim() ? String(sid).trim() : null,
           tsMs: Date.now(),
+          runId: null, // unclaimed; the first turn to peek adopts it
         });
       } catch { /* never break message intake */ }
     });
@@ -1033,11 +1073,12 @@ export default definePluginEntry({
             // platform-signed current-turn message the re-check requires.
             if (c.enforce && c.llmMediatedCritical) {
               const cmd = execCommandOf(event);
-              // relayed = TTL'd, sender-matched latch from message_received.
+              // relayed = turn-scoped, sender-matched latch from message_received.
               // relayedOnly => the text did NOT come from this tool call, so the
               // marker path must demand a FULL-PATH mention (basename is too
-              // loose for text that may be up to OWNER_MSG_TTL_MS old).
-              const relayed = peekInbound(sessionKey, sender);
+              // loose for text the owner may not have written about THIS command).
+              const runId = String(ctx?.runId ?? event?.runId ?? "") || null;
+              const relayed = peekInbound(sessionKey, sender, runId);
               const ownerText = currentTurnOwnerText(event, ctx, relayed);
               const relayedOnly = !!relayed && ownerText === relayed.text;
               const tier = escSeverity(esc);
@@ -1088,7 +1129,11 @@ export default definePluginEntry({
               // isReply/ownerTextLen are DIAGNOSTIC: the reply-scoped clearance
               // path is invisible in the log when it silently no-ops, so record
               // why it declined (no reply id? owner text not a bare affirmative?).
-              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, relayed: relayedOnly, targets: targets.slice(0, 4) });
+              // latchAgeMs/hasRunId are the D1 INSTRUMENTATION: if a future block
+              // still shows relayed:false we need to know WHICH leg failed --
+              // no latch at all (relay never fired) vs a latch this turn couldn't
+              // claim (runId missing -> turn-scoping degraded to wall-clock).
+              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, relayed: relayedOnly, hasRunId: runId != null, latchAgeMs: relayed ? Date.now() - relayed.tsMs : null, targets: targets.slice(0, 4) });
               // Record the pending intent (with targets+tier) so the owner's next
               // signed affirmative reply can resolve it via openPendingForTarget.
               recordPendingIntent(c, { fp, command: cmd, toolName, sessionKey, sender: sender ?? "self", hit: esc, targets, severity: tier });

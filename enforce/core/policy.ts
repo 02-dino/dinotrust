@@ -417,6 +417,35 @@ function pipedInterpreterSink(cmd: string): string | null {
   return null;
 }
 
+/**
+ * TEARDOWN SCRIPT in DRY-RUN mode -> not a critical action (D3, 2026-10-18).
+ *
+ * WHY SO NARROW: a blanket "--dry-run skips the gate" is a BYPASS VECTOR, not a
+ * fix. `rm` has no --dry-run flag, so `rm -rf /x --dry-run` would delete /x
+ * while reading as safe -- the flag would become a magic word that disarms the
+ * guard. So this carve-out requires ALL of:
+ *   (a) the command INVOKES A SCRIPT (bash x.sh / sh x.sh / ./x.sh) -- the only
+ *       class where --dry-run is a real, honored convention,
+ *   (b) an explicit --dry-run/--dryrun flag,
+ *   (c) NO destructive builtin anywhere in the command (rm/mkfs/dd/force-push/
+ *       DROP/TRUNCATE/--hard), so a chained real delete can never ride along.
+ * Package-manager teardowns (apt remove, npm uninstall) are deliberately NOT
+ * covered: their dry-run spellings differ and they are the higher-stakes class.
+ *
+ * Measured: scripts/uninstall.sh --dry-run only PRINTS, yet was blocked 5x --
+ * the gate fired on the invocation shape, never on what the command does.
+ */
+function teardownScriptDryRun(cmd: string): boolean {
+  const scan = stripQuoted(cmd);
+  if (!/(^|\s)(--dry[-_]?run|--dryrun)(\s|=|$)/i.test(scan)) return false;
+  // (a) must invoke a script file, not a package manager or a bare binary.
+  const invokesScript = /(^|[|;&]|&&|\|\|)\s*(sudo\s+|doas\s+|env\s+\S+\s+)*((bash|sh|zsh)\s+\S*\.sh\b|\.\/\S*\.sh\b|\S*\/[a-z0-9_.-]*\.sh\b)/i.test(scan);
+  if (!invokesScript) return false;
+  // (c) no destructive builtin may appear anywhere in the command.
+  const destructiveBuiltin = /\brm\s+-|\bmkfs\b|\bdd\s+if=|--hard\b|\bDROP\s+TABLE\b|\bTRUNCATE\s+TABLE\b|git\s+push[^|;&]*(--force|-f\b)/i;
+  if (destructiveBuiltin.test(scan)) return false;
+  return true;
+}
 function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
   if (["write", "edit", "apply_patch"].includes(call.toolName)) {
     for (const p of call.paths) { const h = matchesGlob(p, c.escalationPathGlobs); if (h) return `write ${p} ~ ${h}`; }
@@ -432,11 +461,14 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
     // Scan with quoted literals removed so quoted-arg text can't false-positive.
     const scan = stripQuoted(call.command);
     const scratchRm = rmRfScratchOnly(call.command);
+    const dryRunTeardown = teardownScriptDryRun(call.command);
     for (const pat of c.criticalExecPatterns) {
       try {
         if (new RegExp(pat, "i").test(scan)) {
           // /tmp-only `rm -rf` -> warn, not approve (see rmRfScratchOnly).
           if (scratchRm && /\brm\b/.test(pat)) continue;
+          // teardown SCRIPT in dry-run -> prints only (see teardownScriptDryRun).
+          if (dryRunTeardown && /uninstall/i.test(pat)) continue;
           return `exec ~ /${pat}/`;
         }
       } catch { /* skip bad regex */ }

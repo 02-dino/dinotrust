@@ -104,6 +104,17 @@ tt("scopeAgents: in-agent write allowed", call("write", { paths: ["workspace-ads
 tt("scopeAgents: WRONG agent -> falls through to non-owner block", call("write", { paths: ["workspace-ads/x.md"] }), "888888", "block", "agent:sosmed:telegram:direct:1");
 tt("scopeAgents: in-agent read cross-workspace allowed", call("read", { paths: ["workspace-sosmed/shared.db"] }), "888888", "allow", "agent:ads:telegram:direct:1");
 
+// ── D3: teardown SCRIPT in --dry-run -> not critical (narrow carve-out) ──
+// The carve-out must NOT become a magic word: `rm` has no --dry-run flag, so a
+// blanket skip would let `rm -rf /x --dry-run` delete /x while reading as safe.
+t("dry-run uninstall.sh -> allow (prints only)", call("exec", { command: "bash /tmp/x/scripts/uninstall.sh --harness generic --dry-run" }), OWNER, "allow");
+t("dry-run ./uninstall.sh -> allow", call("exec", { command: "./scripts/uninstall.sh --dry-run" }), OWNER, "allow");
+t("REAL uninstall.sh (no dry-run) -> approve (still gated)", call("exec", { command: "bash /tmp/x/scripts/uninstall.sh --harness generic" }), OWNER, "approve");
+t("BYPASS GUARD: rm -rf with --dry-run -> approve (rm has no such flag)", call("exec", { command: "rm -rf /root/data --dry-run" }), OWNER, "approve");
+t("BYPASS GUARD: dry-run script chained with real rm -> approve", call("exec", { command: "bash uninstall.sh --dry-run && rm -rf /root/data" }), OWNER, "approve");
+t("BYPASS GUARD: apt remove --dry-run -> approve (pkg mgr not covered)", call("exec", { command: "apt remove rea-agents --dry-run" }), OWNER, "approve");
+t("BYPASS GUARD: dry-run script + force-push -> approve", call("exec", { command: "bash uninstall.sh --dry-run; git push origin main --force" }), OWNER, "approve");
+
 // back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 const v = decide(call("read"), "555555", CFG);
 const backOk = v.action === "allow" && v.reason === "non-owner allowed tool";
