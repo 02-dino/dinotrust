@@ -8,6 +8,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 RULES_TEMPLATE="$REPO_DIR/security_rules.md"
+# Hand-edit guard for the managed block (see lib/block_guard.sh). Sourced, not
+# inlined, because dinomem + neuron carry the identical copy — one contract, one
+# implementation. Absent lib -> guard silently off, install still works.
+# shellcheck source=../lib/block_guard.sh
+[ -f "$REPO_DIR/lib/block_guard.sh" ] && . "$REPO_DIR/lib/block_guard.sh"
 # Version = the git tag (single source of truth, since we ship via GitHub
 # Releases now). No manual VERSION file to drift/forget-to-bump. Falls back to
 # nearest tag + commits-ahead (git describe), then "unknown" if repo is tagless.
@@ -601,6 +606,21 @@ if [[ -f "$CONFIG_FILE" && -s "$CONFIG_FILE" ]]; then
   info "Backed up $CONFIG_FILE → $BACKUP_FILE"
 fi
 
+# Hand-edit guard: refuse to silently overwrite a block a human tuned. This is
+# NOT the same as the --force prompt below — --force answers "overwrite the
+# installer's own previous output?", this answers "was that output since EDITED?".
+# Measured 2026-10-19: analyst's block was hand-hardened to DENY the dinomem read
+# path where the stock market-analyst preset emits `memory_search: true`; a plain
+# re-run would have reopened that hole with no diff and no error.
+if declare -f block_guard_check >/dev/null 2>&1 \
+   && ! block_guard_check "$CONFIG_FILE" "# --- dinotrust begin" "# --- dinotrust end ---" dinotrust "$OPT_FORCE"; then
+  warn "The dinotrust block in $CONFIG_FILE was MODIFIED BY HAND since it was installed."
+  warn "  Re-injecting would silently discard those edits (a hardened ruleset can"
+  warn "  become a weaker preset one with no diff shown). Refusing."
+  warn "  Merge your edits into the new block manually, or re-run with --force to overwrite."
+  error "Aborted to protect hand-edited security rules."
+fi
+
 # Check for existing block
 if grep -q "dinotrust begin" "$CONFIG_FILE" 2>/dev/null; then
   if [[ "$OPT_FORCE" == "false" ]]; then
@@ -631,6 +651,10 @@ mkdir -p "$(dirname "$CONFIG_FILE")"
 # Append injection
 echo "" >> "$CONFIG_FILE"
 echo "$INJECTION_BLOCK" >> "$CONFIG_FILE"
+
+# Arm/re-arm the hand-edit guard against what we JUST wrote.
+declare -f block_guard_record >/dev/null 2>&1 \
+  && block_guard_record "$CONFIG_FILE" "# --- dinotrust begin" "# --- dinotrust end ---" dinotrust
 
 # ── OpenClaw bootstrap cap auto-raise ─────────────────────────────────────────
 # dinotrust is a SECURITY ruleset injected into AGENTS.md every turn. If AGENTS.md
