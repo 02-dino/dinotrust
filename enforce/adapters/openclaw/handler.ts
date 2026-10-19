@@ -1123,9 +1123,15 @@ export default definePluginEntry({
               // Tell the owner the EXACT phrase to reply. additive -> "yes";
               // destructive -> a stronger token they just read, no need to know it.
               const replyHint = tier === "additive"
-                ? `To approve: REPLY "yes" to this question.`
-                : `This is IRREVERSIBLE. To approve: REPLY "yes delete" to this question (a plain "yes" is NOT enough for a destructive action).`;
-              const askHint = `Do NOT self-approve. STOP your turn and ask the owner a specific yes/no question naming this exact target. ${replyHint} A missing answer must leave this UNEXECUTED.`;
+                ? `To approve: send a NEW message containing ONLY: yes`
+                : `This is IRREVERSIBLE. To approve: send a NEW message containing ONLY: yes delete`;
+              // The reply must survive isAffirmative()/isStrongAffirmative(),
+              // which cap at 24/32 chars -- a measured failure mode (2026-10-19):
+              // the owner replied "yes delete" PLUS an unrelated question, hit 120
+              // chars, and the approval was voided with no explanation. Say the
+              // bare-phrase requirement out loud, and say it is per-COMMAND.
+              const replyRules = ` Nothing else in that message -- extra words, a question, or punctuation beyond the phrase will VOID it silently.${tier === "additive" ? "" : ' A plain "yes" is not enough here.'} The approval covers THIS ONE command only; the next one needs a fresh reply. There is no countdown -- if you miss it, just ask again.`;
+              const askHint = `Do NOT self-approve. STOP your turn and ask the owner a specific yes/no question naming this exact target. ${replyHint}${replyRules} A missing answer must leave this UNEXECUTED.`;
               // isReply/ownerTextLen are DIAGNOSTIC: the reply-scoped clearance
               // path is invisible in the log when it silently no-ops, so record
               // why it declined (no reply id? owner text not a bare affirmative?).
