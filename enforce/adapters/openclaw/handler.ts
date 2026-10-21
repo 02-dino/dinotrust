@@ -415,8 +415,31 @@ function globToRe(glob: string): RegExp {
   return new RegExp("^" + re + "$");
 }
 
+/** Lexically resolve "." / ".." BEFORE any glob test. WHY (external review
+ * 2026-10-21): globs were matched against RAW text, so "workspace-x/../.env"
+ * never looked like an escape and a path-scoped id could write outside its jail.
+ * Lexical on purpose -- NOT fs.realpath: no disk I/O, no symlink race, and it
+ * still works for a file that does not exist yet (every write target). Leading
+ * ".." that survive are KEPT, so an escaping relative path can never satisfy a
+ * scope glob by accident. Mirror of enforce/core/policy.ts normalizePathLexical. */
+function normalizePathLexical(p: string): string {
+  const s = String(p).replace(/\\/g, "/");
+  const abs = s.startsWith("/");
+  const out: string[] = [];
+  for (const seg of s.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length && out[out.length - 1] !== "..") out.pop();
+      else if (!abs) out.push("..");
+      continue;
+    }
+    out.push(seg);
+  }
+  return (abs ? "/" : "") + out.join("/");
+}
+
 function matchesProtected(p: string, globs: string[]): string | null {
-  const norm = p.replace(/\\/g, "/");
+  const norm = normalizePathLexical(p);
   const base = norm.split("/").pop() || norm;
   for (const g of globs) {
     const re = globToRe(g);
@@ -961,27 +984,63 @@ function criticalDocHit(event: any, c: Cfg): string | null {
   return null;
 }
 
-/** True if an exec command invokes one of the allowlisted read-only scripts. */
+/** Interpreters that take the real script as their next non-flag argument. */
+const INTERPRETERS = /^(python[0-9.]*|node|deno|bun|ruby|perl|php)$/;
+
+/** Extract the script an exec command ACTUALLY invokes (argv[0], or the
+ * interpreter's first non-flag arg). WHY (external review 2026-10-21): the old
+ * check regex-matched an allowlisted NAME anywhere in the command string, so a
+ * name sitting in an ARGUMENT vouched for a different binary
+ * ("python3 tools/evil.py --config exchange_data.py" was ALLOWED). Worse, the
+ * tools/ guard it computed was discarded by `return mentionsTools || true`,
+ * making that check dead code. Position, not presence, decides what runs.
+ * Mirror of enforce/core/policy.ts invokedScript. */
+function invokedScript(command: string): string | null {
+  const toks = command.trim().split(/\s+/).filter(Boolean);
+  if (toks.length === 0) return null;
+  let i = 0;
+  const base0 = (toks[0].split("/").pop() || toks[0]).toLowerCase();
+  if (INTERPRETERS.test(base0)) {
+    i = 1;
+    while (i < toks.length && toks[i].startsWith("-")) i++;   // -u, -O, ...
+    if (i >= toks.length) return null;
+  }
+  return toks[i].startsWith("-") ? null : toks[i];
+}
+
 function execRunsAllowedScript(event: any, scripts: string[]): boolean {
   if (event?.toolName !== "exec") return false;
   const cmd = String((event?.params ?? {}).command ?? "");
   if (!cmd) return false;
   // Reject shell chaining / redirection first — allowlist is single read-only invocation only.
   if (/[;|&><`$(){}]/.test(cmd)) return false;
-  // Command must reference an allowlisted script name, and stay within tools/.
-  const mentionsTools = /(^|[\/\s])tools\//.test(cmd);
+  const script = invokedScript(cmd);
+  if (!script || !script.endsWith(".py")) return false;
+  // Resolve ".." BEFORE trusting the name: without this "../../evil/exchange_data.py"
+  // carries an allowlisted basename while pointing outside the tools dir.
+  const norm = normalizePathLexical(script);
+  if (norm.startsWith("..") || norm.includes("/../")) return false;
+  const file = norm.split("/").pop() || norm;
   for (const s of scripts) {
-    // match an allowlisted script as a filename token: <script>[...]. Allow an
-    // optional suffix before .py (e.g. semantic_search -> semantic_search_cli.py)
-    // but require the .py extension so it's clearly a script invocation.
-    const esc = s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp("(^|[\\/\\s])" + esc + "[A-Za-z0-9_]*\\.py([\\s]|$)");
-    if (re.test(cmd)) return mentionsTools || true; // script name is sufficient signal
+    // exact basename, or the documented suffix form (semantic_search -> semantic_search_cli.py)
+    if (file === `${s}.py` || new RegExp(`^${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[A-Za-z0-9_]*\\.py$`).test(file)) return true;
   }
   return false;
 }
 
 /** Resolve verified sender id. null => internal/self turn (agent-operated-by-owner). */
+/** Channel lanes carry a real human sender. A null id THERE means platform
+ * metadata was LOST (integration bug) and must NOT inherit owner -- the
+ * instruction layer already says deny on missing/ambiguous identity. A null id
+ * on a non-channel lane (cron/explicit/main/subagent) is the agent operating
+ * itself unattended, the ONLY legitimate null. Collapsing both into "owner" was
+ * the gap; collapsing both into "deny" would kill every scheduled job. */
+const CHANNEL_LANES = new Set(["telegram","whatsapp","signal","discord","slack","imessage","mattermost","matrix","email","sms","line","wechat","messenger","instagram","twitter","x","teams","webchat"]);
+function isChannelLane(sessionKey: string): boolean {
+  const parts = String(sessionKey || "").split(":");
+  return parts.length >= 3 && parts[0] === "agent" && CHANNEL_LANES.has(String(parts[2]).toLowerCase());
+}
+
 function resolveSenderId(event: any, ctx: any): string | null {
   for (const src of [ctx, event, event?.metadata]) {
     if (src && src.senderId != null && String(src.senderId).length > 0) return String(src.senderId);
@@ -1109,7 +1168,11 @@ export default definePluginEntry({
         // sessionKey via the agentOwners map (falls back to flat ownerIds when
         // the map is absent/empty or nothing matches -> single-agent back-compat).
         const owners = pickAgentOwners(sessionKey, c);
-        const isOwner = sender == null || owners.includes(sender);
+        // null sender is owner ONLY when it is the agent itself (non-channel
+        // lane). On a channel lane a missing id = lost metadata -> falls through
+        // to the strictest tier, never owner. See isChannelLane doc above.
+        const agentSelf = sender == null && !isChannelLane(sessionKey);
+        const isOwner = agentSelf || (sender != null && owners.includes(sender));
         const protectedHit = anyProtected(event, c.protectedGlobs);
         const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c, sessionKey) : null;
 
@@ -1140,7 +1203,7 @@ export default definePluginEntry({
             // fails open anyway -> pure latency, no added safety, "my agent got
             // slow". Warn-log instead. An INTERACTIVE owner (real sender id) still
             // gets the card. ownerSelfApproval="gate" restores always-suspend.
-            const unattendedAgentSelf = sender == null;
+            const unattendedAgentSelf = agentSelf;
 
             // ── v2: LLM-MEDIATED CRITICAL APPROVAL (fail-CLOSED) ────────────────
             // Replaces the legacy fail-OPEN card. On a critical-tier hit we BLOCK
