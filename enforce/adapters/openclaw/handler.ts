@@ -986,11 +986,61 @@ function resolveSenderId(event: any, ctx: any): string | null {
   for (const src of [ctx, event, event?.metadata]) {
     if (src && src.senderId != null && String(src.senderId).length > 0) return String(src.senderId);
   }
-  const sk = String(ctx?.sessionKey ?? "");
+  const sk = String(ctx?.sessionKey ?? event?.sessionKey ?? "");
   const parts = sk.split(":");
   const di = parts.indexOf("direct");
   if (di >= 0 && parts[di + 1]) return parts[di + 1];
+  // GROUP/TOPIC LANES (regression fix 2026-10-21): before_tool_call carries no
+  // senderId, and the "direct" fallback above never matches a group sessionKey
+  // (agent:x:telegram:group:-100...:topic:N). While a null sender meant OWNER
+  // this gap was invisible; once that was closed, the same gap locked the OWNER
+  // out of exec in every group lane -- measured in production the same evening.
+  // The message_received latch DOES carry senderId for that session, so read it
+  // instead of inventing one. NOT a trust escalation: same platform-signed id
+  // the direct lane uses, arriving via the hook that actually receives it.
+  // Read-only -- the latch is left unconsumed so approval paths still work.
+  try {
+    const m = lastInbound.get(sk);
+    if (m && m.senderId != null && String(m.senderId).length > 0) return String(m.senderId);
+  } catch { /* latch unavailable -> fall through to null (agent-self / strict) */ }
   return null;
+}
+
+/** CONFIG-FREE last-resort critical patterns. Deliberately duplicated from the
+ * real detector and deliberately NOT read from config: this literal is the one
+ * thing that still works when config parsing is what broke. Narrow on purpose
+ * -- only the unambiguously irreversible. */
+const LAST_RESORT_CRITICAL = /rm\s+-rf|\bmkfs\b|\bdd\s+if=|git\s+push\b[^\n]*--force|\bDROP\s+TABLE\b|\bTRUNCATE\s+TABLE\b|\bshutdown\b|\bmkswap\b/i;
+const LAST_RESORT_PROTECTED = /\.env\b|openclaw\.json|\bid_rsa\b|\bid_ed25519\b|\.pem\b|\bcredentials\b|\bsecrets\//i;
+
+/** Is this call critical, decided WITHOUT trusting anything that can throw?
+ *
+ * WHY (external review 2026-10-21): the hook used to fail OPEN on any internal
+ * error, so a bug in an unrelated leg (ledger read, audit write, approval
+ * relay) silently removed the guard while the agent looked healthy. Full
+ * fail-closed is not the answer either -- one hook bug would stop every agent
+ * and every scheduled job on the host.
+ *
+ * So the ERROR PATH asks one narrow question instead: is this irreversible?
+ * Each leg is independently try-wrapped and degrades to a simpler one:
+ *   1. the real config-driven detector (best answer)
+ *   2. a config-free regex literal over the raw command (survives bad config)
+ *   3. a protected-path string test over the serialized params
+ * There is no I/O, no await, no config dereference required for 2 and 3 -- the
+ * narrowest possible surface for the decision that actually matters. If even
+ * that throws, we fail open, because at that point we genuinely know nothing. */
+function criticalEvenWhenBroken(event: any, c: Cfg): boolean {
+  try { if (escalationHit(event, c)) return true; } catch { /* detector itself broke -> fall through */ }
+  try {
+    const cmd = String((event?.params ?? {}).command ?? "");
+    if (cmd && LAST_RESORT_CRITICAL.test(cmd)) return true;
+    const toolName = String(event?.toolName ?? "");
+    if (toolName === "exec" && cmd && LAST_RESORT_PROTECTED.test(cmd)) return true;
+    if (["write", "edit", "apply_patch"].includes(toolName)) {
+      if (LAST_RESORT_PROTECTED.test(JSON.stringify(event?.params ?? {}))) return true;
+    }
+  } catch { /* nothing left to reason with */ }
+  return false;
 }
 
 export default definePluginEntry({
@@ -1294,13 +1344,23 @@ export default definePluginEntry({
           if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner tool ${toolName} not allowlisted` };
         }
       } catch (err) {
-        // FAIL-OPEN, but LOUDLY: durable degraded marker + critical audit event
-        // so the silent-bypass window is surfaced to the owner, not swallowed.
+        // Durable degraded marker + critical audit event so the degraded window
+        // is surfaced to the owner, never swallowed.
         recordDegraded(c, err, {
           toolName: String(event?.toolName ?? ""),
           sessionKey: String(ctx?.sessionKey ?? event?.sessionKey ?? ""),
           phase: "before_tool_call",
         });
+        // ASYMMETRIC FAILURE (external review 2026-10-21): fail CLOSED for the
+        // irreversible, fail OPEN for everything else. A broken hook must not
+        // silently wave through `rm -rf`, but it also must not halt 14 agents
+        // and every cron over a bug in an unrelated leg. See criticalEvenWhenBroken.
+        try {
+          if (c.enforce && criticalEvenWhenBroken(event, c)) {
+            audit(c, { evt: "block", rule: "R-degraded-failclosed", toolName: String(event?.toolName ?? ""), sessionKey: String(ctx?.sessionKey ?? event?.sessionKey ?? ""), note: "hook errored mid-verdict; critical action blocked rather than passed through" });
+            return { block: true, blockReason: `dinotrust-enforce: internal error mid-verdict AND this action is critical/irreversible, so it was BLOCKED rather than passed through. Re-run it once the degraded marker is cleared, or run it manually with eyes on it.` };
+          }
+        } catch { /* fallback itself failed -> fail open, as before */ }
       }
     }, { priority: 100 });
   },
