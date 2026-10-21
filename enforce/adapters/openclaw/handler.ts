@@ -330,7 +330,11 @@ function prunePendingLedger(c: Cfg, p: string) {
   } catch { /* silent by contract */ }
 }
 
-function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName: string; sessionKey: string; sender: string; hit: string; targets?: string[]; severity?: string }) {
+/** viaCard=true means OpenClaw actually SHOWED an approval card for this intent,
+ * so a later re-fire of the same command IS the approved resume. A pending
+ * recorded by the fail-CLOSED block path carries viaCard=false and must never
+ * satisfy a re-fire -- see resolvePendingIfRefire. */
+function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName: string; sessionKey: string; sender: string; hit: string; targets?: string[]; severity?: string; viaCard?: boolean }) {
   try {
     const p = pendingPath(c);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -346,6 +350,7 @@ function recordPendingIntent(c: Cfg, o: { fp: string; command: string; toolName:
       hit: o.hit,
       // Resolved target paths (for reply-scoped clearance matching) + tier.
       targets: (o.targets || []).slice(0, 8),
+      viaCard: o.viaCard === true,
       escTier: o.severity || "critical",
       severity: "critical",
     };
@@ -375,6 +380,13 @@ function resolvePendingIfRefire(c: Cfg, fp: string): boolean {
     for (const ln of lines) {
       let o: any; try { o = JSON.parse(ln); } catch { continue; }
       if (o?.kind !== "pending" || o.fp !== fp || !o.intentId) continue;
+      // SECURITY (external review 2026-10-21): only a card-backed pending may
+      // clear a re-fire. The fail-CLOSED block path also records a pending (so
+      // the owner's signed reply can clear it), and treating THAT as an
+      // approved-resume turned the first block into a ticket: an identical
+      // second call sailed through with no approval at all. Legacy rows lack
+      // the field -> falsy -> denied, which is the safe direction.
+      if (o.viaCard !== true) continue;
       if (resolved.has(o.intentId)) continue;
       const tsMs = Date.parse(o.tsIssued);
       if (isNaN(tsMs) || now - tsMs > RESOLVE_WINDOW_MS) continue;
@@ -1164,7 +1176,7 @@ export default definePluginEntry({
               if (c.enforce) {
                 // Log the PENDING intent BEFORE returning the card. If approved,
                 // the resume re-fire resolves it; if it expires, the sweep nudges.
-                recordPendingIntent(c, { fp, command: execCommandOf(event), toolName, sessionKey, sender: sender ?? "self", hit: esc });
+                recordPendingIntent(c, { fp, command: execCommandOf(event), toolName, sessionKey, sender: sender ?? "self", hit: esc, viaCard: true });
                 return {
                   requireApproval: {
                     title: `dinotrust: confirm critical action`,

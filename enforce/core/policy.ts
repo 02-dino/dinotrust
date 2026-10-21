@@ -250,8 +250,31 @@ export function globToRe(glob: string): RegExp {
   return new RegExp("^" + re + "$");
 }
 
+/** Lexically resolve "." / ".." BEFORE any glob test. WHY (external review
+ * 2026-10-21): globs were matched against RAW text, so "workspace-bob/../.env"
+ * never looked like an escape and a path-scoped id could write outside its jail.
+ * Lexical on purpose -- NOT fs.realpath: no disk I/O, no symlink race, and it
+ * still works for a file that does not exist yet (every write target). Leading
+ * ".." that survive are KEPT, so an escaping relative path can never satisfy a
+ * scope glob by accident. */
+export function normalizePathLexical(p: string): string {
+  const s = String(p).replace(/\\/g, "/");
+  const abs = s.startsWith("/");
+  const out: string[] = [];
+  for (const seg of s.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length && out[out.length - 1] !== "..") out.pop();
+      else if (!abs) out.push("..");
+      continue;
+    }
+    out.push(seg);
+  }
+  return (abs ? "/" : "") + out.join("/");
+}
+
 export function matchesGlob(p: string, globs: string[]): string | null {
-  const norm = p.replace(/\\/g, "/");
+  const norm = normalizePathLexical(p);
   const base = norm.split("/").pop() || norm;
   for (const g of globs) {
     const re = globToRe(g);
@@ -535,13 +558,42 @@ function criticalDocHit(call: ToolCall, c: PolicyConfig): string | null {
 }
 
 /** True if an exec command invokes one of the allowlisted read-only scripts (no shell chaining). */
+/** Interpreters that take the real script as their next non-flag argument. */
+const INTERPRETERS = /^(python[0-9.]*|node|deno|bun|ruby|perl|php)$/;
+
+/** Extract the script that an exec command ACTUALLY invokes (argv[0], or the
+ * interpreter's first non-flag argument). Returns null when the command is not
+ * a plain single script invocation. WHY (external review 2026-10-21): the old
+ * check regex-matched an allowlisted NAME anywhere in the command string, so
+ * the name sitting in an ARGUMENT vouched for a different binary
+ * ("python3 tools/evil.py --config exchange_data.py" was ALLOWED). Position,
+ * not presence, decides what runs. */
+export function invokedScript(command: string): string | null {
+  const toks = command.trim().split(/\s+/).filter(Boolean);
+  if (toks.length === 0) return null;
+  let i = 0;
+  const base0 = (toks[0].split("/").pop() || toks[0]).toLowerCase();
+  if (INTERPRETERS.test(base0)) {
+    i = 1;
+    while (i < toks.length && toks[i].startsWith("-")) i++;   // -u, -O, ...
+    if (i >= toks.length) return null;
+  }
+  return toks[i].startsWith("-") ? null : toks[i];
+}
+
 export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolean {
   if (call.toolName !== "exec" || !call.command) return false;
   if (/[;|&><`$(){}]/.test(call.command)) return false; // reject chaining/redirection
+  const script = invokedScript(call.command);
+  if (!script || !script.endsWith(".py")) return false;
+  // Resolve ".." BEFORE trusting the name: without this, "../../evil/exchange_data.py"
+  // carries an allowlisted basename while pointing outside the tools dir.
+  const norm = normalizePathLexical(script);
+  if (norm.startsWith("..") || norm.includes("/../")) return false;
+  const file = norm.split("/").pop() || norm;
   for (const s of scripts) {
-    const esc = s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp("(^|[\\/\\s])" + esc + "[A-Za-z0-9_]*\\.py([\\s]|$)");
-    if (re.test(call.command)) return true;
+    // exact basename, or the documented suffix form (semantic_search -> semantic_search_cli.py)
+    if (file === `${s}.py` || new RegExp(`^${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[A-Za-z0-9_]*\\.py$`).test(file)) return true;
   }
   return false;
 }
@@ -606,13 +658,29 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
  * THE decision. Pure function: (call, senderId, config) -> Verdict.
  * senderId === null  => internal/self turn (agent-operated-by-owner) => treated as owner.
  */
+/** Channel lanes carry a real human sender. A null id THERE means the platform
+ * metadata was LOST (integration bug), which must NOT inherit owner -- the
+ * instruction layer already says deny on missing/ambiguous identity. A null id
+ * on a non-channel lane (cron/explicit/main/subagent) is the agent operating
+ * itself unattended, which is the ONLY legitimate null. Collapsing both into
+ * "owner" was the gap; collapsing both into "deny" would kill every cron. */
+const CHANNEL_LANES = new Set(["telegram","whatsapp","signal","discord","slack","imessage","mattermost","matrix","email","sms","line","wechat","messenger","instagram","twitter","x","teams","webchat"]);
+export function isChannelLane(sessionKey: string): boolean {
+  const parts = String(sessionKey || "").split(":");
+  return parts.length >= 3 && parts[0] === "agent" && CHANNEL_LANES.has(String(parts[2]).toLowerCase());
+}
+
 export function decide(call: ToolCall, senderId: string | null, config: PolicyConfig, sessionKey: string = ""): Verdict {
   const c = config;
   // Multi-agent owner scoping: resolve the effective owner list for this
   // sessionKey (agentOwners map -> flat ownerIds fallback). sessionKey="" +
   // no map = identical to the single-agent flat ownerIds path (back-compat).
   const owners = pickAgentOwners(sessionKey, c);
-  const isOwner = senderId == null || owners.includes(senderId);
+  // null sender is owner ONLY when it is the agent itself (non-channel lane).
+  // On a channel lane a missing id = lost metadata -> falls through to the
+  // strictest tier, never owner. See isChannelLane doc above.
+  const agentSelf = senderId == null && !isChannelLane(sessionKey);
+  const isOwner = agentSelf || (senderId != null && owners.includes(senderId));
   const protectedHit = anyProtected(call, c.protectedGlobs);
 
   // ── OWNER / agent-operated-by-owner ──

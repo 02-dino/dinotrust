@@ -104,6 +104,44 @@ tt("scopeAgents: in-agent write allowed", call("write", { paths: ["workspace-ads
 tt("scopeAgents: WRONG agent -> falls through to non-owner block", call("write", { paths: ["workspace-ads/x.md"] }), "888888", "block", "agent:sosmed:telegram:direct:1");
 tt("scopeAgents: in-agent read cross-workspace allowed", call("read", { paths: ["workspace-sosmed/shared.db"] }), "888888", "allow", "agent:ads:telegram:direct:1");
 
+// ── SECURITY REGRESSION SUITE (external review 2026-10-21) ──
+// These encode gaps a reviewer reproduced against v1.30.3. They MUST fail on
+// the pre-fix engine: a green suite that misses them is the real bug.
+function ts(name, c, sender, expect, sessionKey = "") {
+  const v = decide(c, sender, CFG, sessionKey);
+  const ok = v.action === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+
+// #3 path traversal: scope/protected globs matched raw text, so "../" walked out.
+tt("SEC#3 traversal: ../ into another workspace BLOCKED", call("write", { paths: ["workspace-bob/../workspace-alice/x.md"] }), "555555", "block");
+tt("SEC#3 traversal: ../ to a dotenv BLOCKED", call("write", { paths: ["workspace-bob/../.env"] }), "555555", "block");
+tt("SEC#3 traversal: deep ../../ BLOCKED", call("write", { paths: ["workspace-bob/a/b/../../../etc/passwd"] }), "555555", "block");
+tt("SEC#3 traversal: ./ noise inside scope still ALLOWED", call("write", { paths: ["workspace-bob/./notes.md"] }), "555555", "allow");
+tt("SEC#3 traversal: in-scope ../ that stays inside ALLOWED", call("write", { paths: ["workspace-bob/sub/../notes.md"] }), "555555", "allow");
+
+// #4 empty identity: sender==null was treated as owner. On a CHANNEL lane a
+// missing id means metadata was LOST -> must not inherit owner.
+ts("SEC#4 identity: null sender on telegram lane is NOT owner", call("write", { paths: ["/root/.openclaw/openclaw.json"] }), null, "block", "agent:acme:telegram:group:-100:topic:1");
+ts("SEC#4 identity: null sender on whatsapp lane is NOT owner", call("exec", { command: "rm -rf /root/data" }), null, "block", "agent:acme:whatsapp:direct:62811");
+ts("SEC#4 identity: null sender on NON-channel lane stays agent-self (cron keeps working)", call("exec", { command: "rm -rf /root/data" }), null, "warn", "agent:acme:explicit");
+ts("SEC#4 identity: real owner id on channel lane unaffected", call("write", { paths: ["/root/.openclaw/openclaw.json"] }), OWNER, "approve", "agent:acme:telegram:direct:111111");
+ts("SEC#4 identity: back-compat empty sessionKey + null sender = agent-self", call("exec", { command: "ls -la" }), null, "allow");
+
+// #2 script allowlist: the name was matched ANYWHERE in the command string, so
+// an allowlisted name sitting in an ARGUMENT vouched for a different binary.
+t("SEC#2 script: real invocation allowed", call("exec", { command: "python3 tools/exchange_data.py price BTC" }), STRANGER, "allow");
+t("SEC#2 script: venv interpreter allowed", call("exec", { command: "./venv/bin/python tools/exchange_data.py price BTC" }), STRANGER, "allow");
+t("SEC#2 script: direct ./tools shebang allowed", call("exec", { command: "./tools/exchange_data.py price BTC" }), STRANGER, "allow");
+t("SEC#2 script: documented suffix (semantic_search -> _cli.py) allowed", call("exec", { command: "python3 tools/semantic_search_cli.py query" }), STRANGER, "allow");
+t("SEC#2 script: interpreter flag before script allowed", call("exec", { command: "python3 -u tools/exchange_data.py price BTC" }), STRANGER, "allow");
+t("SEC#2 script: allowlisted name as ARGUMENT must NOT vouch", call("exec", { command: "python3 tools/evil_exfil.py --config exchange_data.py" }), STRANGER, "block");
+t("SEC#2 script: cat of an allowlisted file is not an invocation", call("exec", { command: "cat exchange_data.py" }), STRANGER, "block");
+t("SEC#2 script: non-allowlisted script blocked", call("exec", { command: "python3 tools/evil_exfil.py" }), STRANGER, "block");
+t("SEC#2 script: traversal out to a same-named script blocked", call("exec", { command: "python3 ../../evil/exchange_data.py" }), STRANGER, "block");
+t("SEC#2 script: prefix-only name must not match (exchange_data vs exchange_datax)", call("exec", { command: "python3 tools/exchange_data_evil.sh" }), STRANGER, "block");
+
 // ── D3: teardown SCRIPT in --dry-run -> not critical (narrow carve-out) ──
 // The carve-out must NOT become a magic word: `rm` has no --dry-run flag, so a
 // blanket skip would let `rm -rf /x --dry-run` delete /x while reading as safe.
