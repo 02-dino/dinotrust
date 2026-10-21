@@ -999,9 +999,27 @@ function resolveSenderId(event: any, ctx: any): string | null {
   // instead of inventing one. NOT a trust escalation: same platform-signed id
   // the direct lane uses, arriving via the hook that actually receives it.
   // Read-only -- the latch is left unconsumed so approval paths still work.
+  // AGE-BOUNDED (2026-10-22): an unbounded latch read would let a 10-minute-old
+  // message keep vouching for identity -- e.g. a scheduled run firing later in
+  // the same group session would inherit the last human's tier. Mirrors
+  // peekInbound's envelope exactly: a latch ADOPTED by this turn stays valid for
+  // the whole turn (long jobs must not lose identity mid-run, that was the
+  // lockout), an unclaimed one only inside the short TTL, and nothing survives
+  // the hard ceiling. Read-only except for the adoption stamp.
   try {
     const m = lastInbound.get(sk);
-    if (m && m.senderId != null && String(m.senderId).length > 0) return String(m.senderId);
+    if (m && m.senderId != null && String(m.senderId).length > 0) {
+      const age = Date.now() - m.tsMs;
+      const runId = String(ctx?.runId ?? event?.runId ?? "") || null;
+      if (age <= OWNER_MSG_ADOPTED_MAX_MS) {
+        if (m.runId != null) {
+          if (m.runId === runId) return String(m.senderId);
+        } else if (age <= OWNER_MSG_TTL_MS) {
+          if (runId) m.runId = runId;   // bind to this turn, same as peekInbound
+          return String(m.senderId);
+        }
+      }
+    }
   } catch { /* latch unavailable -> fall through to null (agent-self / strict) */ }
   return null;
 }
