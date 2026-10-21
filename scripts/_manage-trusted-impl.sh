@@ -59,7 +59,7 @@ warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
 err()     { echo -e "${RED}✗${NC}  $*" >&2; }
 error()   { err "$*"; exit 1; }
 
-USAGE="Usage: manage-access.sh trusted <list|show|add|remove> [id] [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--oc-json PATH] [--dt-conf PATH]"
+USAGE="Usage: manage-access.sh trusted <list|show|add|remove> [id] [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--agents agent:x,agent:y] [--oc-json PATH] [--dt-conf PATH]"
 
 ACTION="${1:-}"; shift || true
 [[ "$ACTION" != "list" && "$ACTION" != "show" && "$ACTION" != "add" && "$ACTION" != "remove" ]] && \
@@ -71,12 +71,13 @@ if [[ "$ACTION" != "list" ]]; then
   [[ -z "$ARG_ID" ]] && error "manage-access.sh trusted $ACTION requires an id (e.g. 123456789)."
 fi
 
-OPT_TOOLS=""; OPT_SCRIPTS=""; OPT_SCOPE=""; OPT_OC_JSON=""; OPT_DT_CONF=""
+OPT_TOOLS=""; OPT_SCRIPTS=""; OPT_SCOPE=""; OPT_AGENTS=""; OPT_OC_JSON=""; OPT_DT_CONF=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tools)    OPT_TOOLS="$2"; shift 2 ;;
     --scripts)  OPT_SCRIPTS="$2"; shift 2 ;;
     --scope)    OPT_SCOPE="$2"; shift 2 ;;
+    --agents)   OPT_AGENTS="$2"; shift 2 ;;
     --oc-json)  OPT_OC_JSON="$2"; shift 2 ;;
     --dt-conf)  OPT_DT_CONF="$2"; shift 2 ;;
     *) error "Unknown option: $1" ;;
@@ -117,7 +118,7 @@ if action == "show":
 if not entries and action == "list":
     print("    (none)")
 for e in entries:
-    print(f"    id={e.get('id')}  tools={e.get('allowedTools', '(default)')}  scripts={e.get('allowedScripts', '(shared default)')}  scope={e.get('scopePathGlobs', '(none - unrestricted paths)')}")
+    print(f"    id={e.get('id')}  tools={e.get('allowedTools', '(default)')}  scripts={e.get('allowedScripts', '(shared default)')}  scope={e.get('scopePathGlobs', '(none - unrestricted paths)')}  agents={e.get('scopeAgents', '(none - ALL agents)')}")
 PY
   fi
   if [[ "$HAS_DT" == "true" ]]; then
@@ -135,7 +136,7 @@ if action == "show":
 if not entries and action == "list":
     print("    (none)")
 for e in entries:
-    print(f"    id={e.get('id')}  tools={e.get('allowedTools', '(default)')}  scripts={e.get('allowedScripts', '(shared default)')}  scope={e.get('scopePathGlobs', '(none - unrestricted paths)')}")
+    print(f"    id={e.get('id')}  tools={e.get('allowedTools', '(default)')}  scripts={e.get('allowedScripts', '(shared default)')}  scope={e.get('scopePathGlobs', '(none - unrestricted paths)')}  agents={e.get('scopeAgents', '(none - ALL agents)')}")
 PY
   fi
   exit 0
@@ -153,6 +154,7 @@ if [[ "$ACTION" == "add" ]]; then
   TOOLS_JSON=$(csv_to_json_array "$OPT_TOOLS")
   SCRIPTS_JSON=$(csv_to_json_array "$OPT_SCRIPTS")
   SCOPE_JSON=$(csv_to_json_array "$OPT_SCOPE")
+  AGENTS_JSON=$(csv_to_json_array "$OPT_AGENTS")
   if [[ "$TOOLS_JSON" == "null" && "$SCRIPTS_JSON" == "null" && "$SCOPE_JSON" == "null" ]]; then
     info "No --tools/--scripts/--scope given: this id gets the DEFAULT_TRUSTED_TOOLS set (read/write/edit/apply_patch/exec/web_search/web_fetch/browser/memory_search/memory_get), the shared nonOwnerAllowedScripts, and NO path restriction (any path allowed for allowed tools)."
   fi
@@ -165,9 +167,9 @@ apply_to_store() {
 
   local rc=0
   if [[ "$store_kind" == "oc" ]]; then
-    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" <<'PY' && rc=0 || rc=$?
+    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" <<'PY' && rc=0 || rc=$?
 import json, sys
-path, action, arg_id, tools_j, scripts_j, scope_j = sys.argv[1:7]
+path, action, arg_id, tools_j, scripts_j, scope_j, agents_j = sys.argv[1:8]
 with open(path) as f:
     data = json.load(f)
 entry = data.setdefault("plugins", {}).setdefault("entries", {}).setdefault("dinotrust-enforce", {})
@@ -183,14 +185,24 @@ if action == "remove":
         sys.stderr.write(f"NOOP: '{arg_id}' is not a trusted id. No change.\n")
         sys.exit(3)
 else:  # add
-    trusted = [e for e in trusted if str(e.get("id")) != arg_id]  # replace if exists
-    new_entry = {"id": arg_id}
+    # MERGE, never rebuild. WHY (incident 2026-10-21): this used to drop the old
+    # entry and construct {"id": ...} from scratch, so every field the CLI has no
+    # flag for -- scopeAgents above all -- was SILENTLY ERASED by an unrelated
+    # update. Measured: six per-agent grants became cross-agent in one command.
+    # Silent privilege WIDENING is the one failure mode this script must not have,
+    # so unknown keys are carried over untouched and only passed flags override.
+    prior = next((e for e in trusted if str(e.get("id")) == arg_id), {})
+    trusted = [e for e in trusted if str(e.get("id")) != arg_id]
+    new_entry = dict(prior)
+    new_entry["id"] = arg_id
     if tools_j != "null":
         new_entry["allowedTools"] = json.loads(tools_j)
     if scripts_j != "null":
         new_entry["allowedScripts"] = json.loads(scripts_j)
     if scope_j != "null":
         new_entry["scopePathGlobs"] = json.loads(scope_j)
+    if agents_j != "null":
+        new_entry["scopeAgents"] = json.loads(agents_j)
     trusted.append(new_entry)
 
 cfg["trustedIds"] = trusted
@@ -200,9 +212,9 @@ with open(path, "w") as f:
     f.write("\n")
 PY
   else  # dt
-    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" <<'PY' && rc=0 || rc=$?
+    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" <<'PY' && rc=0 || rc=$?
 import json, sys
-path, action, arg_id, tools_j, scripts_j, scope_j = sys.argv[1:7]
+path, action, arg_id, tools_j, scripts_j, scope_j, agents_j = sys.argv[1:8]
 with open(path) as f:
     data = json.load(f)
 trusted = data.get("trustedIds", [])
@@ -216,14 +228,24 @@ if action == "remove":
         sys.stderr.write(f"NOOP: '{arg_id}' is not a trusted id. No change.\n")
         sys.exit(3)
 else:  # add
+    # MERGE, never rebuild. WHY (incident 2026-10-21): this used to drop the old
+    # entry and construct {"id": ...} from scratch, so every field the CLI has no
+    # flag for -- scopeAgents above all -- was SILENTLY ERASED by an unrelated
+    # update. Measured: six per-agent grants became cross-agent in one command.
+    # Silent privilege WIDENING is the one failure mode this script must not have,
+    # so unknown keys are carried over untouched and only passed flags override.
+    prior = next((e for e in trusted if str(e.get("id")) == arg_id), {})
     trusted = [e for e in trusted if str(e.get("id")) != arg_id]
-    new_entry = {"id": arg_id}
+    new_entry = dict(prior)
+    new_entry["id"] = arg_id
     if tools_j != "null":
         new_entry["allowedTools"] = json.loads(tools_j)
     if scripts_j != "null":
         new_entry["allowedScripts"] = json.loads(scripts_j)
     if scope_j != "null":
         new_entry["scopePathGlobs"] = json.loads(scope_j)
+    if agents_j != "null":
+        new_entry["scopeAgents"] = json.loads(agents_j)
     trusted.append(new_entry)
 
 data["trustedIds"] = trusted
