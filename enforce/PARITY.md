@@ -38,6 +38,18 @@ the operator to ignore it.
   (mutatingTools minus exec: write/edit/apply_patch). read/memory/web carry
   paths but are NOT path-scoped -> cross-agent read collaboration stays open.
   exec is gated by allowedScripts, not path.
+- KNOWN GAP (deliberate, 2026-10-22): null-sender handling is NOT byte-parallel.
+  policy.ts + handler.ts split a null sender by LANE via isChannelLane() -- null
+  on a chat lane means platform metadata was LOST and is never owner; null on a
+  cron/explicit/main/subagent lane is the agent operating itself. The
+  pre_tool_call adapter CANNOT express this: its stdin contract carries
+  session_id but no lane-shaped session key, and the harnesses it serves
+  (Claude Code / Codex / Hermes shell hooks) have no multi-party chat lane, so
+  null there really is the local operator. If a CHAT-surface harness ever adopts
+  pre_tool_call, it MUST pass a lane-shaped key and handler.py's `is_owner` line
+  must split too. Measured cost of the lane split being missing on a chat
+  surface: every group participant resolves to owner-tier and the trusted /
+  non-owner tiers are never consulted at all.
 - protectedGlobs / escalation / criticalDoc ALWAYS win over a trusted grant.
 - criticalExecPatterns: action-anchored, mirrored across all FOUR surfaces above.
 - auditAllowedNonOwnerTools: observability flag, mirrored across all FOUR surfaces

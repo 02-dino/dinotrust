@@ -126,8 +126,35 @@ def glob_to_re(glob):
     return re.compile("^" + out + "$")
 
 
+def normalize_path_lexical(p):
+    """Lexically resolve "." / ".." BEFORE any glob test.
+
+    WHY (external review 2026-10-21): globs were matched against RAW text, so
+    "workspace-x/../.env" never looked like an escape and a path-scoped id could
+    write outside its jail. Lexical on purpose -- NOT os.path.realpath: no disk
+    I/O, no symlink race, and it still works for a file that does not exist yet
+    (every write target). Leading ".." that survive are KEPT, so an escaping
+    relative path can never satisfy a scope glob by accident.
+    Parity: policy.ts / handler.ts normalizePathLexical.
+    """
+    t = str(p).replace("\\", "/")
+    absolute = t.startswith("/")
+    out = []
+    for seg in t.split("/"):
+        if not seg or seg == ".":
+            continue
+        if seg == "..":
+            if out and out[-1] != "..":
+                out.pop()
+            elif not absolute:
+                out.append("..")
+            continue
+        out.append(seg)
+    return ("/" if absolute else "") + "/".join(out)
+
+
 def matches_glob(p, globs):
-    norm = p.replace("\\", "/")
+    norm = normalize_path_lexical(p)
     base = norm.split("/")[-1] if "/" in norm else norm
     for g in globs:
         r = glob_to_re(g)
@@ -331,14 +358,49 @@ def critical_doc_hit(tool, paths, command, cfg):
     return None
 
 
+INTERPRETERS = re.compile(r"^(python[0-9.]*|node|deno|bun|ruby|perl|php)$")
+
+
+def invoked_script(command):
+    """The script an exec command ACTUALLY invokes (argv[0], or the
+    interpreter's first non-flag argument), or None.
+
+    WHY (external review 2026-10-21): the old check regex-matched an allowlisted
+    NAME anywhere in the command string, so the name sitting in an ARGUMENT
+    vouched for a different binary, and merely reading an allowlisted file
+    counted as invoking it. Position, not presence, decides what runs.
+    Parity: policy.ts / handler.ts invokedScript.
+    """
+    toks = [t for t in str(command).strip().split() if t]
+    if not toks:
+        return None
+    i = 0
+    base0 = (toks[0].split("/")[-1] or toks[0]).lower()
+    if INTERPRETERS.match(base0):
+        i = 1
+        while i < len(toks) and toks[i].startswith("-"):
+            i += 1
+        if i >= len(toks):
+            return None
+    return None if toks[i].startswith("-") else toks[i]
+
+
 def exec_runs_allowed_script(command, scripts):
     if not command:
         return False
     if re.search(r"[;|&><`$(){}]", command):
         return False
+    script = invoked_script(command)
+    if not script or not script.endswith(".py"):
+        return False
+    # Resolve ".." BEFORE trusting the name: "../../evil/exchange_data.py"
+    # carries an allowlisted basename while pointing outside the tools dir.
+    norm = normalize_path_lexical(script)
+    if norm.startswith("..") or "/../" in norm:
+        return False
+    fname = norm.split("/")[-1] or norm
     for s in scripts:
-        esc = re.escape(s)
-        if re.search(r"(^|[\\/\s])" + esc + r"[A-Za-z0-9_]*\.py([\s]|$)", command):
+        if fname == s + ".py" or re.match(r"^" + re.escape(s) + r"[A-Za-z0-9_]*\.py$", fname):
             return True
     return False
 
@@ -382,6 +444,16 @@ def decide_trusted(tool, paths, command, entry, cfg):
     return ("block", "trusted: %s tool %s not allowlisted" % (entry_id, tool))
 
 def decide(tool, paths, command, sender_id, cfg):
+    # NOTE (parity gap, deliberate -- 2026-10-22): the OpenClaw adapter splits a
+    # null sender by LANE (null on a chat lane = lost metadata, never owner;
+    # null elsewhere = the agent running itself). This adapter's stdin contract
+    # carries session_id but NO lane-shaped session key, so that distinction is
+    # not expressible here. Keeping the null-is-self reading is correct for the
+    # harnesses this adapter actually serves (Claude Code / Codex / Hermes shell
+    # hooks), where there is no multi-party chat lane and a null sender really
+    # is the local operator. Recorded in PARITY.md so it stays a KNOWN gap
+    # rather than a silent one: if a chat-surface harness ever adopts this
+    # adapter, it MUST pass a lane-shaped key and this line must split too.
     is_owner = sender_id is None or sender_id in cfg["ownerIds"]
     protected = any_protected(tool, paths, command, cfg["protectedGlobs"])
 
