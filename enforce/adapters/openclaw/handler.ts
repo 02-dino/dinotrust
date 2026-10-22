@@ -202,6 +202,36 @@ function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
 
 // Match senderId AND (if set) scopeAgents against the current sessionKey, so a
 // trusted karyawan on a shared gateway is trusted only inside their own agent.
+/**
+ * Scope-aware critical gate for the TRUSTED tier.
+ *
+ * WHY: trusted is otherwise hard-blocked from every critical action, which makes
+ * a delegated workspace unusable -- a PIC cannot clear their OWN build dir.
+ * This NARROWS the ceiling instead of removing it: your own jail, nothing else.
+ *
+ * CONTRACT (fail-CLOSED): true ONLY when the command names at least one
+ * path-looking token AND every such token resolves inside the entry's scope.
+ * A command with NO path token cannot be PROVEN in-scope, so it returns false.
+ *
+ * KNOWN-DEAD for escalation hits (measured 2026-10-22): the call site also
+ * requires !escalationHit(), and an irreversible exec IS an escalationHit via
+ * criticalExecPatterns -- so for the delete-your-own-build-dir case this gate
+ * is inert and the action stays BLOCKED. Kept faithful rather than quietly
+ * widened: enabling it is an owner decision, not a refactor side effect.
+ * Reachable only when the hit came from criticalDocHit with no escalation hit.
+ *
+ * NOT A SUBSTITUTE for the protected/escalation gates: openclaw.json, .env and
+ * the security docs are checked BEFORE this and stay blocked regardless.
+ */
+function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
+  if (!globs || globs.length === 0) return false;
+  const tokens = cmd
+    .split(/[\s;|&><'"()]+/)
+    .filter((t) => t && !t.startsWith("-") && (t.includes("/") || t === "." || t === ".."));
+  if (tokens.length === 0) return false;
+  return tokens.every((t) => matchesProtected(t, globs) !== null);
+}
+
 function findTrusted(senderId: string, c: Cfg, sessionKey: string): TrustedEntry | null {
   for (const t of c.trustedIds) {
     if (t.id !== senderId) continue;
@@ -1362,11 +1392,22 @@ export default definePluginEntry({
           // Critical/irreversible actions AND security-doc writes are BLOCKED for
           // trusted, never auto-approved (below-owner ceiling: no irreversible
           // ops, no touching config/security files).
+          // Hard-blocked EXCEPT when the owner granted a path scope and the
+          // command stays fully inside it. escalation targets (openclaw.json /
+          // .env) are NEVER in scope by construction, so self-promotion stays
+          // shut. See execCriticalWithinScope KNOWN-DEAD note for the reach.
           const crit = escalationHit(event, c) ?? criticalDocHit(event, c);
           if (crit) {
-            audit(c, { evt: "block", rule: "R-trusted-critical", toolName, sessionKey, sender, id: trusted.id, hit: crit, blocked: c.enforce });
-            if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted critical/irreversible denied (${crit})` };
-            return;
+            const scopedOk = toolName === "exec"
+              && !!trusted.scopePathGlobs?.length
+              && execCriticalWithinScope(String((event?.params ?? {}).command ?? ""), trusted.scopePathGlobs)
+              && !escalationHit(event, c);
+            if (!scopedOk) {
+              audit(c, { evt: "block", rule: "R-trusted-critical", toolName, sessionKey, sender, id: trusted.id, hit: crit, blocked: c.enforce });
+              if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted critical/irreversible denied (${crit})` };
+              return;
+            }
+            audit(c, { evt: "allow", rule: "R-trusted-critical-scoped", toolName, sessionKey, sender, id: trusted.id, hit: crit });
           }
           const allowedTools = trusted.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
           if (toolName === "exec") {
@@ -1375,8 +1416,29 @@ export default definePluginEntry({
               if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted exec not allowlisted` };
               return;
             }
+            // Allowlisted script => always fine (cheapest, most explicit path).
             if (execRunsAllowedScript(event, trusted.allowedScripts ?? c.nonOwnerAllowedScripts)) {
               audit(c, { evt: "allow", rule: "R-trusted-script", toolName, sessionKey, sender, id: trusted.id });
+              return;
+            }
+            // WORKSPACE-SCOPED EXEC: a per-script allowlist does not survive
+            // contact with reality -- every new tool a PIC writes would be
+            // silently denied until someone edits config. So an entry WITH a
+            // path scope may run anything whose path-ish tokens all resolve
+            // inside that scope. Tokenless commands carry no out-of-scope
+            // target, and the protected/critical gates above already ran.
+            if (trusted.scopePathGlobs?.length) {
+              const cmd = String((event?.params ?? {}).command ?? "");
+              const toks = cmd
+                .split(/[\s;|&><'"()]+/)
+                .filter((t) => t && !t.startsWith("-") && t.includes("/"));
+              const outOfScope = toks.filter((t) => matchesProtected(t, trusted.scopePathGlobs!) === null);
+              if (outOfScope.length === 0) {
+                audit(c, { evt: "allow", rule: "R-trusted-exec-scoped", toolName, sessionKey, sender, id: trusted.id });
+                return;
+              }
+              audit(c, { evt: "block", rule: "R-trusted-exec-scoped", toolName, sessionKey, sender, id: trusted.id, paths: outOfScope, blocked: c.enforce });
+              if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted exec path outside scope (${outOfScope.join(", ")})` };
               return;
             }
             audit(c, { evt: "block", rule: "R-trusted-exec", toolName, sessionKey, sender, id: trusted.id, blocked: c.enforce });

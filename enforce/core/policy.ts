@@ -598,6 +598,37 @@ export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolea
   return false;
 }
 
+/**
+ * Scope-aware critical gate for the TRUSTED tier.
+ *
+ * WHY: trusted used to be hard-blocked from every critical action, which makes a
+ * delegated workspace unusable -- a PIC cannot clear their OWN build dir. This
+ * NARROWS the ceiling instead of removing it: wreck your own jail, nothing else.
+ *
+ * CONTRACT (fail-CLOSED): true ONLY when the command names at least one
+ * path-looking token AND every such token resolves inside the entry's scope.
+ * A command with NO path token (a bare force-push, say) returns false and stays
+ * blocked, because a command with no visible target cannot be PROVEN in-scope.
+ *
+ * KNOWN-DEAD for escalation hits (measured 2026-10-22): the call site also
+ * requires !escalationHit(), and an irreversible exec IS an escalationHit via
+ * criticalExecPatterns -- so for the delete-your-own-build-dir case this gate
+ * is inert and the action stays BLOCKED. Kept faithful rather than quietly
+ * widened: enabling it is an owner decision, not a refactor side effect.
+ *
+ * NOT A SUBSTITUTE for the protected/escalation gates: openclaw.json, .env and
+ * the security docs are checked BEFORE this and stay blocked regardless, so a
+ * trusted user can never edit their way up to owner.
+ */
+export function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
+  if (!globs || globs.length === 0) return false;
+  const tokens = cmd
+    .split(/[\s;|&><'"()]+/)
+    .filter((t) => t && !t.startsWith("-") && (t.includes("/") || t === "." || t === ".."));
+  if (tokens.length === 0) return false;
+  return tokens.every((t) => matchesGlob(t, globs) !== null);
+}
+
 /** Finds a config.trustedIds entry matching senderId AND (if the entry sets
  * scopeAgents) the current agent's sessionKey, or null. sessionKey substring
  * match mirrors pickAgentOwners so "agent:ads" scopes to that agent lane. */
@@ -639,16 +670,41 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
   // trusted, never auto-approved the way owner's escalationHit -> "approve".
   // This is the other half of the below-owner ceiling: trusted can neither run
   // irreversible ops nor touch config/security files (escalation OR doc paths).
+  // Critical/irreversible: hard-blocked EXCEPT when the owner granted a path
+  // scope and the command stays fully inside it. escalationHit targets
+  // (openclaw.json / .env) are NEVER in scope by construction, so the
+  // self-promotion path stays shut even for an entry that HAS a scope.
   const crit = escalationHit(call, c) ?? criticalDocHit(call, c);
-  if (crit) return { action: "block", reason: `trusted: ${entry.id} critical/irreversible denied: ${crit}` };
+  if (crit) {
+    const scopedOk = call.toolName === "exec"
+      && !!entry.scopePathGlobs?.length
+      && execCriticalWithinScope(call.command ?? "", entry.scopePathGlobs)
+      && !escalationHit(call, c);
+    if (!scopedOk) return { action: "block", reason: `trusted: ${entry.id} critical/irreversible denied: ${crit}` };
+  }
 
   const allowedTools = entry.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
   if (call.toolName === "exec") {
     if (!allowedTools.includes("exec")) return { action: "block", reason: `trusted: ${entry.id} exec not allowlisted` };
     const scripts = entry.allowedScripts ?? c.nonOwnerAllowedScripts;
-    return execRunsAllowedScript(call, scripts)
-      ? { action: "allow", reason: `trusted: ${entry.id} allowlisted script` }
-      : { action: "block", reason: `trusted: ${entry.id} exec restricted to allowlisted scripts` };
+    // Allowlisted script => always fine (cheapest, most explicit path).
+    if (execRunsAllowedScript(call, scripts)) return { action: "allow", reason: `trusted: ${entry.id} allowlisted script` };
+    // WORKSPACE-SCOPED EXEC: a per-script allowlist does not survive contact
+    // with reality -- every new tool a PIC writes would be silently denied until
+    // someone edits config. So an entry WITH a path scope may run anything whose
+    // path-ish tokens all resolve inside that scope. Tokenless commands (`ls`,
+    // `git status`) carry no out-of-scope target, and the protected/critical
+    // gates above already ran, so they pass too.
+    if (entry.scopePathGlobs?.length) {
+      const toks = (call.command ?? "")
+        .split(/[\s;|&><'"()]+/)
+        .filter((t) => t && !t.startsWith("-") && t.includes("/"));
+      const outOfScope = toks.filter((t) => matchesGlob(t, entry.scopePathGlobs!) === null);
+      return outOfScope.length === 0
+        ? { action: "allow", reason: `trusted: ${entry.id} exec within scope` }
+        : { action: "block", reason: `trusted: ${entry.id} exec path outside scope (${outOfScope.join(", ")})` };
+    }
+    return { action: "block", reason: `trusted: ${entry.id} exec restricted to allowlisted scripts` };
   }
   if (allowedTools.includes(call.toolName)) return { action: "allow", reason: `trusted: ${entry.id} tool allowed` };
   return { action: "block", reason: `trusted: ${entry.id} tool ${call.toolName} not allowlisted` };

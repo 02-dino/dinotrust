@@ -142,6 +142,31 @@ t("SEC#2 script: non-allowlisted script blocked", call("exec", { command: "pytho
 t("SEC#2 script: traversal out to a same-named script blocked", call("exec", { command: "python3 ../../evil/exchange_data.py" }), STRANGER, "block");
 t("SEC#2 script: prefix-only name must not match (exchange_data vs exchange_datax)", call("exec", { command: "python3 tools/exchange_data_evil.sh" }), STRANGER, "block");
 
+// ── SCOPED-CRITICAL for trusted (feature that lived ONLY in a hand-patched
+// install until 2026-10-22). A path-scoped PIC may wreck their OWN jail; the
+// ceiling (protected/escalation) still wins. Fail-CLOSED: a command with no
+// visible target cannot be proven in-scope, so it stays blocked.
+// MEASURED CONTRACT, not the one the comment advertises. scopedOk requires
+// `&& !escalationHit()`, but a delete IS an escalationHit via
+// criticalExecPatterns -- the two conditions cancel out, so the carve-out can
+// never fire for the very command it was written for. Pinned as BLOCK because
+// that is what the code does; widening it is a security decision for the owner,
+// not something a refactor should smuggle in. See KNOWN-DEAD note in policy.ts.
+tt("SCOPED-CRIT: delete inside own scope -> STILL blocked (carve-out is inert for escalation hits)", call("exec", { command: "rm -rf workspace-bob/build" }), "555555", "block");
+tt("SCOPED-CRIT: rm -rf OUTSIDE scope -> block", call("exec", { command: "rm -rf workspace-alice/build" }), "555555", "block");
+tt("SCOPED-CRIT: traversal out of scope -> block", call("exec", { command: "rm -rf workspace-bob/../workspace-alice" }), "555555", "block");
+tt("SCOPED-CRIT: mixed in+out of scope -> block", call("exec", { command: "rm -rf workspace-bob/a workspace-alice/b" }), "555555", "block");
+tt("SCOPED-CRIT: tokenless critical (force-push) -> block", call("exec", { command: "git push origin main --force" }), "555555", "block");
+tt("SCOPED-CRIT: escalation path never in scope -> block", call("exec", { command: "rm -rf workspace-bob/.env" }), "555555", "block");
+tt("SCOPED-CRIT: entry WITHOUT scope gets no carve-out", call("exec", { command: "rm -rf /anything" }), "777777", "block");
+tt("SCOPED-CRIT: non-exec critical unaffected", call("write", { paths: ["workspace-bob/x"] , command: "" }), "555555", "allow");
+// ── WORKSPACE-SCOPED EXEC: a path scope replaces the per-script allowlist,
+// because a per-script list does not survive a PIC writing a new tool.
+tt("SCOPED-EXEC: own-scope script runs", call("exec", { command: "python3 workspace-bob/tools/new_tool.py" }), "555555", "allow");
+tt("SCOPED-EXEC: out-of-scope script blocked", call("exec", { command: "python3 workspace-alice/tools/x.py" }), "555555", "block");
+tt("SCOPED-EXEC: tokenless command allowed", call("exec", { command: "git status" }), "555555", "allow");
+tt("SCOPED-EXEC: no-scope entry still allowlist-only", call("exec", { command: "python3 tools/whatever.py" }), "777777", "block");
+
 // ── D3: teardown SCRIPT in --dry-run -> not critical (narrow carve-out) ──
 // The carve-out must NOT become a magic word: `rm` has no --dry-run flag, so a
 // blanket skip would let `rm -rf /x --dry-run` delete /x while reading as safe.
