@@ -385,11 +385,16 @@ def invoked_script(command):
     return None if toks[i].startswith("-") else toks[i]
 
 
-def exec_runs_allowed_script(command, scripts):
-    if not command:
-        return False
-    if re.search(r"[;|&><`$(){}]", command):
-        return False
+# Shell metacharacters that make a command more than ONE plain invocation.
+SHELL_META = r"[;|&><`$(){}]"
+
+
+def names_allowlisted_script(command, scripts):
+    """Does argv[0] (or the interpreter's target) name an allowlisted script?
+
+    Split out of exec_runs_allowed_script so exec_deny_reason can reuse the SAME
+    name test instead of carrying a second copy that could drift.
+    """
     script = invoked_script(command)
     if not script or not script.endswith(".py"):
         return False
@@ -403,6 +408,41 @@ def exec_runs_allowed_script(command, scripts):
         if fname == s + ".py" or re.match(r"^" + re.escape(s) + r"[A-Za-z0-9_]*\.py$", fname):
             return True
     return False
+
+
+def exec_runs_allowed_script(command, scripts):
+    if not command:
+        return False
+    if re.search(SHELL_META, command):
+        return False
+    return names_allowlisted_script(command, scripts)
+
+
+def exec_deny_reason(command, scripts):
+    """The SPECIFIC reason an exec failed the allowlist, for the block message.
+
+    WHY (measured 2026-10-22): a command whose script WAS allowlisted but which
+    chained (`a.py; b.py`, `a.py | python3 -c ...`) was denied with the generic
+    "restricted to allowlisted tools". That names the wrong cause, and the caller
+    acted on it -- an agent read it as a missing permission, told the user to go
+    ask the owner for access, and never tried the fix that actually works
+    (re-issue as separate calls). A gate that blocks correctly but explains
+    wrongly still produces a wrong outcome one layer up.
+
+    CONTRACT: diagnostic ONLY. Returns a string; never widens what is allowed --
+    exec_runs_allowed_script alone decides allow/deny, and is unchanged.
+    """
+    generic = "non-owner exec restricted to allowlisted tools"
+    if not command or not re.search(SHELL_META, command):
+        return generic
+    # Only the segment before the first metachar can be the intended invocation.
+    if not names_allowlisted_script(re.split(SHELL_META, command)[0], scripts):
+        return generic
+    return (
+        "exec allowlist takes ONE plain script invocation: the script is allowlisted but the "
+        "command adds shell chaining/redirection (; | & > < ` $ ( ) { }). Re-issue as separate "
+        "exec calls, one script each, and use the script's own flags instead of a pipe."
+    )
 
 
 def find_trusted(sender_id, cfg):
@@ -482,7 +522,7 @@ def decide(tool, paths, command, sender_id, cfg):
     if tool in EXEC_TOOLS:
         if exec_runs_allowed_script(command, cfg["nonOwnerAllowedScripts"]):
             return ("allow", "non-owner allowlisted script")
-        return ("block", "non-owner exec restricted to allowlisted tools")
+        return ("block", exec_deny_reason(command, cfg["nonOwnerAllowedScripts"]))
     if tool in cfg["mutatingTools"]:
         return ("block", "non-owner %s denied" % tool)
     return ("block", "non-owner tool %s not allowlisted" % tool)

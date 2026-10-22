@@ -1038,12 +1038,12 @@ function invokedScript(command: string): string | null {
   return toks[i].startsWith("-") ? null : toks[i];
 }
 
-function execRunsAllowedScript(event: any, scripts: string[]): boolean {
-  if (event?.toolName !== "exec") return false;
-  const cmd = String((event?.params ?? {}).command ?? "");
-  if (!cmd) return false;
-  // Reject shell chaining / redirection first — allowlist is single read-only invocation only.
-  if (/[;|&><`$(){}]/.test(cmd)) return false;
+/** Shell metacharacters that make a command more than ONE plain invocation. */
+const SHELL_META = /[;|&><`$(){}]/;
+/** Does this command's argv[0] (or interpreter target) name an allowlisted script?
+ * Split out of execRunsAllowedScript so execDenyReason can reuse the SAME name
+ * test instead of carrying a second copy that could drift. */
+function namesAllowlistedScript(cmd: string, scripts: string[]): boolean {
   const script = invokedScript(cmd);
   if (!script || !script.endsWith(".py")) return false;
   // Resolve ".." BEFORE trusting the name: without this "../../evil/exchange_data.py"
@@ -1056,6 +1056,37 @@ function execRunsAllowedScript(event: any, scripts: string[]): boolean {
     if (file === `${s}.py` || new RegExp(`^${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[A-Za-z0-9_]*\\.py$`).test(file)) return true;
   }
   return false;
+}
+function execRunsAllowedScript(event: any, scripts: string[]): boolean {
+  if (event?.toolName !== "exec") return false;
+  const cmd = String((event?.params ?? {}).command ?? "");
+  if (!cmd) return false;
+  // Reject shell chaining / redirection first — allowlist is single read-only invocation only.
+  if (SHELL_META.test(cmd)) return false;
+  return namesAllowlistedScript(cmd, scripts);
+}
+/**
+ * The SPECIFIC reason an exec failed the allowlist, for the block message.
+ *
+ * WHY (measured 2026-10-22): a command whose script WAS allowlisted but which
+ * chained (`a.py; b.py`, `a.py | python3 -c ...`) was denied with the generic
+ * "restricted to allowlisted tools". That names the wrong cause, and the caller
+ * acted on it -- an agent read it as a missing permission, told the user to go
+ * ask the owner for access, and never tried the fix that actually works
+ * (re-issue as separate calls). A gate that blocks correctly but explains
+ * wrongly still produces a wrong outcome one layer up.
+ *
+ * CONTRACT: diagnostic ONLY. Returns a string; never widens what is allowed --
+ * execRunsAllowedScript alone decides allow/deny, and is unchanged.
+ */
+function execDenyReason(cmd: string, scripts: string[]): string {
+  const generic = "non-owner exec restricted to allowlisted tools";
+  if (!cmd || !SHELL_META.test(cmd)) return generic;
+  // Only the segment before the first metachar can be the intended invocation.
+  if (!namesAllowlistedScript(cmd.split(SHELL_META)[0] ?? "", scripts)) return generic;
+  return "exec allowlist takes ONE plain script invocation: the script is allowlisted but the "
+    + "command adds shell chaining/redirection (; | & > < ` $ ( ) { }). Re-issue as separate "
+    + "exec calls, one script each, and use the script's own flags instead of a pipe.";
 }
 
 /** Resolve verified sender id. null => internal/self turn (agent-operated-by-owner). */
@@ -1472,8 +1503,9 @@ export default definePluginEntry({
             audit(c, { evt: "allow", rule: "R-nonowner-script", toolName, sessionKey, sender });
             return;
           }
-          audit(c, { evt: "block", rule: "R-nonowner-exec", toolName, sessionKey, sender, blocked: c.enforce });
-          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner exec restricted to allowlisted tools` };
+          const denyReason = execDenyReason(String((event?.params ?? {}).command ?? ""), c.nonOwnerAllowedScripts);
+          audit(c, { evt: "block", rule: "R-nonowner-exec", toolName, sessionKey, sender, reason: denyReason, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: ${denyReason}` };
           return;
         }
         // 4. any other mutating tool -> block

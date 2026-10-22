@@ -581,10 +581,13 @@ export function invokedScript(command: string): string | null {
   return toks[i].startsWith("-") ? null : toks[i];
 }
 
-export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolean {
-  if (call.toolName !== "exec" || !call.command) return false;
-  if (/[;|&><`$(){}]/.test(call.command)) return false; // reject chaining/redirection
-  const script = invokedScript(call.command);
+/** Shell metacharacters that make a command more than ONE plain invocation. */
+const SHELL_META = /[;|&><`$(){}]/;
+/** Does this command's argv[0] (or interpreter target) name an allowlisted script?
+ * Split out of execRunsAllowedScript so the deny-reason path can reuse the SAME
+ * name test instead of carrying a second copy that could drift. */
+function namesAllowlistedScript(command: string, scripts: string[]): boolean {
+  const script = invokedScript(command);
   if (!script || !script.endsWith(".py")) return false;
   // Resolve ".." BEFORE trusting the name: without this, "../../evil/exchange_data.py"
   // carries an allowlisted basename while pointing outside the tools dir.
@@ -596,6 +599,34 @@ export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolea
     if (file === `${s}.py` || new RegExp(`^${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[A-Za-z0-9_]*\\.py$`).test(file)) return true;
   }
   return false;
+}
+export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolean {
+  if (call.toolName !== "exec" || !call.command) return false;
+  if (SHELL_META.test(call.command)) return false; // reject chaining/redirection
+  return namesAllowlistedScript(call.command, scripts);
+}
+/**
+ * The SPECIFIC reason an exec failed the allowlist, for the block message.
+ *
+ * WHY (measured 2026-10-22): a command whose script WAS allowlisted but which
+ * chained (`a.py; b.py`, `a.py | python3 -c ...`) was denied with the generic
+ * "restricted to allowlisted tools". That names the wrong cause, and the caller
+ * acted on it -- an agent read it as a missing permission, told the user to go
+ * ask the owner for access, and never tried the fix that actually works
+ * (re-issue as separate calls). A gate that blocks correctly but explains
+ * wrongly still produces a wrong outcome one layer up.
+ *
+ * CONTRACT: diagnostic ONLY. Returns a string; never widens what is allowed --
+ * execRunsAllowedScript alone decides allow/deny, and is unchanged.
+ */
+export function execDenyReason(command: string | undefined, scripts: string[]): string {
+  const generic = "non-owner exec restricted to allowlisted tools";
+  if (!command || !SHELL_META.test(command)) return generic;
+  // Only the segment before the first metachar can be the intended invocation.
+  if (!namesAllowlistedScript(command.split(SHELL_META)[0] ?? "", scripts)) return generic;
+  return "exec allowlist takes ONE plain script invocation: the script is allowlisted but the "
+    + "command adds shell chaining/redirection (; | & > < ` $ ( ) { }). Re-issue as separate "
+    + "exec calls, one script each, and use the script's own flags instead of a pipe.";
 }
 
 /**
@@ -776,7 +807,7 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
   if (call.toolName === "exec") {
     return execRunsAllowedScript(call, c.nonOwnerAllowedScripts)
       ? { action: "allow", reason: "non-owner allowlisted script" }
-      : { action: "block", reason: "non-owner exec restricted to allowlisted tools" };
+      : { action: "block", reason: execDenyReason(call.command, c.nonOwnerAllowedScripts) };
   }
   if (c.mutatingTools.includes(call.toolName)) return { action: "block", reason: `non-owner ${call.toolName} denied` };
   return { action: "block", reason: `non-owner tool ${call.toolName} not allowlisted` };

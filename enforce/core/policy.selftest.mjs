@@ -16,6 +16,14 @@ function t(name, c, sender, expect) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
   ok ? pass++ : fail++;
 }
+/** Assert on the deny REASON, not just the action: a block whose reason names the
+ * wrong cause still produces a wrong outcome one layer up (measured 2026-10-22). */
+function r(name, c, sender, reasonRe) {
+  const v = decide(c, sender, CFG);
+  const ok = v.action === "block" && reasonRe.test(v.reason);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
 const OWNER = "111111", SELF = null, STRANGER = "999";
 
 // owner: allow / warn / approve
@@ -56,6 +64,21 @@ t("stranger exec allowed script", call("exec", { command: "python3 tools/exchang
 t("stranger exec consensus", call("exec", { command: "python3 tools/consensus_search.py BTC" }), STRANGER, "allow");
 t("stranger exec arbitrary", call("exec", { command: "ls -la /root" }), STRANGER, "block");
 t("stranger exec chaining", call("exec", { command: "python3 tools/exchange_data.py; rm -rf /" }), STRANGER, "block");
+// DENY-REASON SPECIFICITY (2026-10-22): blocking is not enough -- the reason must
+// name the ACTUAL cause, or the caller mis-diagnoses an allowlisted-but-chained
+// command as a missing permission and escalates instead of re-issuing it split.
+r("chained ALLOWLISTED script -> reason names chaining, not permission",
+  call("exec", { command: "python3 tools/exchange_data.py price BTC; python3 tools/exchange_data.py price ETH" }),
+  STRANGER, /chaining|ONE plain script/);
+r("piped ALLOWLISTED script -> reason names chaining",
+  call("exec", { command: "python3 tools/exchange_data.py price BTC | python3 -c 'import sys'" }),
+  STRANGER, /chaining|ONE plain script/);
+// Inverse: a NON-allowlisted script must keep the generic reason even when chained,
+// so the specific hint can never imply "this tool would be fine unchained".
+r("chained NON-allowlisted script -> stays generic",
+  call("exec", { command: "python3 tools/evil.py; ls" }), STRANGER, /restricted to allowlisted tools/);
+r("plain NON-allowlisted script -> stays generic",
+  call("exec", { command: "ls -la /root" }), STRANGER, /restricted to allowlisted tools/);
 t("stranger write", call("write", { paths: ["/tmp/x"] }), STRANGER, "block");
 t("stranger edit", call("edit", { paths: ["/tmp/x"] }), STRANGER, "block");
 t("stranger read normal", call("read", { paths: ["/tmp/x"] }), STRANGER, "allow");
