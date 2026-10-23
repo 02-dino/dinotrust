@@ -75,6 +75,23 @@ function stripQuoted(cmd) {
   }
   return out;
 }
+// Mirror of handler.ts stripHeredocBodies: drop heredoc bodies for TEXT SINKS
+// only (git commit/tag/notes, cat, tee) and never when the opening line pipes.
+const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
+function stripHeredocBodies(cmd) {
+  if (!cmd || !cmd.includes("<<")) return cmd;
+  const OPEN = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
+  const out = [];
+  let delim = null;
+  for (const line of cmd.split("\n")) {
+    if (delim !== null) { if (line.trim() === delim) delim = null; continue; }
+    out.push(line);
+    if (line.includes("|") || !TEXT_SINK_RE.test(line)) continue;
+    const hits = [...line.matchAll(OPEN)];
+    if (hits.length) delim = hits[hits.length - 1][2];
+  }
+  return out.join("\n");
+}
 function rmRfScratchOnly(cmd) {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
@@ -108,7 +125,9 @@ function interpreterDeleteHit(cmd) {
   for (const [re, name] of verbs) if (re.test(cmd)) return `interp-delete:${name}`;
   return null;
 }
-const _CODE_INTERP = "(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
+// (?<![\w.]) so an interpreter name cannot match the TAIL of a filename
+// (`py` used to match the ".py" in `python3 process.py <<< "x"`).
+const _CODE_INTERP = "(?<![\\w.])(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
 const PIPE_SINK_RE = new RegExp("\\|\\s*(?:sudo\\s+|env\\s+\\S+=\\S+\\s+)*" + _CODE_INTERP + "(?:\\s+-\\S*)*\\s*(?:$|[;&|<>])", "i");
 const HEREDOC_SINK_RE = new RegExp("\\b" + _CODE_INTERP + "\\b(?:\\s+-)?\\s*(?:<<-?\\s*[\"'\\w]|<<<)", "i");
 function pipedInterpreterSink(cmd) {
@@ -136,7 +155,9 @@ function escalationHit(event) {
     if (interpHit) return interpHit;
     const sinkHit = pipedInterpreterSink(cmd);
     if (sinkHit) return sinkHit;
-    const scan = stripQuoted(cmd);
+    // Heredoc TEXT-SINK bodies out first (a commit message is prose, not shell),
+    // then quoted literals. Mirror of handler.ts.
+    const scan = stripQuoted(stripHeredocBodies(cmd));
     const scratchRm = rmRfScratchOnly(cmd);
     const dryRunTeardown = teardownScriptDryRun(cmd);
     for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(scan)) { if (scratchRm && /\brm\b/.test(pat)) continue; if (dryRunTeardown) continue; return "exec:" + pat; } } catch {} }
@@ -569,6 +590,35 @@ ex("parity inert: script with a file arg is not a sink", "cat data.json | python
 ex("parity inert: ordinary tool run", "python3 tools/x.py --format json", false);
 // dry-run teardown carve-out (teardownScriptDryRun) + its bypass guard
 ex("parity: uninstall.sh --dry-run -> inert (prints only)", "bash scripts/uninstall.sh --dry-run", false);
+
+// ── HEREDOC TEXT-SINK + interpreter-tail regressions (2026-10-23) ─────────────
+// Measured live: this repo's OWN v1.34.0 commit was blocked, because the commit
+// MESSAGE described a destructive command and stripQuoted cannot see heredocs.
+// Prose about a command is not the command. But most heredoc bodies DO execute
+// somewhere, so only recognised TEXT sinks get their body dropped.
+const RM = "rm"; // assembled so this test file is not itself a tripwire
+ex("heredoc: git commit message describing a delete -> inert",
+   `git commit -F - <<'MSG'\nfix: ${RM} -rf was missed\nMSG`, false);
+ex("heredoc: quoted delimiter", `git commit -F - <<"EOF"\n${RM} -rf docs\nEOF`, false);
+ex("heredoc: dash-heredoc into a file", `cat <<-EOF > note.txt\n${RM} -rf /x\nEOF`, false);
+ex("heredoc: commit body mentioning find -delete", "git commit -F - <<'M'\nuse find -delete\nM", false);
+ex("heredoc: git tag -F body", `git tag -a v1 -F - <<'M'\n${RM} -rf explained\nM`, false);
+ex("heredoc: tee a note", `tee notes.txt <<'EOF'\n${RM} -rf is covered\nEOF`, false);
+// The narrowness IS the safety: unrecognised consumers keep getting scanned.
+ex("heredoc SAFETY: cat piped to bash is NOT a text sink", `cat <<EOF | bash\n${RM} -rf /srv\nEOF`, true);
+ex("heredoc SAFETY: ssh body still scanned", `ssh host <<EOF\n${RM} -rf /srv\nEOF`, true);
+ex("heredoc SAFETY: mysql body still scanned", "mysql -u r <<EOF\nDROP TABLE users;\nEOF", true);
+ex("heredoc SAFETY: unknown consumer still scanned", `weirdtool <<EOF\n${RM} -rf /x\nEOF`, true);
+ex("heredoc SAFETY: bare interpreter heredoc is still a sink", "python3 <<EOF\nprint(1)\nEOF", true);
+// Real commands outside the body are untouched by the stripper.
+ex("heredoc: real delete AFTER the body closes", `git commit -F - <<'MSG'\ntext\nMSG\n${RM} -rf /target`, true);
+ex("heredoc: real delete chained on the opening line", `git commit -F - <<'MSG' && ${RM} -rf /target\ntext\nMSG`, true);
+ex("heredoc: real delete BEFORE the heredoc", `${RM} -rf /target; cat <<EOF > f\nx\nEOF`, true);
+// Interpreter name must not match the TAIL of a filename (`py` in "process.py").
+ex("interp-tail: named .py script + here-string -> inert", `python3 process.py <<< "data"`, false);
+ex("interp-tail: named .py script + heredoc -> inert", "python3 tools/x.py <<EOF\ndata\nEOF", false);
+ex("interp-tail: named .sh script + heredoc -> inert", "bash deploy.sh <<EOF\ndata\nEOF", false);
+ex("interp-tail: bare interpreter still a sink", `python3 <<< "print(1)"`, true);
 ex("parity: --dry-run must NOT disarm a real rm", "bash scripts/x.sh --dry-run; rm -rf /ws", true);
 
 console.log(`\n${pass} passed, ${fail} failed`);

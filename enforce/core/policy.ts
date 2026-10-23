@@ -381,6 +381,45 @@ function stripQuoted(cmd: string): string {
 }
 
 /**
+ * HEREDOC BODY stripper -- for TEXT SINKS ONLY.
+ *
+ * WHY: stripQuoted() cannot see heredocs, so the BODY of `git commit -F - <<MSG`
+ * was scanned as if it were shell. Measured 2026-10-23: a commit message that
+ * merely DESCRIBED a destructive command tripped the gate and blocked the
+ * commit. Prose about a command is not the command.
+ *
+ * WHY SO NARROW (this is the whole safety argument): most heredoc bodies DO
+ * execute somewhere -- `ssh host <<EOF`, `mysql <<EOF`, `bash <<EOF`. Dropping
+ * those unseen would be a real bypass, strictly worse than the false positive
+ * it fixes. So the body is dropped ONLY when the opening line is a recognised
+ * TEXT sink (git commit/tag/notes, cat, tee) that just stores or prints bytes.
+ * Anything unrecognised keeps today's behaviour and stays scanned.
+ *
+ * PIPE GUARD: `cat <<EOF | bash` names a text sink but feeds a shell, so a pipe
+ * anywhere on the opening line disqualifies it.
+ *
+ * FAIL-SAFE SHAPE: only the delimited body is removed. A command before, after,
+ * or chained on the opening line is untouched and still scanned. An unterminated
+ * heredoc swallows the remainder -- acceptable, since that text was never going
+ * to run as shell either.
+ */
+const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
+export function stripHeredocBodies(cmd: string): string {
+  if (!cmd || !cmd.includes("<<")) return cmd;
+  const OPEN = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
+  const out: string[] = [];
+  let delim: string | null = null;
+  for (const line of cmd.split("\n")) {
+    if (delim !== null) { if (line.trim() === delim) delim = null; continue; }
+    out.push(line);
+    if (line.includes("|") || !TEXT_SINK_RE.test(line)) continue;
+    const hits = [...line.matchAll(OPEN)];
+    if (hits.length) delim = hits[hits.length - 1][2];
+  }
+  return out.join("\n");
+}
+
+/**
  * `rm -rf` is critical BY DEFAULT, but wiping a throwaway scratch dir under /tmp
  * is a routine, low-stakes build step (test fixtures, verify sandboxes). Gating
  * every `rm -rf /tmp/<scratch>` behind an approval card creates a recurring
@@ -461,7 +500,11 @@ function interpreterDeleteHit(cmd: string): string | null {
 // the actual program lives in upstream/heredoc DATA that no static scan can see --
 // the way to smuggle shutil.rmtree(...) past the inline (-c) detector. Treated as
 // critical. `cat data.json | python3 process.py` is NOT flagged (has a script arg).
-const _CODE_INTERP = "(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
+// (?<![\w.]) so an interpreter NAME cannot be matched as the TAIL of a filename.
+// Measured 2026-10-23: `py` matched the ".py" in `python3 process.py <<< "x"`,
+// so running a NAMED (on-disk, reviewable) script read as an opaque sink. The
+// dot in the lookbehind is the whole point -- \b alone does not exclude it.
+const _CODE_INTERP = "(?<![\\w.])(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
 const PIPE_SINK_RE = new RegExp(
   "\\|\\s*(?:sudo\\s+|env\\s+\\S+=\\S+\\s+)*" + _CODE_INTERP +
   "(?:\\s+-\\S*)*\\s*(?:$|[;&|<>])", "i");
@@ -515,8 +558,9 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
     // Opaque piped/heredoc interpreter (code from upstream data, unreviewable).
     const sinkHit = pipedInterpreterSink(call.command);
     if (sinkHit) return sinkHit;
-    // Scan with quoted literals removed so quoted-arg text can't false-positive.
-    const scan = stripQuoted(call.command);
+    // Scan with heredoc TEXT-SINK bodies and quoted literals removed, so neither
+    // a commit message nor a quoted arg can false-positive as a real command.
+    const scan = stripQuoted(stripHeredocBodies(call.command));
     const scratchRm = rmRfScratchOnly(call.command);
     const dryRunTeardown = teardownScriptDryRun(call.command);
     for (const pat of c.criticalExecPatterns) {
