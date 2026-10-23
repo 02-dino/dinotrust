@@ -135,7 +135,13 @@ const DEFAULTS: Cfg = {
   // Owner is warn-only EXCEPT these critical/irreversible actions -> requireApproval
   // ("are you sure?") even for the owner. Regex strings, tested against exec command.
   criticalExecPatterns: [
-    "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
+    // Word-guard on rm: without one this matched the TAIL of any word ending in
+    // "rm" -- measured 2026-10-23, `charm -rf x` was blocked as if it were `rm -rf`.
+    // It MUST be (?<![-\w]) and NOT \b: the scratch carve-out tests /\brm\b/
+    // against this pattern's SOURCE TEXT, and a literal "\b" prefix makes "rm"
+    // stop being a standalone word there -- which silently killed the /tmp
+    // carve-out (3 selftests, same day).
+    "(?<![-\\w])rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
     // SQL-ANCHORED truncate: the destructive action is `TRUNCATE TABLE x` or the
     // bare `TRUNCATE x;` statement form. A plain \bTRUNCATE\b also matched harmless
     // CLI flags (TEI's --auto-truncate), fail-closing an entire unrelated command.
@@ -148,6 +154,32 @@ const DEFAULTS: Cfg = {
     // inspecting a repo that merely CONTAINS uninstall.sh tripped the gate.
     "(^|[|;&]|&&|\\|\\|)\\s*(sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*([a-z0-9_./-]*/)?(apt(-get)?\\s+(remove|purge|autoremove)\\b|dpkg\\s+(-r\\b|-P\\b|--remove\\b|--purge\\b)|(npm|pnpm|yarn|pip[0-9.]*|gem|brew|pacman|snap|cargo)\\s+(uninstall|remove|rm|-R)\\b|make\\s+uninstall\\b|uninstall\\b)|(^|\\s)(bash|sh|source|\\.)\\s+([^\\s;|&]*/)?uninstall(\\.sh)?(\\s|$)|(^|\\s)\\./([^\\s;|&]*/)?uninstall\\.sh(\\s|$)",
     "--hard\\b",
+    // ── PARITY WITH core/policy.ts (ported 2026-10-23) ───────────────────────
+    // These eleven shipped in core at v1.23.0 but were NEVER ported here, so for
+    // ~10 versions the ENGINE THAT ACTUALLY RUNS under OpenClaw enforced only the
+    // literal `rm -rf` spelling. Measured: `rm -fr`, `rm -r -f`, `rm -rvf`,
+    // `rm -r`, `find -delete` and `shred` all sailed through a gate whose whole
+    // job was to stop exactly those. A ceiling that checks spelling is not a
+    // ceiling. Keep this block IDENTICAL to core; divergence here is invisible
+    // (the core selftest stays green while the live adapter is wide open).
+    //
+    // Interpreter/tool deletes that appear UNQUOTED on the command line (so they
+    // survive stripQuoted). Inline-code deletes hidden in `-c "..."` / `-e "..."`
+    // are caught separately by interpreterDeleteHit() on the RAW command.
+    // Bare `rmtree`/`unlink` are deliberately absent (they'd fire on `grep rmtree`);
+    // only their call/removal forms are matched.
+    "\\bos\\.remove\\b", "\\bos\\.unlink\\b", "os\\.removedirs",
+    "find\\s+.*-delete\\b", "truncate\\s+-s\\s*0\\b", "\\bunlink\\s+/",
+    // Non-rm destructive tools + the rm variants `rm\\s+-rf` missed. Anchored to
+    // command position ((?:^|[;&|]) + optional ws) so a read-only mention
+    // (`grep rmdir`, `history | grep shred`) stays inert.
+    // The command-position anchor must tolerate a PRIVILEGE/PATH PREFIX, else
+    // `sudo rm -R x` and `/bin/rm -r x` slip past the anchored variants entirely
+    // (measured 2026-10-23).
+    "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?rm\\s+-[a-zA-Z]*r",
+    "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?rmdir\\s+",
+    "git\\s+clean\\s+-[a-z]*f",
+    "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?shred\\s+",
   ],
   // Owner write/edit/exec-write to these paths -> requireApproval: genuine
   // privilege-escalation / brick risk (runtime+plugin config, secrets).
@@ -584,6 +616,73 @@ function rmRfScratchOnly(cmd: string): boolean {
   return sawTmp;
 }
 
+// ── PARITY WITH core/policy.ts (ported 2026-10-23) ───────────────────────────
+// The three detectors below shipped in core at v1.23.0 and were never ported
+// here, so the engine that actually runs under OpenClaw had no defence against
+// any of them. Keep them IDENTICAL to core: divergence is invisible, because
+// the core selftest stays green while this adapter runs wide open.
+
+// Interpreter INLINE-CODE delete detector. stripQuoted() removes the payload of
+// `python3 -c "..."` / `node -e "..."` BEFORE the pattern scan (by design: keeps
+// `git commit -m "...rm -rf..."` inert). That same stripping hides a REAL
+// `python3 -c "shutil.rmtree(x)"`. So scan the RAW command, but only when it is
+// an interpreter inline-code invocation, and only for delete verbs in the payload.
+function interpreterDeleteHit(cmd: string): string | null {
+  const interp = /\b(python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)\b[^\n]*?\s-(?:c|e|eval|\-eval)\b/i;
+  if (!interp.test(cmd)) return null;
+  const deleteVerbs: Array<[RegExp, string]> = [
+    [/shutil\.rmtree/i, "shutil.rmtree"],
+    [/\bos\.remove(dirs)?\s*\(/i, "os.remove"],
+    [/\bos\.unlink\s*\(/i, "os.unlink"],
+    [/\bos\.rmdir\s*\(/i, "os.rmdir"],
+    [/\.unlink\s*\(/i, "Path.unlink"],
+    [/\brmtree\s*\(/i, "rmtree"],
+    [/fs\.rm(Sync)?\s*\(/i, "fs.rm"],
+    [/fs\.unlink(Sync)?\s*\(/i, "fs.unlink"],
+    [/fs\.rmdir(Sync)?\s*\(/i, "fs.rmdir"],
+    [/\bunlink\b/i, "unlink"],
+    [/File\.delete|FileUtils\.rm|Dir\.delete/i, "ruby File/Dir delete"],
+  ];
+  for (const [re, name] of deleteVerbs) {
+    if (re.test(cmd)) return `exec ~ interpreter-inline-delete (${name})`;
+  }
+  return null;
+}
+
+// Opaque piped/heredoc interpreter sink. When a code interpreter is the SINK of
+// a pipe (`... | python3`) or reads a heredoc/stdin-dash with NO script-file arg,
+// the real program lives in data no static scan can see -- the way to smuggle
+// shutil.rmtree(...) past the inline (-c) detector above.
+// `cat data.json | python3 process.py` is NOT flagged (it has a script arg).
+const _CODE_INTERP = "(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
+const PIPE_SINK_RE = new RegExp(
+  "\\|\\s*(?:sudo\\s+|env\\s+\\S+=\\S+\\s+)*" + _CODE_INTERP +
+  "(?:\\s+-\\S*)*\\s*(?:$|[;&|<>])", "i");
+const HEREDOC_SINK_RE = new RegExp(
+  "\\b" + _CODE_INTERP + "\\b(?:\\s+-)?\\s*(?:<<-?\\s*[\"'\\w]|<<<)", "i");
+function pipedInterpreterSink(cmd: string): string | null {
+  if (!cmd) return null;
+  if (PIPE_SINK_RE.test(cmd)) return "exec ~ opaque-piped-interpreter (code from pipe, unreviewable)";
+  if (HEREDOC_SINK_RE.test(cmd)) return "exec ~ opaque-heredoc-interpreter (code from heredoc/stdin, unreviewable)";
+  return null;
+}
+
+// TEARDOWN SCRIPT in DRY-RUN mode -> not a critical action.
+// NARROW ON PURPOSE: a blanket "--dry-run skips the gate" is a BYPASS VECTOR.
+// `rm` has no --dry-run flag, so `rm -rf /x --dry-run` would delete /x while
+// reading as safe. Requires ALL of: (a) the command INVOKES A SCRIPT, the only
+// class where --dry-run is an honored convention, (b) an explicit --dry-run
+// flag, (c) NO destructive builtin anywhere, so a chained real delete cannot
+// ride along. Package-manager teardowns are deliberately NOT covered.
+function teardownScriptDryRun(cmd: string): boolean {
+  if (!cmd) return false;
+  const scan = stripQuoted(cmd);
+  if (!/(^|[\s;&|])(bash|sh|source|\.)\s+\S+\.sh\b|(^|[\s;&|])\.?\/\S+\.sh\b/i.test(scan)) return false;
+  if (!/--dry[-_]?run\b/i.test(scan)) return false;
+  if (/\brm\s+-|\bmkfs\b|\bdd\s+if=|--force\b|--hard\b|\bDROP\s+TABLE\b|\bTRUNCATE\s+TABLE\b|\bshred\b|-delete\b/i.test(scan)) return false;
+  return true;
+}
+
 // Translate a raw detector reason ("exec ~ /rm\s+-rf/", "write X ~ Y", ...) into
 // a plain-language sentence a non-technical owner can act on. Falls back to the
 // raw reason if nothing matches (never hides info).
@@ -987,13 +1086,24 @@ function escalationHit(event: any, c: Cfg): string | null {
   }
   if (toolName === "exec") {
     const cmd = String((event?.params ?? {}).command ?? "");
+    // Raw-scan for interpreter inline-code deletes FIRST: stripQuoted() below
+    // eats the -c/-e payload, which is exactly where a smuggled
+    // `python3 -c "shutil.rmtree(x)"` hides. Mirror of core/policy.ts order.
+    const interpHit = interpreterDeleteHit(cmd);
+    if (interpHit) return interpHit;
+    // Opaque piped/heredoc interpreter (code arrives as data, unreviewable).
+    const sinkHit = pipedInterpreterSink(cmd);
+    if (sinkHit) return sinkHit;
     const scan = stripQuoted(cmd);
     const scratchRm = rmRfScratchOnly(cmd);
+    const dryRunTeardown = teardownScriptDryRun(cmd);
     for (const pat of c.criticalExecPatterns) {
       try {
         if (new RegExp(pat, "i").test(scan)) {
           // /tmp-only `rm -rf` -> warn, not approve (see rmRfScratchOnly).
           if (scratchRm && /\brm\b/.test(pat)) continue;
+          // `bash x.sh --dry-run` with no destructive builtin -> prints only.
+          if (dryRunTeardown) continue;
           return `exec ~ /${pat}/`;
         }
       } catch { /* bad regex ignored */ }

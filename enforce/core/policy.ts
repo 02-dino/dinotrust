@@ -170,12 +170,21 @@ export const DEFAULT_POLICY: PolicyConfig = {
   agentOwners: {},
   ownerWarnOnly: true,
   criticalExecPatterns: [
-    "rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
+    // Word-guard on rm: without one this matched the TAIL of any word ending in
+    // "rm" -- measured 2026-10-23, `charm -rf x` was blocked as if it were `rm -rf`.
+    // It MUST be (?<![-\w]) and NOT \b: the scratch carve-out below tests
+    // /\brm\b/ against this pattern's SOURCE TEXT, and the literal prefix "\b"
+    // makes "rm" stop being a standalone word there -- which silently killed the
+    // /tmp carve-out (3 selftests, same day). A lookbehind leaves the source
+    // readable to that check while still refusing charm/warm/firmware.
+    "(?<![-\\w])rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE",
     // SQL-ANCHORED truncate: the destructive action is `TRUNCATE TABLE x` or the
     // bare `TRUNCATE x;` statement form. A plain \bTRUNCATE\b also matched harmless
     // CLI flags (TEI's --auto-truncate), fail-closing an entire unrelated command.
     "\\bTRUNCATE\\s+TABLE\\b", "(?<![-\\w])TRUNCATE\\s+(ONLY\\s+)?\\S+\\s*;",
-    "mkfs", "dd\\s+if=",
+    // `:(){ ` = fork bomb. Shipped in the OpenClaw adapter but was missing here;
+    // ported 2026-10-23 so the two arrays are one set, not two drifting ones.
+    "mkfs", "dd\\s+if=", ":\\(\\)\\s*\\{",
     // INVOCATION-ANCHORED uninstall/remove: matches only when the teardown verb
     // is the program being RUN (start-of-cmd / after ;|& / pkg-mgr subcommand /
     // bash uninstall.sh / ./uninstall.sh), NOT when "uninstall" merely appears as
@@ -195,8 +204,14 @@ export const DEFAULT_POLICY: PolicyConfig = {
     // Non-rm destructive tools + rm variants the `rm\\s+-rf` pattern missed.
     // Anchored to command position ((?:^|[;&|]) + optional ws) so a read-only
     // mention (`grep rmdir`, `history | grep shred`) stays inert.
-    "(?:^|[;&|]\\s*)rm\\s+-[a-z]*r", "(?:^|[;&|]\\s*)rmdir\\s+",
-    "git\\s+clean\\s+-[a-z]*f", "(?:^|[;&|]\\s*)shred\\s+",
+    // The command-position anchor must tolerate a PRIVILEGE/PATH PREFIX, else
+    // `sudo rm -R x` and `/bin/rm -r x` slip past the anchored variants entirely
+    // (measured 2026-10-23). [a-zA-Z] not [a-z]: the regex runs case-insensitive,
+    // but being explicit keeps `rm -R` obvious to the next reader.
+    "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?rm\\s+-[a-zA-Z]*r",
+    "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?rmdir\\s+",
+    "git\\s+clean\\s+-[a-z]*f",
+    "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?shred\\s+",
   ],
   escalationPathGlobs: ["**/openclaw.json", "**/.env"],
   criticalPathGlobs: ["**/security_rules.md", "**/AGENTS.md"],
