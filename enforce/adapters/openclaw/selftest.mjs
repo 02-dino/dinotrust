@@ -119,6 +119,18 @@ function findTrusted(senderId) {
   for (const t of TRUSTED) if (t.id === senderId) return t;
   return null;
 }
+// Mirrors of the handler helpers the scoped-critical carve-out depends on.
+function isPathWriteEscalation(esc) {
+  return /^(write|exec-write)\s/.test((esc || "").toLowerCase());
+}
+function execCriticalWithinScope(cmd, globs) {
+  if (!globs || globs.length === 0) return false;
+  const tokens = cmd
+    .split(/[\s;|&><'"()]+/)
+    .filter((t) => t && !t.startsWith("-") && (t.includes("/") || t === "." || t === ".."));
+  if (tokens.length === 0) return false;
+  return tokens.every((t) => matchesProtected(t, globs) !== null);
+}
 function decideTrusted(event, entry) {
   const toolName = event.toolName;
   const protectedHit = anyProtected(event, PROTECTED);
@@ -128,7 +140,20 @@ function decideTrusted(event, entry) {
     if (tp.length && tp.some((p) => !matchesProtected(p, entry.scopePathGlobs))) return { block: true, why: "trusted-scope" };
   }
   const crit = escalationHit(event) ?? criticalDocHit(event);
-  if (crit) return { block: true, why: "trusted-critical" };
+  if (crit) {
+    // Mirror of handler.ts: critical stays blocked UNLESS the owner opted in
+    // per-entry AND every path token resolves inside that entry's own scope.
+    // The wall is isPathWriteEscalation (a WRITE to openclaw.json/.env is
+    // self-promotion), not escalationHit -- gating on the latter would make the
+    // carve-out dead again, since every such exec IS an escalationHit.
+    const scopedOk = entry.allowScopedCritical === true
+      && toolName === "exec"
+      && !!entry.scopePathGlobs?.length
+      && !isPathWriteEscalation(crit)
+      && execCriticalWithinScope(String((event.params ?? {}).command ?? ""), entry.scopePathGlobs);
+    if (!scopedOk) return { block: true, why: "trusted-critical" };
+    return { block: false, why: "trusted-critical-scoped" };
+  }
   const allowedTools = entry.allowedTools ?? DEFAULT_TRUSTED_TOOLS;
   if (toolName === "exec") {
     if (!allowedTools.includes("exec")) return { block: true, why: "trusted-exec-not-allowlisted" };
@@ -268,8 +293,10 @@ TRUSTED = [
   { id: "555555", scopePathGlobs: ["workspace-bob/**"] },
   { id: "666666", allowedTools: ["read", "write"], allowedScripts: ["exchange_data"] },
   { id: "777777", allowedTools: ["read", "write", "exec"], allowedScripts: ["exchange_data"] },
+  { id: "444444", scopePathGlobs: ["workspace-pic/**"], allowScopedCritical: true },
 ];
 const T1 = { sessionKey: "agent:analyst:telegram:direct:555555", senderId: "555555" };
+const T4 = { sessionKey: "agent:analyst:telegram:direct:444444", senderId: "444444" };
 const T2 = { sessionKey: "agent:analyst:telegram:direct:666666", senderId: "666666" };
 const T3 = { sessionKey: "agent:analyst:telegram:direct:777777", senderId: "777777" };
 
@@ -285,6 +312,16 @@ t("trusted exec: granted but script not allowlisted -> blocked", { toolName: "ex
 t("trusted with no scopePathGlobs: any path allowed if tool allowed", { toolName: "write", params: { path: "/etc/random/path.txt" } }, T3, false, "trusted-tool");
 t("non-trusted stranger still hits normal non-owner path", { toolName: "write", params: { path: "anywhere.txt" } }, STRANGER, true, "nonowner-mutate");
 t("owner unaffected by TRUSTED config", { toolName: "write", params: { path: "anything.txt" } }, OWNER, false, "owner-pass");
+
+// -- allowScopedCritical (opt-in, default strict; owner decision 2026-10-23) --
+// T1 has a scope but never opted in -> "critical action blocked" above is the
+// default-strict case. T4 opted in: own jail only, ceiling unchanged.
+t("scopedCritical: rm -rf INSIDE own scope allowed", { toolName: "exec", params: { command: "rm -rf workspace-pic/build" } }, T4, false, "trusted-critical-scoped");
+t("scopedCritical: rm -rf OUTSIDE own scope blocked", { toolName: "exec", params: { command: "rm -rf workspace-bob/build" } }, T4, true, "trusted-critical");
+t("scopedCritical: mixed in+out of scope blocked", { toolName: "exec", params: { command: "rm -rf workspace-pic/a workspace-bob/b" } }, T4, true, "trusted-critical");
+t("scopedCritical: tokenless critical blocked", { toolName: "exec", params: { command: "git push origin main --force" } }, T4, true, "trusted-critical");
+t("scopedCritical: protected glob STILL wins inside own scope", { toolName: "exec", params: { command: "rm -rf workspace-pic/.env" } }, T4, true, "trusted-protected");
+t("scopedCritical: security-doc write STILL blocked", { toolName: "write", params: { path: "workspace-pic/AGENTS.md" } }, T4, true, "trusted-critical");
 
 // -- MULTI-AGENT owner scoping (agentOwners map) --
 // Mirror of pickAgentOwners: resolve effective owner list for a sessionKey via

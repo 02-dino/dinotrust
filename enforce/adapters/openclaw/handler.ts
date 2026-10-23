@@ -44,6 +44,10 @@ type TrustedEntry = {
   // Agent-confinement: entry applies only when sessionKey matches one of these
   // keys (e.g. "agent:ads"); unset -> every agent. Mirror of policy.ts.
   scopeAgents?: string[];
+  // OPT-IN (default strict): allow critical/irreversible EXEC inside this
+  // entry's own scopePathGlobs. Path-WRITE escalations (openclaw.json/.env) and
+  // protectedGlobs stay blocked regardless. Mirror of policy.ts.
+  allowScopedCritical?: boolean;
 };
 
 type Cfg = {
@@ -213,12 +217,12 @@ function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
  * path-looking token AND every such token resolves inside the entry's scope.
  * A command with NO path token cannot be PROVEN in-scope, so it returns false.
  *
- * KNOWN-DEAD for escalation hits (measured 2026-10-22): the call site also
- * requires !escalationHit(), and an irreversible exec IS an escalationHit via
- * criticalExecPatterns -- so for the delete-your-own-build-dir case this gate
- * is inert and the action stays BLOCKED. Kept faithful rather than quietly
- * widened: enabling it is an owner decision, not a refactor side effect.
- * Reachable only when the hit came from criticalDocHit with no escalation hit.
+ * REACH (changed 2026-10-23, was KNOWN-DEAD): the call site used to require
+ * !escalationHit(), and an irreversible exec IS an escalationHit via
+ * criticalExecPatterns -- so the delete-your-own-build-dir case could never
+ * reach it. The call site now gates on trusted.allowScopedCritical (opt-in,
+ * default strict) and walls off path-WRITE escalations only, so `rm -rf
+ * <own-scope>` reaches this check while a write to openclaw.json/.env cannot.
  *
  * NOT A SUBSTITUTE for the protected/escalation gates: openclaw.json, .env and
  * the security docs are checked BEFORE this and stay blocked regardless.
@@ -883,11 +887,21 @@ function ownerIntentMatches(ownerText: string, event: any, esc: string, requireF
 // forge WHICH message the owner replied to), AND an OPEN pending-ledger entry for
 // THIS target must exist (the LLM cannot fabricate a ledger row it didn't cause).
 
+// True when a hit reason names a WRITE to a guarded PATH ("write <p> ~ <glob>")
+// rather than a critical EXEC PATTERN ("exec ~ /rm\s+-rf/"). Two callers share
+// it and must never drift: escSeverity picks approval friction from it, and the
+// trusted scoped-critical gate uses it as a hard wall so "clean your own
+// workspace" can never become "write yourself into openclaw.json/.env".
+// Mirror of policy.isPathWriteEscalation.
+function isPathWriteEscalation(esc: string): boolean {
+  return /^(write|exec-write)\s/.test((esc || "").toLowerCase());
+}
+
 // Severity of an escalationHit() reason string (mirror of policy.escalationSeverity).
 function escSeverity(esc: string): "additive" | "destructive" {
   const s = (esc || "").toLowerCase();
   if (/\bopenclaw\.json\b/.test(s)) return "destructive"; // crash-loop risk
-  if (/^(write|exec-write)\s/.test(s)) return "additive";  // .env key-add etc
+  if (isPathWriteEscalation(s)) return "additive";         // .env key-add etc
   return "destructive";                                     // rm -rf, force-push...
 }
 
@@ -1423,16 +1437,21 @@ export default definePluginEntry({
           // Critical/irreversible actions AND security-doc writes are BLOCKED for
           // trusted, never auto-approved (below-owner ceiling: no irreversible
           // ops, no touching config/security files).
-          // Hard-blocked EXCEPT when the owner granted a path scope and the
-          // command stays fully inside it. escalation targets (openclaw.json /
-          // .env) are NEVER in scope by construction, so self-promotion stays
-          // shut. See execCriticalWithinScope KNOWN-DEAD note for the reach.
+          // Hard-blocked EXCEPT when the owner OPTED IN (allowScopedCritical)
+          // and the command stays fully inside this entry's own path scope.
+          // The wall is isPathWriteEscalation, NOT escalationHit: a WRITE to
+          // openclaw.json/.env or a security doc is self-promotion and stays
+          // blocked forever, while a destructive EXEC PATTERN (rm -rf, --hard)
+          // is judged purely on whether every path token resolves in-scope.
+          // Gating on escalationHit here would re-dead the gate, since every
+          // such exec IS an escalationHit.
           const crit = escalationHit(event, c) ?? criticalDocHit(event, c);
           if (crit) {
-            const scopedOk = toolName === "exec"
+            const scopedOk = trusted.allowScopedCritical === true
+              && toolName === "exec"
               && !!trusted.scopePathGlobs?.length
-              && execCriticalWithinScope(String((event?.params ?? {}).command ?? ""), trusted.scopePathGlobs)
-              && !escalationHit(event, c);
+              && !isPathWriteEscalation(crit)
+              && execCriticalWithinScope(String((event?.params ?? {}).command ?? ""), trusted.scopePathGlobs);
             if (!scopedOk) {
               audit(c, { evt: "block", rule: "R-trusted-critical", toolName, sessionKey, sender, id: trusted.id, hit: crit, blocked: c.enforce });
               if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: trusted critical/irreversible denied (${crit})` };

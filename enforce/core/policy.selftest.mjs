@@ -98,6 +98,10 @@ const CFG_TRUSTED = normalizeConfig({
     { id: "777777", allowedTools: ["read", "write", "exec"], allowedScripts: ["exchange_data"] },
     // scopeAgents: trusted only inside agent:ads on a shared gateway
     { id: "888888", scopeAgents: ["agent:ads"], scopePathGlobs: ["workspace-ads/**"] },
+    // allowScopedCritical: opted-in PIC who may clean their OWN workspace
+    { id: "444444", scopePathGlobs: ["workspace-pic/**"], allowScopedCritical: true },
+    // opted in but NO scope -> a grant with no jail grants nothing
+    { id: "333333", allowScopedCritical: true },
   ],
 });
 function tt(name, c, sender, expect, sessionKey = "") {
@@ -110,6 +114,20 @@ tt("trusted scope: in-scope write allowed", call("write", { paths: ["workspace-b
 tt("trusted scope: out-of-scope write blocked", call("write", { paths: ["workspace-alice/notes.md"] }), "555555", "block");
 tt("trusted scope: protected glob wins even in scope", call("write", { paths: ["workspace-bob/.env"] }), "555555", "block");
 tt("trusted scope: critical action blocked not approved", call("exec", { command: "rm -rf workspace-bob/x" }), "555555", "block");
+// ── allowScopedCritical: opt-in, default strict (owner decision 2026-10-23) ──
+// DEFAULT STRICT: 555555 has a scope but never opted in -> unchanged above.
+tt("scopedCritical OFF by default: rm -rf own scope still blocked", call("exec", { command: "rm -rf workspace-bob/build" }), "555555", "block");
+// OPTED IN: own jail only.
+tt("scopedCritical: rm -rf INSIDE own scope allowed", call("exec", { command: "rm -rf workspace-pic/build" }), "444444", "allow");
+tt("scopedCritical: rm -rf OUTSIDE own scope blocked", call("exec", { command: "rm -rf workspace-bob/build" }), "444444", "block");
+tt("scopedCritical: mixed in+out of scope blocked (every token must resolve)", call("exec", { command: "rm -rf workspace-pic/a workspace-bob/b" }), "444444", "block");
+tt("scopedCritical: tokenless critical cannot be proven in-scope -> blocked", call("exec", { command: "git push --force" }), "444444", "block");
+// CEILING UNCHANGED: self-promotion paths stay shut even when opted in.
+tt("scopedCritical: protected glob STILL wins inside own scope", call("exec", { command: "rm -rf workspace-pic/.env" }), "444444", "block");
+tt("scopedCritical: write to openclaw.json STILL blocked", call("write", { paths: ["workspace-pic/openclaw.json"] }), "444444", "block");
+tt("scopedCritical: exec-write redirect into .env STILL blocked", call("exec", { command: "echo x > workspace-pic/.env" }), "444444", "block");
+tt("scopedCritical: security-doc write STILL blocked", call("write", { paths: ["workspace-pic/AGENTS.md"] }), "444444", "block");
+tt("scopedCritical: opted in but NO scopePathGlobs -> grants nothing", call("exec", { command: "rm -rf /tmp/anything" }), "333333", "block");
 tt("trusted tool-allowlist: allowed tool passes", call("read", { paths: ["anywhere.txt"] }), "666666", "allow");
 tt("trusted tool-allowlist: disallowed tool blocked", call("edit", { paths: ["anywhere.txt"] }), "666666", "block");
 tt("trusted exec: not granted -> blocked", call("exec", { command: "python3 tools/exchange_data.py price BTC" }), "666666", "block");
@@ -169,13 +187,11 @@ t("SEC#2 script: prefix-only name must not match (exchange_data vs exchange_data
 // install until 2026-10-22). A path-scoped PIC may wreck their OWN jail; the
 // ceiling (protected/escalation) still wins. Fail-CLOSED: a command with no
 // visible target cannot be proven in-scope, so it stays blocked.
-// MEASURED CONTRACT, not the one the comment advertises. scopedOk requires
-// `&& !escalationHit()`, but a delete IS an escalationHit via
-// criticalExecPatterns -- the two conditions cancel out, so the carve-out can
-// never fire for the very command it was written for. Pinned as BLOCK because
-// that is what the code does; widening it is a security decision for the owner,
-// not something a refactor should smuggle in. See KNOWN-DEAD note in policy.ts.
-tt("SCOPED-CRIT: delete inside own scope -> STILL blocked (carve-out is inert for escalation hits)", call("exec", { command: "rm -rf workspace-bob/build" }), "555555", "block");
+// 555555 has a scope but did NOT set allowScopedCritical, so every case in this
+// block stays BLOCKED -- it is now the DEFAULT-STRICT suite. The owner decision
+// the old KNOWN-DEAD note deferred was taken 2026-10-23: opting in is a
+// per-entry flag, covered by the allowScopedCritical block above.
+tt("SCOPED-CRIT: delete inside own scope -> blocked (no allowScopedCritical opt-in)", call("exec", { command: "rm -rf workspace-bob/build" }), "555555", "block");
 tt("SCOPED-CRIT: rm -rf OUTSIDE scope -> block", call("exec", { command: "rm -rf workspace-alice/build" }), "555555", "block");
 tt("SCOPED-CRIT: traversal out of scope -> block", call("exec", { command: "rm -rf workspace-bob/../workspace-alice" }), "555555", "block");
 tt("SCOPED-CRIT: mixed in+out of scope -> block", call("exec", { command: "rm -rf workspace-bob/a workspace-alice/b" }), "555555", "block");

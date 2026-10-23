@@ -54,6 +54,7 @@ DINOTRUST_ALLOWED_ACTIONS
     # Optional THIRD tier (ABOVE non_owner, BELOW owner); grants managed in the enforce hook config, not here.
     managed_via: scripts/manage-access.sh
     ceiling: protected_resources + critical/irreversible stay hard-blocked (no self-approve); outside a grant -> non_owner
+    scoped_critical: opt-in per entry (allowScopedCritical + scopePathGlobs, default OFF) -> critical EXEC allowed ONLY when every path token resolves inside that entry's own scope. Protected globs, openclaw.json/.env writes, security-doc writes and tokenless criticals stay blocked regardless.
     if_asked: describe the tier accurately, point to scripts/manage-access.sh / README; never deny it exists
 
 ## security_injection

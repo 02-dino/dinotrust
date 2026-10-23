@@ -138,6 +138,25 @@ export type TrustedEntry = {
    * to the strict non-owner path. Omitted -> applies on every agent (back-compat).
    */
   scopeAgents?: string[];
+  /**
+   * OPT-IN: let this entry run critical/irreversible EXEC inside its own
+   * scopePathGlobs (`rm -rf <own workspace>/build`, a `--hard` reset of its own
+   * checkout...). Omitted/false -> strict, every critical stays blocked.
+   *
+   * WHY it is a flag and not the default: relaxing the ceiling is an owner
+   * decision per deployment, so an existing install must not change behaviour
+   * on upgrade. WHY it exists at all: a PIC who cannot clear their own build
+   * dir works around the gate instead of respecting it (`rm -fr` is not matched
+   * by a `rm\s+-rf` pattern), which buys the owner illusion of control and the
+   * karyawan random friction.
+   *
+   * HARD CEILING, unchanged by this flag: protectedGlobs (.env/secrets/keys)
+   * are checked BEFORE it; path-WRITE escalations (openclaw.json/.env) and
+   * security-doc writes stay blocked via isPathWriteEscalation(); and a command
+   * naming no in-scope path token can never be PROVEN in-scope, so it is denied.
+   * Requires scopePathGlobs -- a grant with no jail grants nothing.
+   */
+  allowScopedCritical?: boolean;
 };
 
 /** Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools. */
@@ -526,13 +545,27 @@ function escalationHit(call: ToolCall, c: PolicyConfig): string | null {
  * Conservative by default: anything not clearly additive is destructive.
  */
 export type EscalationSeverity = "additive" | "destructive";
+
+/**
+ * True when an escalationHit()/criticalDocHit() reason names a WRITE to a
+ * guarded PATH ("write <p> ~ <glob>" / "exec-write <p> ~ <glob>") rather than a
+ * critical EXEC PATTERN ("exec ~ /rm\s+-rf/").
+ *
+ * WHY it is shared: two callers need the same split and must never drift. The
+ * severity classifier uses it to pick approval friction; the trusted
+ * scoped-critical gate uses it as a hard wall, because "delete inside your own
+ * workspace" must never become "write yourself into openclaw.json/.env".
+ */
+export function isPathWriteEscalation(esc: string): boolean {
+  return /^(write|exec-write)\s/.test((esc || "").toLowerCase());
+}
+
 export function escalationSeverity(esc: string): EscalationSeverity {
   const s = (esc || "").toLowerCase();
   // openclaw.json write -> destructive tier (a broken config crash-loops the bot).
   if (/\bopenclaw\.json\b/.test(s)) return "destructive";
   // A plain tool/exec WRITE to an escalation path (e.g. .env) is additive.
-  // escalationHit emits these as "write <p> ~ <glob>" or "exec-write <p> ~ <glob>".
-  if (/^(write|exec-write)\s/.test(s)) return "additive";
+  if (isPathWriteEscalation(s)) return "additive";
   // Everything else from escalationHit is a critical EXEC pattern (rm -rf, force
   // push, DROP TABLE, interpreter-delete, piped sink...) -> destructive.
   return "destructive";
@@ -641,11 +674,13 @@ export function execDenyReason(command: string | undefined, scripts: string[]): 
  * A command with NO path token (a bare force-push, say) returns false and stays
  * blocked, because a command with no visible target cannot be PROVEN in-scope.
  *
- * KNOWN-DEAD for escalation hits (measured 2026-10-22): the call site also
- * requires !escalationHit(), and an irreversible exec IS an escalationHit via
- * criticalExecPatterns -- so for the delete-your-own-build-dir case this gate
- * is inert and the action stays BLOCKED. Kept faithful rather than quietly
- * widened: enabling it is an owner decision, not a refactor side effect.
+ * REACH (changed 2026-10-23, was KNOWN-DEAD): the call site used to also require
+ * !escalationHit(), and an irreversible exec IS an escalationHit via
+ * criticalExecPatterns -- so the delete-your-own-build-dir case this gate was
+ * written for could never reach it. The owner decision was taken: the call site
+ * now gates on entry.allowScopedCritical (opt-in, default strict) and walls off
+ * path-WRITE escalations instead of all escalations, so `rm -rf <own-scope>`
+ * reaches this check while a write to openclaw.json/.env still cannot.
  *
  * NOT A SUBSTITUTE for the protected/escalation gates: openclaw.json, .env and
  * the security docs are checked BEFORE this and stay blocked regardless, so a
@@ -701,16 +736,22 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
   // trusted, never auto-approved the way owner's escalationHit -> "approve".
   // This is the other half of the below-owner ceiling: trusted can neither run
   // irreversible ops nor touch config/security files (escalation OR doc paths).
-  // Critical/irreversible: hard-blocked EXCEPT when the owner granted a path
-  // scope and the command stays fully inside it. escalationHit targets
-  // (openclaw.json / .env) are NEVER in scope by construction, so the
-  // self-promotion path stays shut even for an entry that HAS a scope.
+  // Critical/irreversible: hard-blocked EXCEPT when the owner OPTED IN via
+  // allowScopedCritical AND the command stays fully inside this entry's own
+  // path scope ("wreck your own jail, nothing else").
+  //
+  // The wall is isPathWriteEscalation, NOT escalationHit: a WRITE to
+  // openclaw.json/.env or a security doc is self-promotion and stays blocked
+  // forever, while a destructive EXEC PATTERN (rm -rf, --hard) is judged purely
+  // by whether every path token resolves in-scope. Blocking on escalationHit
+  // here would re-dead the gate, since every such exec is an escalationHit.
   const crit = escalationHit(call, c) ?? criticalDocHit(call, c);
   if (crit) {
-    const scopedOk = call.toolName === "exec"
+    const scopedOk = entry.allowScopedCritical === true
+      && call.toolName === "exec"
       && !!entry.scopePathGlobs?.length
-      && execCriticalWithinScope(call.command ?? "", entry.scopePathGlobs)
-      && !escalationHit(call, c);
+      && !isPathWriteEscalation(crit)
+      && execCriticalWithinScope(call.command ?? "", entry.scopePathGlobs);
     if (!scopedOk) return { action: "block", reason: `trusted: ${entry.id} critical/irreversible denied: ${crit}` };
   }
 

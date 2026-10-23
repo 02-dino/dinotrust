@@ -454,10 +454,14 @@ role, just per-person grants you compose from two knobs:
 |------|--------------|
 | **Tool allowlist** | Extra tools/scripts this id may use, beyond the non-owner default. Omit → a sane broader-than-non-owner default (read/write/edit/exec/web/memory). |
 | **Path scope** (`--scope`) | Confines *every* path-touching action to specific globs — anything outside is blocked outright, no partial access. This is what makes "admin of their own workspace, nothing else" possible. |
+| **Scoped critical** (`--allow-scoped-critical`) | **Off by default.** Lets this id run critical/irreversible *exec* (`rm -rf`, `--hard`, …) **inside its own `--scope` only**. Requires `--scope` — a grant with no jail grants nothing. |
 
 **The ceiling — always enforced, no per-entry override:**
 - Protected resources (`.env`, secrets, credentials, other agents'/workspaces' configs) stay hard-blocked, even inside a trusted id's own scope.
-- Critical/irreversible actions (`rm -rf`, force-push, `DROP TABLE`, …) are **blocked** for trusted ids — never escalated to an "are you sure?" approval the way an owner's critical action is.
+- Critical/irreversible actions (`rm -rf`, force-push, `DROP TABLE`, …) are **blocked** for trusted ids — never escalated to an "are you sure?" approval the way an owner's critical action is. A trusted id has no approval path at all: approval cards go to the owner, so a block is simply a block.
+- `--allow-scoped-critical` **narrows** that one rule, it does not remove it. Even opted in, these stay blocked: protected globs (`.env`, secrets, keys), writes to `openclaw.json`/`.env`, security-doc writes, force-push and any other command whose paths aren't **all** inside the scope (a command naming *no* path can't be proven in-scope, so it's denied).
+
+> **Why the opt-in exists.** Without it a PIC can't clear their own build dir, so they route around the gate instead of respecting it — `rm -fr` isn't matched by an `rm -rf` pattern, and `find -delete` isn't matched at all. That buys the owner the *illusion* of control and the delegate *random* friction (blocked for typing `-rf` instead of `-fr`). Better to grant the real thing, scoped and audited (`R-trusted-critical-scoped`), than to pretend a bypassable pattern is a wall.
 
 Manage it with `scripts/manage-access.sh trusted` (the trusted subject of the
 same front door used for owners — surgical edits, no full re-install):
@@ -468,6 +472,11 @@ bash scripts/manage-access.sh trusted add 555555 --scope "workspace-bob/**"
 
 # Extra tool access, no path restriction (their own risk surface is just those tools)
 bash scripts/manage-access.sh trusted add 666666 --tools read,write --scripts exchange_data
+
+# Same jail as above, but may now clean it out (rm -rf inside the scope only)
+bash scripts/manage-access.sh trusted add 555555 --scope "workspace-bob/**" --allow-scoped-critical
+# ...and to take it back:
+bash scripts/manage-access.sh trusted add 555555 --no-scoped-critical
 
 bash scripts/manage-access.sh trusted list
 bash scripts/manage-access.sh trusted show 555555

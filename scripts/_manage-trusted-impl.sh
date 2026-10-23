@@ -9,6 +9,13 @@
 #   --scope   path glob confinement -- ANY call touching a path must match one
 #             of these globs or it's blocked outright ("not your workspace").
 #             Omit for a pure tool-allowlist grant with no path restriction.
+#   --allow-scoped-critical / --no-scoped-critical
+#             OPT-IN (default OFF): let this id run critical/irreversible EXEC
+#             (rm -rf, --hard ...) INSIDE its own --scope. Requires --scope: a
+#             grant with no jail grants nothing. Without it a PIC cannot clear
+#             their own build dir, so they work around the gate instead (`rm -fr`
+#             is not matched by an `rm -rf` pattern) -- illusory control for the
+#             owner, random friction for the karyawan.
 #
 # THE CEILING (always enforced, no override, this is what keeps it below owner):
 #   - protectedGlobs (secrets, other agents' configs, this repo's own security
@@ -37,7 +44,7 @@
 # Usage (via front door):
 #   bash scripts/manage-access.sh trusted list
 #   bash scripts/manage-access.sh trusted show   <id>
-#   bash scripts/manage-access.sh trusted add    <id> [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--oc-json PATH] [--dt-conf PATH]
+#   bash scripts/manage-access.sh trusted add    <id> [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--allow-scoped-critical] [--oc-json PATH] [--dt-conf PATH]
 #   bash scripts/manage-access.sh trusted remove <id> [--oc-json PATH] [--dt-conf PATH]
 #
 # Examples:
@@ -45,6 +52,8 @@
 #     # delegated admin of their own workspace folder only, default trusted tool set inside it
 #   bash scripts/manage-access.sh trusted add 666666 --tools read,write --scripts exchange_data
 #     # extra tool access, no path restriction (their own risk surface is just those tools)
+#   bash scripts/manage-access.sh trusted add 555555 --scope "workspace-bob/**" --allow-scoped-critical
+#     # same jail, but may now `rm -rf` inside it. .env/openclaw.json/secrets still blocked.
 #   bash scripts/manage-access.sh trusted remove 555555
 set -euo pipefail
 
@@ -59,7 +68,7 @@ warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
 err()     { echo -e "${RED}✗${NC}  $*" >&2; }
 error()   { err "$*"; exit 1; }
 
-USAGE="Usage: manage-access.sh trusted <list|show|add|remove> [id] [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--agents agent:x,agent:y] [--oc-json PATH] [--dt-conf PATH]"
+USAGE="Usage: manage-access.sh trusted <list|show|add|remove> [id] [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--agents agent:x,agent:y] [--allow-scoped-critical|--no-scoped-critical] [--oc-json PATH] [--dt-conf PATH]"
 
 ACTION="${1:-}"; shift || true
 [[ "$ACTION" != "list" && "$ACTION" != "show" && "$ACTION" != "add" && "$ACTION" != "remove" ]] && \
@@ -72,12 +81,16 @@ if [[ "$ACTION" != "list" ]]; then
 fi
 
 OPT_TOOLS=""; OPT_SCRIPTS=""; OPT_SCOPE=""; OPT_AGENTS=""; OPT_OC_JSON=""; OPT_DT_CONF=""
+# tri-state: "" = flag not passed (preserve prior value on merge), true/false = set it
+OPT_SCOPED_CRIT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tools)    OPT_TOOLS="$2"; shift 2 ;;
     --scripts)  OPT_SCRIPTS="$2"; shift 2 ;;
     --scope)    OPT_SCOPE="$2"; shift 2 ;;
     --agents)   OPT_AGENTS="$2"; shift 2 ;;
+    --allow-scoped-critical) OPT_SCOPED_CRIT="true"; shift ;;
+    --no-scoped-critical)    OPT_SCOPED_CRIT="false"; shift ;;
     --oc-json)  OPT_OC_JSON="$2"; shift 2 ;;
     --dt-conf)  OPT_DT_CONF="$2"; shift 2 ;;
     *) error "Unknown option: $1" ;;
@@ -150,11 +163,39 @@ csv_to_json_array() {
   python3 -c "import json,sys; print(json.dumps([s.strip() for s in sys.argv[1].split(',') if s.strip()]))" "$csv"
 }
 
+# True when the id ALREADY has a scopePathGlobs in a store, so re-running
+# `add <id> --allow-scoped-critical` without re-passing --scope is still valid
+# (the merge preserves the prior scope).
+prior_has_scope() {
+  local id="$1" p
+  for p in "$OPT_OC_JSON" "$OPT_DT_CONF"; do
+    [[ -f "$p" ]] || continue
+    python3 - "$p" "$id" <<'PY' && return 0
+import json, sys
+d = json.load(open(sys.argv[1]))
+t = (d.get("plugins", {}).get("entries", {}).get("dinotrust-enforce", {}).get("config", {}).get("trustedIds")
+     if "plugins" in d else d.get("trustedIds")) or []
+sys.exit(0 if any(str(e.get("id")) == sys.argv[2] and e.get("scopePathGlobs") for e in t) else 1)
+PY
+  done
+  return 1
+}
+
 if [[ "$ACTION" == "add" ]]; then
   TOOLS_JSON=$(csv_to_json_array "$OPT_TOOLS")
   SCRIPTS_JSON=$(csv_to_json_array "$OPT_SCRIPTS")
   SCOPE_JSON=$(csv_to_json_array "$OPT_SCOPE")
   AGENTS_JSON=$(csv_to_json_array "$OPT_AGENTS")
+  SCOPED_CRIT_JSON="${OPT_SCOPED_CRIT:-null}"   # tri-state: null = flag absent, preserve prior
+  # A critical grant with no jail grants nothing (the engine requires BOTH the
+  # flag AND an in-scope path), so refuse loudly rather than write a no-op flag.
+  if [[ "$SCOPED_CRIT_JSON" == "true" && "$SCOPE_JSON" == "null" ]] && ! prior_has_scope "$ARG_ID"; then
+    error "--allow-scoped-critical requires --scope. The grant is 'wreck your OWN jail'; with no jail it grants nothing and the engine would still block."
+  fi
+  if [[ "$SCOPED_CRIT_JSON" == "true" ]]; then
+    warn "--allow-scoped-critical: this id may now run critical/irreversible exec (rm -rf, --hard) INSIDE its own scope."
+    warn "STILL blocked regardless: protected globs (.env/secrets/keys), writes to openclaw.json or .env, security-doc writes, and any command whose paths are not ALL inside the scope."
+  fi
   if [[ "$TOOLS_JSON" == "null" && "$SCRIPTS_JSON" == "null" && "$SCOPE_JSON" == "null" ]]; then
     info "No --tools/--scripts/--scope given: this id gets the DEFAULT_TRUSTED_TOOLS set (read/write/edit/apply_patch/exec/web_search/web_fetch/browser/memory_search/memory_get), the shared nonOwnerAllowedScripts, and NO path restriction (any path allowed for allowed tools)."
   fi
@@ -167,9 +208,9 @@ apply_to_store() {
 
   local rc=0
   if [[ "$store_kind" == "oc" ]]; then
-    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" <<'PY' && rc=0 || rc=$?
+    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" "${SCOPED_CRIT_JSON:-null}" <<'PY' && rc=0 || rc=$?
 import json, sys
-path, action, arg_id, tools_j, scripts_j, scope_j, agents_j = sys.argv[1:8]
+path, action, arg_id, tools_j, scripts_j, scope_j, agents_j, crit_j = sys.argv[1:9]
 with open(path) as f:
     data = json.load(f)
 entry = data.setdefault("plugins", {}).setdefault("entries", {}).setdefault("dinotrust-enforce", {})
@@ -203,6 +244,8 @@ else:  # add
         new_entry["scopePathGlobs"] = json.loads(scope_j)
     if agents_j != "null":
         new_entry["scopeAgents"] = json.loads(agents_j)
+    if crit_j != "null":
+        new_entry["allowScopedCritical"] = json.loads(crit_j)
     trusted.append(new_entry)
 
 cfg["trustedIds"] = trusted
@@ -212,9 +255,9 @@ with open(path, "w") as f:
     f.write("\n")
 PY
   else  # dt
-    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" <<'PY' && rc=0 || rc=$?
+    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" "${SCOPED_CRIT_JSON:-null}" <<'PY' && rc=0 || rc=$?
 import json, sys
-path, action, arg_id, tools_j, scripts_j, scope_j, agents_j = sys.argv[1:8]
+path, action, arg_id, tools_j, scripts_j, scope_j, agents_j, crit_j = sys.argv[1:9]
 with open(path) as f:
     data = json.load(f)
 trusted = data.get("trustedIds", [])
@@ -246,6 +289,8 @@ else:  # add
         new_entry["scopePathGlobs"] = json.loads(scope_j)
     if agents_j != "null":
         new_entry["scopeAgents"] = json.loads(agents_j)
+    if crit_j != "null":
+        new_entry["allowScopedCritical"] = json.loads(crit_j)
     trusted.append(new_entry)
 
 data["trustedIds"] = trusted
