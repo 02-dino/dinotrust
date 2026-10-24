@@ -63,6 +63,7 @@ usage() {
 Usage:
   bash scripts/manage-access.sh owner   <list|add|remove> [id[@platform]] [flags]
   bash scripts/manage-access.sh trusted <list|show|add|remove> [id] [flags]
+  bash scripts/manage-access.sh nonowner <list|add-tool|remove-tool|add-script|remove-script> [name] [flags]
 
 Subjects:
   owner     Full-access ids. Syncs instruction layer + enforce hook in one command.
@@ -70,6 +71,10 @@ Subjects:
   trusted   Delegated middle tier (per-id tool/script allowlist + optional path scope).
             Enforce hook only. add/remove/list/show.
             Flags: --tools, --scripts, --scope, --oc-json, --dt-conf
+  nonowner  The DEFAULT public tier everyone lands in. Enforce hook only.
+            add-tool/remove-tool     = tool NAMES a non-owner may call at all
+            add-script/remove-script = the exec allowlist (which .py exec may run)
+            Flags: --oc-json, --dt-conf, --force (required for mutating tools)
 
 Examples:
   bash scripts/manage-access.sh owner add 987654321
@@ -79,6 +84,9 @@ Examples:
   bash scripts/manage-access.sh trusted add 666666 --tools read,write --scripts exchange_data
   bash scripts/manage-access.sh trusted list
   bash scripts/manage-access.sh trusted show 555555
+  bash scripts/manage-access.sh nonowner list
+  bash scripts/manage-access.sh nonowner add-script yt_dlp_tool
+  bash scripts/manage-access.sh nonowner add-tool image
 
 Run a subject with no action to see that subject's full flag help.
 EOF
@@ -94,12 +102,16 @@ case "$SUBJECT" in
     shift
     exec bash "$SCRIPT_DIR/_manage-trusted-impl.sh" "$@"
     ;;
+  nonowner|non-owner)
+    shift
+    exec bash "$SCRIPT_DIR/_manage-nonowner-impl.sh" "$@"
+    ;;
   -h|--help|help|"")
     usage
     exit 0
     ;;
   *)
-    err "Unknown subject '$SUBJECT'. Expected 'owner' or 'trusted'."
+    err "Unknown subject '$SUBJECT'. Expected 'owner', 'trusted', or 'nonowner'."
     echo "" >&2
     usage >&2
     exit 2
