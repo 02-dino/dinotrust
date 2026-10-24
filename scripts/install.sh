@@ -866,6 +866,82 @@ if [[ -d "$DT_SKILL_SRC" ]]; then
   fi
 fi
 
+# Wrappers: ship ready-made exec wrappers for binaries that can NEVER be
+# allowlisted directly (see wrappers/README.md for the two-class split). Copied
+# next to the config and auto-registered in the non-owner exec allowlist, so an
+# install gets a WORKING yt-dlp path without anyone writing Python. Without this
+# an org hits a deny, finds no wrapper shipped, and turns enforce off instead --
+# a total loss, not a partial one.
+#
+# Runs BEFORE chain_enforce (which consumes OPT_ALLOW_SCRIPTS at the end of this
+# file), so keys appended here reach the written config. Moving it after would
+# copy the files and silently fail to register them.
+DT_WRAP_SRC="$REPO_DIR/wrappers"
+if [[ -d "$DT_WRAP_SRC" ]]; then
+  DT_WRAP_DEST="$(dirname "$CONFIG_FILE")/wrappers"
+  if mkdir -p "$DT_WRAP_DEST" 2>/dev/null && cp "$DT_WRAP_SRC"/*.py "$DT_WRAP_DEST"/ 2>/dev/null; then
+    chmod +x "$DT_WRAP_DEST"/*.py 2>/dev/null || true
+    # Allowlist key = FULL filename stem (yt_dlp_tool.py -> "yt_dlp_tool").
+    # Deliberately NOT a short prefix like "yt_dlp": the gate also accepts
+    # <key><suffix>.py, so a short key would silently admit any future
+    # yt_dlp_*.py dropped beside it.
+    for _w in "$DT_WRAP_DEST"/*.py; do
+      [[ -f "$_w" ]] || continue
+      _k="$(basename "$_w" .py)"
+      case ",${OPT_ALLOW_SCRIPTS}," in
+        *",${_k},"*) ;;
+        *) OPT_ALLOW_SCRIPTS="${OPT_ALLOW_SCRIPTS:+$OPT_ALLOW_SCRIPTS,}$_k" ;;
+      esac
+    done
+    info "Installed wrappers -> $DT_WRAP_DEST"
+    info "Non-owner exec allowlist now: ${OPT_ALLOW_SCRIPTS:-<empty>}"
+
+    # ── DOC WIRING ───────────────────────────────────────────────────────────
+    # Allowlisting a wrapper only decides whether it MAY run. It does not tell
+    # the agent the wrapper exists, so the agent reaches for the bare binary,
+    # gets denied, and reads the denial as a missing permission it already has.
+    # Measured 2026-10-23: allowlist opened 08:11 UTC, a lane still failed at
+    # 10:11 UTC -- two hours later -- purely because the instruction file never
+    # named the wrapper. Permission and discoverability are SEPARATE layers;
+    # shipping only the first reproduces that failure at every install.
+    #
+    # Source of truth is the DINOTRUST-DOC-BEGIN/END block inside each wrapper,
+    # so the docs cannot drift from the file they describe. Own marker block ->
+    # idempotent (old block stripped before re-append), and independent of the
+    # main ruleset block so a re-run never nests or duplicates either one.
+    DT_DOC_BEGIN="# --- dinotrust wrappers begin ---"
+    DT_DOC_END="# --- dinotrust wrappers end ---"
+    DT_DOC_BODY=""
+    for _w in "$DT_WRAP_DEST"/*.py; do
+      [[ -f "$_w" ]] || continue
+      _doc=$(sed -n '/# DINOTRUST-DOC-BEGIN/,/# DINOTRUST-DOC-END/p' "$_w" \
+             | sed '1d;$d' | sed 's/^# \{0,1\}//')
+      [[ -n "$_doc" ]] && DT_DOC_BODY+="${_doc}"$'\n\n'
+    done
+    if [[ -n "$DT_DOC_BODY" && -f "$CONFIG_FILE" ]]; then
+      _tmp_doc=$(mktemp)
+      awk -v b="$DT_DOC_BEGIN" -v e="$DT_DOC_END" \
+          'index($0,b){skip=1} !skip{print} index($0,e){skip=0}' \
+          "$CONFIG_FILE" > "$_tmp_doc" && mv "$_tmp_doc" "$CONFIG_FILE"
+      {
+        echo ""
+        echo "$DT_DOC_BEGIN"
+        echo "## wrapped_binaries"
+        echo "  Some binaries can NEVER be allowlisted directly and are reached only"
+        echo "  through the wrappers below. Calling the bare binary is always denied,"
+        echo "  and that denial reads like a missing permission -- it is not."
+        echo "  Wrappers live in: $DT_WRAP_DEST"
+        echo ""
+        printf '%s' "$DT_DOC_BODY"
+        echo "$DT_DOC_END"
+      } >> "$CONFIG_FILE"
+      info "Wired wrapper usage docs into $(basename "$CONFIG_FILE")"
+    fi
+  else
+    warn "Could not copy wrappers/ to $DT_WRAP_DEST -- binaries needing a wrapper (yt-dlp) stay blocked. Copy wrappers/*.py there manually and add each filename stem to nonOwnerAllowedScripts."
+  fi
+fi
+
 # Cursor: add frontmatter
 if [[ "$OPT_PLATFORM" == "cursor" ]]; then
   CURSOR_FRONTMATTER="---

@@ -522,6 +522,15 @@ function targetPaths(event: any): string[] {
   const p = event?.params ?? {};
   push(p.path); push(p.file); push(p.filename); push(p.filepath);
   if (Array.isArray(p.paths)) p.paths.forEach(push);
+  // VISION PATH PARAMS (measured 2026-10-23): vision tools take a local
+  // filesystem path under `image`/`images[]`, NOT one of the names above.
+  // Without these the extractor returned [] for every such call, so
+  // anyProtected() had nothing to match and protectedGlobs (**/.env,
+  // **/credentials, **/secrets/**) silently never fired -- `read` on .env was
+  // BLOCKED while a vision read of the SAME file PASSED. A guard that is
+  // configured but never evaluated reads as protection and provides none.
+  push(p.image);
+  if (Array.isArray(p.images)) p.images.forEach(push);
   if (Array.isArray(event?.derivedPaths)) event.derivedPaths.forEach(push);
   return out;
 }

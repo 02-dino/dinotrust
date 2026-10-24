@@ -32,7 +32,9 @@ function matchesProtected(p, globs) {
 function targetPaths(event) {
   const out = [], seen = new Set(); const push = v => { if (typeof v === "string" && v && !seen.has(v)) { seen.add(v); out.push(v); } };
   const p = event.params ?? {}; push(p.path); push(p.file); push(p.filename); push(p.filepath);
-  if (Array.isArray(p.paths)) p.paths.forEach(push); if (Array.isArray(event.derivedPaths)) event.derivedPaths.forEach(push);
+  if (Array.isArray(p.paths)) p.paths.forEach(push);
+  push(p.image); if (Array.isArray(p.images)) p.images.forEach(push);   // vision path params
+  if (Array.isArray(event.derivedPaths)) event.derivedPaths.forEach(push);
   return out;
 }
 function anyProtected(event, globs) {
@@ -344,6 +346,12 @@ t("stranger write", { toolName: "write", params: { path: "/tmp/x.txt" } }, STRAN
 t("stranger edit", { toolName: "edit", params: { path: "/tmp/x.txt" } }, STRANGER, true, "nonowner-mutate");
 t("stranger read normal", { toolName: "read", params: { path: "/tmp/x.txt" } }, STRANGER, false, "nonowner-allowed-tool");
 t("stranger read .env blocked", { toolName: "read", params: { path: "/x/.env" } }, STRANGER, true, "nonowner-secret");
+// VISION PARITY (regression 2026-10-23): a vision tool reaches the filesystem via
+// `image`/`images[]`, so before the fix targetPaths() returned [] and .env was
+// readable through vision while `read` on the SAME file was blocked.
+t("stranger image .env blocked", { toolName: "image", params: { image: "/x/.env" } }, STRANGER, true, "nonowner-secret");
+t("stranger images[] .env blocked", { toolName: "image", params: { images: ["/x/ok.png", "/x/.env"] } }, STRANGER, true, "nonowner-secret");
+t("stranger image normal png not blocked by secret rule", { toolName: "image", params: { image: "/x/ok.png" } }, STRANGER, true, "nonowner-default");
 t("stranger web_search", { toolName: "web_search", params: {} }, STRANGER, false, "nonowner-allowed-tool");
 t("stranger memory_search", { toolName: "memory_search", params: {} }, STRANGER, false, "nonowner-allowed-tool");
 t("stranger exec cat credentials", { toolName: "exec", params: { command: "cat ~/.config/credentials" } }, STRANGER, true, "nonowner-secret");

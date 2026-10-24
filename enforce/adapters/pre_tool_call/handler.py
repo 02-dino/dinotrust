@@ -170,9 +170,12 @@ def target_paths(tool_input):
     def push(v):
         if isinstance(v, str) and v and v not in seen:
             seen.add(v); out.append(v)
-    for key in ("path", "file", "filename", "filepath", "file_path", "notebook_path"):
+    # `image` is a vision-tool path param (measured 2026-10-23): without it the
+    # extractor returns [] for vision calls, so protectedGlobs never evaluates
+    # and a .env readable via vision bypasses the same guard that blocks `read`.
+    for key in ("path", "file", "filename", "filepath", "file_path", "notebook_path", "image"):
         push(tool_input.get(key))
-    for key in ("paths", "files"):
+    for key in ("paths", "files", "images"):
         val = tool_input.get(key)
         if isinstance(val, list):
             for v in val:
