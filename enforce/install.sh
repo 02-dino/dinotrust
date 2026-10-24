@@ -134,6 +134,11 @@ case "$OPT_PLATFORM" in
       cp "$ENFORCE_DIR/adapters/openclaw/openclaw.plugin.json" "$EXT_DIR/openclaw.plugin.json"
       cp "$ENFORCE_DIR/adapters/openclaw/package.json" "$EXT_DIR/package.json" 2>/dev/null || true
       cp "$ENFORCE_DIR/adapters/openclaw/selftest.mjs" "$EXT_DIR/selftest.mjs" 2>/dev/null || true
+      # sdk-stub.mjs is what lets selftest.mjs import the REAL index.ts (the
+      # plugin-SDK specifier only resolves inside a running gateway). Without
+      # it the installed selftest cannot run at all -- see its header for why
+      # the suite must never go back to copying the adapter's logic.
+      cp "$ENFORCE_DIR/adapters/openclaw/sdk-stub.mjs" "$EXT_DIR/sdk-stub.mjs" 2>/dev/null || true
       success "Plugin files installed."
     fi
     # Companion bootstrap hook: auto-surfaces the DEGRADED (fail-open) state to the

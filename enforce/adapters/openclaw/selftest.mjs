@@ -1,227 +1,77 @@
-// Standalone logic self-test for owner-warn / non-owner-strict-allowlist model.
+// Self-test for the dinotrust OpenClaw adapter.
+//
+// IT IMPORTS THE REAL MODULE. This used to be a hand-copied mirror of
+// handler.ts, and that copy was the single most expensive bug source in this
+// repo: measured 2026-10-23/24, FOUR defects shipped green because the suite
+// asserted against its own stale duplicate while the real adapter diverged --
+// including the heredoc block that silently killed 7 unattended cron runs.
+//
+// handler.ts imports the OpenClaw plugin SDK, which only resolves inside a
+// running gateway, so the import is made possible by sdk-stub.mjs:
+//   node --experimental-strip-types --import ./sdk-stub.mjs selftest.mjs
+// Only that one unresolvable specifier is stubbed; every rule under test is
+// the genuine article.
+//
+// What stays local: the TEST FIXTURES (config values) and the `decide`
+// orchestration below, which exists to give assertions short stable labels
+// ("trusted-protected") instead of raw block reasons. The RULES it calls are
+// all imported.
+import {
+  DEFAULTS,
+  anyProtected,
+  criticalDocHit as _criticalDocHit,
+  escSeverity,
+  escalationHit as _escalationHit,
+  execCriticalWithinScope,
+  execRunsAllowedScript,
+  findTrusted as _findTrusted,
+  humanizeReason,
+  interpreterDeleteHit,
+  isAffirmative,
+  isPathWriteEscalation,
+  matchesProtected,
+  pipedInterpreterSink,
+  resolveSenderId,
+  rmRfScratchOnly,
+  stripQuoted,
+  targetPaths,
+  teardownScriptDryRun,
+  writeTargets,
+} from "./handler.ts";
+
+// ── TEST FIXTURES (legitimately local: this is the config under test) ────────
 const PROTECTED = ["**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/credentials", "**/secrets/**"];
 const MUTATING = ["exec", "write", "edit", "apply_patch"];
 const OWNERS = ["111111"];
 const NONOWNER_TOOLS = ["read", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
 const NONOWNER_SCRIPTS = ["exchange_data", "semantic_search", "defillama_search", "arkham_search", "consensus_search"];
-// MIRROR of handler.ts criticalExecPatterns. A stale copy here makes this suite
-// green while the real adapter is wide open -- exactly how the v1.23.0 core
-// hardening went unnoticed for ~10 versions. Keep in lockstep with handler.ts.
-const CRIT_EXEC = ["(?<![-\\w])rm\\s+-rf", "git\\s+push.*--force", "git\\s+push.*-f\\b", "\\bDROP\\s+TABLE", "\\bTRUNCATE\\s+TABLE\\b", "(?<![-\\w])TRUNCATE\\s+(ONLY\\s+)?\\S+\\s*;", "mkfs", "dd\\s+if=", ":\\(\\)\\s*\\{", "(^|[|;&]|&&|\\|\\|)\\s*(sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*([a-z0-9_./-]*/)?(apt(-get)?\\s+(remove|purge|autoremove)\\b|dpkg\\s+(-r\\b|-P\\b|--remove\\b|--purge\\b)|(npm|pnpm|yarn|pip[0-9.]*|gem|brew|pacman|snap|cargo)\\s+(uninstall|remove|rm|-R)\\b|make\\s+uninstall\\b|uninstall\\b)|(^|\\s)(bash|sh|source|\\.)\\s+([^\\s;|&]*/)?uninstall(\\.sh)?(\\s|$)|(^|\\s)\\./([^\\s;|&]*/)?uninstall\\.sh(\\s|$)", "--hard\\b", "\\bos\\.remove\\b", "\\bos\\.unlink\\b", "os\\.removedirs", "find\\s+.*-delete\\b", "truncate\\s+-s\\s*0\\b", "\\bunlink\\s+/", "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?rm\\s+-[a-zA-Z]*r", "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?rmdir\\s+", "git\\s+clean\\s+-[a-z]*f", "(?:^|[;&|]\\s*)(?:sudo\\s+|doas\\s+|env\\s+\\S+\\s+)*(?:[a-z0-9_./-]*/)?shred\\s+"];
 const ESC_PATHS = ["**/openclaw.json", "**/.env"];          // owner write -> approval (escalation)
 const DOC_PATHS = ["**/security_rules.md", "**/AGENTS.md"]; // owner write -> warn (reversible)
 const DEFAULT_TRUSTED_TOOLS = ["read", "write", "edit", "apply_patch", "exec", "web_search", "web_fetch", "browser", "memory_search", "memory_get"];
 let TRUSTED = []; // mutated per-test-block below (mirrors config.trustedIds)
-const OWNER_SELF_APPROVAL = "warn"; // noob-default: unattended agent-self criticals warn-log, don't hang
+const OWNER_SELF_APPROVAL = "warn"; // noob-default: unattended agent-self criticals warn-log
 
-function globToRe(glob) {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const ch = glob[i];
-    if (ch === "*") { if (glob[i + 1] === "*") { re += ".*"; i++; } else re += "[^/]*"; }
-    else if (".+^${}()|[]\\".includes(ch)) re += "\\" + ch; else re += ch;
-  }
-  return new RegExp("^" + re + "$");
-}
-function matchesProtected(p, globs) {
-  const norm = p.replace(/\\/g, "/"); const base = norm.split("/").pop() || norm;
-  for (const g of globs) { const re = globToRe(g); const gb = globToRe(g.replace(/^\*\*\//, ""));
-    if (re.test(norm) || re.test(base) || gb.test(norm) || gb.test(base)) return g; }
-  return null;
-}
-function targetPaths(event) {
-  const out = [], seen = new Set(); const push = v => { if (typeof v === "string" && v && !seen.has(v)) { seen.add(v); out.push(v); } };
-  const p = event.params ?? {}; push(p.path); push(p.file); push(p.filename); push(p.filepath);
-  if (Array.isArray(p.paths)) p.paths.forEach(push);
-  push(p.image); if (Array.isArray(p.images)) p.images.forEach(push);   // vision path params
-  if (Array.isArray(event.derivedPaths)) event.derivedPaths.forEach(push);
-  return out;
-}
-function anyProtected(event, globs) {
-  for (const tp of targetPaths(event)) { const h = matchesProtected(tp, globs); if (h) return tp; }
-  if (event.toolName === "exec") { const cmd = String((event.params ?? {}).command ?? "");
-    for (const t of cmd.split(/[\s;|&><'"()]+/).filter(Boolean)) { const h = matchesProtected(t, globs); if (h) return "exec:" + h; } }
-  return null;
-}
-function execRunsAllowedScript(event, scripts) {
-  if (event.toolName !== "exec") return false;
-  const cmd = String((event.params ?? {}).command ?? ""); if (!cmd) return false;
-  if (/[;|&><`$(){}]/.test(cmd)) return false;
-  for (const s of scripts) { const esc = s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); const re = new RegExp("(^|[\\/\\s])" + esc + "[A-Za-z0-9_]*\\.py([\\s]|$)"); if (re.test(cmd)) return true; }
-  return false;
-}
-function resolveSenderId(event, ctx) {
-  for (const src of [ctx, event, event.metadata]) if (src && src.senderId != null && String(src.senderId).length) return String(src.senderId);
-  const sk = String(ctx.sessionKey ?? ""); const parts = sk.split(":"); const di = parts.indexOf("direct");
-  if (di >= 0 && parts[di + 1]) return parts[di + 1];
-  return null;
-}
-function writeTargets(cmd) {
-  const out = [];
-  const redir = /(?:^|\s)(?:[0-9]*|&)?>>?\s*([^\s;|&><'"()]+)/g;
-  let m;
-  while ((m = redir.exec(cmd)) !== null) { if (m[1]) out.push(m[1]); }
-  const tee = /(?:^|[|;&]\s*|\s)tee\b((?:\s+(?:-a|--append))*)((?:\s+[^\s;|&><'"()]+)+)/g;
-  while ((m = tee.exec(cmd)) !== null) {
-    for (const t of (m[2] || "").split(/\s+/).filter(Boolean)) { if (!t.startsWith("-")) out.push(t); }
-  }
-  return out;
-}
-function stripQuoted(cmd) {
-  let out = ""; let i = 0; const n = cmd.length;
-  while (i < n) {
-    const ch = cmd[i];
-    if (ch === "'") { i++; while (i < n && cmd[i] !== "'") i++; i++; out += " "; }
-    else if (ch === '"') { i++; while (i < n && cmd[i] !== '"') { if (cmd[i] === "\\" && i + 1 < n) i++; i++; } i++; out += " "; }
-    else { out += ch; i++; }
-  }
-  return out;
-}
-// Mirror of handler.ts stripHeredocBodies: drop heredoc bodies for TEXT SINKS
-// only (git commit/tag/notes, cat, tee) and never when the opening line pipes.
-const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
-function walkHeredoc(cmd, visit) {
-  const OPEN = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
-  let delim = null, openLine = null;
-  for (const line of cmd.split("\n")) {
-    if (delim !== null) {
-      if (line.trim() === delim) { delim = null; openLine = null; visit(line, false, null); continue; }
-      visit(line, true, openLine);
-      continue;
-    }
-    visit(line, false, null);
-    const hits = [...line.matchAll(OPEN)];
-    if (hits.length) { delim = hits[hits.length - 1][2]; openLine = line; }
-  }
-}
-function isTextSinkLine(line) {
-  return !line.includes("|") && TEXT_SINK_RE.test(line);
-}
-function stripHeredocBodies(cmd) {
-  if (!cmd || !cmd.includes("<<")) return cmd;
-  const out = [];
-  walkHeredoc(cmd, (line, inBody, openLine) => {
-    if (inBody && openLine !== null && isTextSinkLine(openLine)) return;
-    out.push(line);
-  });
-  return out.join("\n");
-}
-function rmRfScratchOnly(cmd) {
-  const scan = stripQuoted(cmd);
-  if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
-  const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
-  const paths = toks.filter(t =>
-    !t.startsWith("-") && (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)));
-  if (paths.length === 0) return false;
-  const looksScratchVar = (t) =>
-    /tmp|temp|scratch|sandbox|dry|dryport|throwaway|workdir/i.test(t.replace(/^\$\{?/, "").replace(/\}$/, ""));
-  let sawTmp = false;
-  for (const p of paths) {
-    const norm = p.replace(/\\/g, "/");
-    if (/^\/tmp\/[^/]/.test(norm)) { sawTmp = true; continue; }
-    if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(norm) && looksScratchVar(norm)) { sawTmp = true; continue; }
-    return false;
-  }
-  return sawTmp;
-}
-// Mirrors of the handler.ts detectors ported for parity on 2026-10-23/24.
-const DELETE_VERBS = [
-  [/shutil\.rmtree/i, "shutil.rmtree"], [/\bos\.remove(dirs)?\s*\(/i, "os.remove"],
-  [/\bos\.unlink\s*\(/i, "os.unlink"], [/\bos\.rmdir\s*\(/i, "os.rmdir"],
-  [/\.unlink\s*\(/i, "Path.unlink"], [/\brmtree\s*\(/i, "rmtree"],
-  [/fs\.rm(Sync)?\s*\(/i, "fs.rm"], [/fs\.unlink(Sync)?\s*\(/i, "fs.unlink"],
-  [/fs\.rmdir(Sync)?\s*\(/i, "fs.rmdir"], [/\bunlink\b/i, "unlink"],
-  [/File\.delete|FileUtils\.rm|Dir\.delete/i, "ruby File/Dir delete"],
-];
-function deleteVerbHit(text) {
-  for (const [re, name] of DELETE_VERBS) if (re.test(text)) return name;
-  return null;
-}
-function interpreterDeleteHit(cmd) {
-  const interp = /\b(python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)\b[^\n]*?\s-(?:c|e|eval|\-eval)\b/i;
-  if (!interp.test(cmd)) return null;
-  const verb = deleteVerbHit(cmd);
-  return verb ? `interp-delete:${verb}` : null;
-}
-function heredocBodies(cmd) {
-  if (!cmd || !cmd.includes("<<")) return "";
-  const out = [];
-  walkHeredoc(cmd, (line, inBody) => { if (inBody) out.push(line); });
-  return out.join("\n");
-}
-// (?<![\w.]) so an interpreter name cannot match the TAIL of a filename
-// (`py` used to match the ".py" in `python3 process.py <<< "x"`).
-const _CODE_INTERP = "(?<![\\w.])(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
-const PIPE_SINK_RE = new RegExp("\\|\\s*(?:sudo\\s+|env\\s+\\S+=\\S+\\s+)*" + _CODE_INTERP + "(?:\\s+-\\S*)*\\s*(?:$|[;&|<>])", "i");
-const HEREDOC_SINK_RE = new RegExp("\\b" + _CODE_INTERP + "\\b(?:\\s+-)?\\s*(?:<<-?\\s*[\"'\\w]|<<<)", "i");
-function pipedInterpreterSink(cmd) {
-  if (!cmd) return null;
-  // PIPE: program arrives as upstream DATA -> nothing to read, stays blocked.
-  if (PIPE_SINK_RE.test(cmd)) return "opaque-piped-interpreter";
-  if (!HEREDOC_SINK_RE.test(cmd)) return null;
-  // HEREDOC: the body is right there in the command -> read and judge it.
-  const body = heredocBodies(cmd);
-  if (!body.trim()) return "opaque-heredoc-interpreter";   // here-string: truly unreadable
-  const verb = deleteVerbHit(body);
-  if (verb) return `heredoc-delete:${verb}`;
-  return null;
-}
-function teardownScriptDryRun(cmd) {
-  if (!cmd) return false;
-  const scan = stripQuoted(cmd);
-  if (!/(^|[\s;&|])(bash|sh|source|\.)\s+\S+\.sh\b|(^|[\s;&|])\.?\/\S+\.sh\b/i.test(scan)) return false;
-  if (!/--dry[-_]?run\b/i.test(scan)) return false;
-  if (/\brm\s+-|\bmkfs\b|\bdd\s+if=|--force\b|--hard\b|\bDROP\s+TABLE\b|\bTRUNCATE\s+TABLE\b|\bshred\b|-delete\b/i.test(scan)) return false;
-  return true;
-}
-function escalationHit(event) {
-  const toolName = event.toolName;
-  if (["write", "edit", "apply_patch"].includes(toolName)) {
-    for (const tp of targetPaths(event)) { const h = matchesProtected(tp, ESC_PATHS); if (h) return "path:" + tp; }
-  }
-  if (toolName === "exec") {
-    const cmd = String((event.params ?? {}).command ?? "");
-    const interpHit = interpreterDeleteHit(cmd);
-    if (interpHit) return interpHit;
-    const sinkHit = pipedInterpreterSink(cmd);
-    if (sinkHit) return sinkHit;
-    // Heredoc TEXT-SINK bodies out first (a commit message is prose, not shell),
-    // then quoted literals. Mirror of handler.ts.
-    const scan = stripQuoted(stripHeredocBodies(cmd));
-    const scratchRm = rmRfScratchOnly(cmd);
-    const dryRunTeardown = teardownScriptDryRun(cmd);
-    for (const pat of CRIT_EXEC) { try { if (new RegExp(pat, "i").test(scan)) { if (scratchRm && /\brm\b/.test(pat)) continue; if (dryRunTeardown) continue; return "exec:" + pat; } } catch {} }
-    for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, ESC_PATHS); if (h) return "exec-write:" + wt; }
-  }
-  return null;
-}
-function criticalDocHit(event) {
-  const toolName = event.toolName;
-  if (["write", "edit", "apply_patch"].includes(toolName)) {
-    for (const tp of targetPaths(event)) { const h = matchesProtected(tp, DOC_PATHS); if (h) return "doc:" + tp; }
-  }
-  if (toolName === "exec") {
-    const cmd = String((event.params ?? {}).command ?? "");
-    for (const wt of writeTargets(cmd)) { const h = matchesProtected(wt, DOC_PATHS); if (h) return "exec-doc:" + wt; }
-  }
-  return null;
-}
-function findTrusted(senderId) {
-  for (const t of TRUSTED) if (t.id === senderId) return t;
-  return null;
-}
-// Mirrors of the handler helpers the scoped-critical carve-out depends on.
-function isPathWriteEscalation(esc) {
-  return /^(write|exec-write)\s/.test((esc || "").toLowerCase());
-}
-function execCriticalWithinScope(cmd, globs) {
-  if (!globs || globs.length === 0) return false;
-  const tokens = cmd
-    .split(/[\s;|&><'"()]+/)
-    .filter((t) => t && !t.startsWith("-") && (t.includes("/") || t === "." || t === ".."));
-  if (tokens.length === 0) return false;
-  return tokens.every((t) => matchesProtected(t, globs) !== null);
-}
+// criticalExecPatterns come from the REAL defaults -- no second copy to drift.
+const CFG = {
+  ...DEFAULTS,
+  ownerIds: OWNERS,
+  protectedGlobs: PROTECTED,
+  escalationPathGlobs: ESC_PATHS,
+  criticalPathGlobs: DOC_PATHS,
+  mutatingTools: MUTATING,
+  nonOwnerAllowedTools: NONOWNER_TOOLS,
+  nonOwnerAllowedScripts: NONOWNER_SCRIPTS,
+  ownerSelfApproval: OWNER_SELF_APPROVAL,
+};
+const CRIT_EXEC = CFG.criticalExecPatterns;
+
+// Thin wrappers: the real signatures take config/sessionKey explicitly, while
+// the suite below calls them with one argument. No logic here, just binding.
+const escalationHit = (event) => _escalationHit(event, CFG);
+const criticalDocHit = (event) => _criticalDocHit(event, CFG);
+const findTrusted = (senderId, sessionKey = "") =>
+  _findTrusted(senderId, { ...CFG, trustedIds: TRUSTED }, sessionKey);
+
 function decideTrusted(event, entry) {
   const toolName = event.toolName;
   const protectedHit = anyProtected(event, PROTECTED);
@@ -284,29 +134,8 @@ function decide(event, ctx) {
   return { block: true, why: "nonowner-default" };
 }
 
-// Mirror of handler.ts humanizeReason for a standalone assertion.
-function humanizeReason(esc) {
-  const m = /^exec ~ \/(.+)\/$/.exec(esc);
-  if (m) {
-    const pat = m[1];
-    const table = [
-      [/rm.*-.*r.*f/i, "permanently delete files/folders (rm -rf)"],
-      [/git.*push.*(--force|-f\b)/i, "force-push to git (can overwrite remote history)"],
-      [/--hard/i, "hard-reset git (discards uncommitted work)"],
-      [/DROP.*TABLE/i, "drop a database table (destroys data)"],
-      [/TRUNCATE/i, "truncate a database table (wipes all rows)"],
-      [/mkfs/i, "format a filesystem (erases a disk)"],
-      [/dd.*if=/i, "raw disk write with dd (can overwrite a drive)"],
-      [/:\(\)/, "a fork-bomb pattern (can hang the machine)"],
-      [/uninstall/i, "uninstall software"],
-    ];
-    for (const [re, phrase] of table) if (re.test(pat)) return `This command would ${phrase}.`;
-    return `This is a command flagged as risky (pattern: ${pat}).`;
-  }
-  const w = /^(write|exec-write) (.+) ~ (.+)$/.exec(esc);
-  if (w) return `This would write to a protected/critical file (${w[2]}) \u2014 editing it can brick or reconfigure the bot.`;
-  return `This action is flagged as critical/irreversible (${esc}).`;
-}
+// humanizeReason is IMPORTED from handler.ts (see header) -- the local copy
+// that used to live here was deleted on 2026-10-25.
 
 let pass = 0, fail = 0;
 function h(name, esc, mustInclude) {
@@ -454,20 +283,11 @@ TRUSTED = [];
 t("back-compat: empty trustedIds unaffected", { toolName: "read", params: { path: "x" } }, T1, false, "nonowner-allowed-tool");
 
 // ── REPLY-SCOPED APPROVAL (noob path): additive="yes", destructive="yes delete" ──
-// Standalone mirror of handler.ts escSeverity/isAffirmative/isStrongAffirmative +
-// the reply-clearance gate. Verifies the SIGNED-reply + tier-affirmative + open-
-// pending-for-target logic without touching disk (pending presence is a param).
-function escSeverity(esc) {
-  const s = (esc || "").toLowerCase();
-  if (/\bopenclaw\.json\b/.test(s)) return "destructive";
-  if (/^(write|exec-write)\s/.test(s)) return "additive";
-  return "destructive";
-}
-function isAffirmative(text) {
-  const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
-  if (!t || t.length > 24) return false;
-  return /^(y|ya|yes|yep|yeah|yup|ok|okay|oke|sure|do it|go|go ahead|proceed|approve|approved|confirm|confirmed|lanjut|boleh|iya|ya lanjut|ya boleh)$/.test(t);
-}
+// escSeverity + isAffirmative are IMPORTED from handler.ts (see header); their
+// local copies were deleted on 2026-10-25. isStrongAffirmative stays local
+// because handler.ts does not export it. Verifies the SIGNED-reply +
+// tier-affirmative + open-pending-for-target logic without touching disk
+// (pending presence is a param).
 function isStrongAffirmative(text) {
   const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
   if (!t || t.length > 32) return false;

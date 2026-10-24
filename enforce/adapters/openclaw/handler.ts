@@ -116,12 +116,12 @@ type Cfg = {
 const SELF_APPROVE_MARKER = "DINOTRUST_OWNER_APPROVED";
 
 // Broader-than-non-owner default tool set for a trusted entry with no explicit allowedTools.
-const DEFAULT_TRUSTED_TOOLS: string[] = [
+export const DEFAULT_TRUSTED_TOOLS: string[] = [
   "read", "write", "edit", "apply_patch", "exec",
   "web_search", "web_fetch", "browser", "memory_search", "memory_get",
 ];
 
-const DEFAULTS: Cfg = {
+export const DEFAULTS: Cfg = {
   // Generic safe defaults for distribution. agentFilter "" = enforce on ALL
   // agents (never silently no-op on a differently-named agent). ownerIds []
   // = no assumed owner: until the install configures ownerIds, a resolvable
@@ -226,7 +226,7 @@ function cfg(raw: any): Cfg {
 // list. Falls back to the flat ownerIds when the map is absent/empty or nothing
 // matches -> single-agent installs behave EXACTLY as before. This is the ONE
 // place owner-scoping is decided, so every call site stays consistent.
-function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
+export function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
   const map = c.agentOwners;
   if (map && typeof map === "object" && !Array.isArray(map)) {
     for (const key of Object.keys(map)) {
@@ -259,7 +259,7 @@ function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
  * NOT A SUBSTITUTE for the protected/escalation gates: openclaw.json, .env and
  * the security docs are checked BEFORE this and stay blocked regardless.
  */
-function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
+export function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
   if (!globs || globs.length === 0) return false;
   const tokens = cmd
     .split(/[\s;|&><'"()]+/)
@@ -268,7 +268,7 @@ function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
   return tokens.every((t) => matchesProtected(t, globs) !== null);
 }
 
-function findTrusted(senderId: string, c: Cfg, sessionKey: string): TrustedEntry | null {
+export function findTrusted(senderId: string, c: Cfg, sessionKey: string): TrustedEntry | null {
   for (const t of c.trustedIds) {
     if (t.id !== senderId) continue;
     if (t.scopeAgents && t.scopeAgents.length > 0) {
@@ -470,7 +470,7 @@ function resolvePendingIfRefire(c: Cfg, fp: string): boolean {
 }
 
 /** Minimal glob -> RegExp. ** = any incl. /, * = any except /. */
-function globToRe(glob: string): RegExp {
+export function globToRe(glob: string): RegExp {
   let re = "";
   for (let i = 0; i < glob.length; i++) {
     const ch = glob[i];
@@ -488,7 +488,7 @@ function globToRe(glob: string): RegExp {
  * still works for a file that does not exist yet (every write target). Leading
  * ".." that survive are KEPT, so an escaping relative path can never satisfy a
  * scope glob by accident. Mirror of enforce/core/policy.ts normalizePathLexical. */
-function normalizePathLexical(p: string): string {
+export function normalizePathLexical(p: string): string {
   const s = String(p).replace(/\\/g, "/");
   const abs = s.startsWith("/");
   const out: string[] = [];
@@ -504,7 +504,7 @@ function normalizePathLexical(p: string): string {
   return (abs ? "/" : "") + out.join("/");
 }
 
-function matchesProtected(p: string, globs: string[]): string | null {
+export function matchesProtected(p: string, globs: string[]): string | null {
   const norm = normalizePathLexical(p);
   const base = norm.split("/").pop() || norm;
   for (const g of globs) {
@@ -515,7 +515,7 @@ function matchesProtected(p: string, globs: string[]): string | null {
   return null;
 }
 
-function targetPaths(event: any): string[] {
+export function targetPaths(event: any): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (v: unknown) => { if (typeof v === "string" && v && !seen.has(v)) { seen.add(v); out.push(v); } };
@@ -535,7 +535,7 @@ function targetPaths(event: any): string[] {
   return out;
 }
 
-function anyProtected(event: any, globs: string[]): string | null {
+export function anyProtected(event: any, globs: string[]): string | null {
   for (const tp of targetPaths(event)) {
     const h = matchesProtected(tp, globs);
     if (h) return `${tp} ~ ${h}`;
@@ -556,7 +556,7 @@ function anyProtected(event: any, globs: string[]): string | null {
  */
 /** Genuine write targets: `>`,`>>` redirection operands and `tee [-a] FILE`.
  *  A critical path only appearing as a READ arg (grep/cat) is not a write. */
-function writeTargets(cmd: string): string[] {
+export function writeTargets(cmd: string): string[] {
   const out: string[] = [];
   const redir = /(?:^|\s)(?:[0-9]*|&)?>>?\s*([^\s;|&><'"()]+)/g;
   let m: RegExpExecArray | null;
@@ -573,7 +573,7 @@ function writeTargets(cmd: string): string[] {
 // words inside a quoted ARG (git commit -m "...rm -rf...", echo, grep) are inert
 // text and must not trip the gate. Real destructive cmds with quoted args still
 // match (operator is unquoted). Mirror of core/policy.ts stripQuoted.
-function stripQuoted(cmd: string): string {
+export function stripQuoted(cmd: string): string {
   let out = ""; let i = 0; const n = cmd.length;
   while (i < n) {
     const ch = cmd[i];
@@ -603,7 +603,7 @@ function stripComments(cmd: string): string {
 // fresh prompt; allow-always never matches). Carve-out: if an `rm -rf` command
 // touches ONLY /tmp/<child> paths, downgrade to warn. Any non-/tmp path (or no
 // explicit path -> ambiguous) stays critical. Mirror of core/policy.ts.
-function rmRfScratchOnly(cmd: string): boolean {
+export function rmRfScratchOnly(cmd: string): boolean {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
   const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
@@ -647,7 +647,7 @@ function rmRfScratchOnly(cmd: string): boolean {
  * FAIL-SAFE SHAPE: only the delimited body is removed. A command before, after,
  * or chained on the opening line is untouched and still scanned.
  */
-const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
+export const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
 
 /**
  * ONE delimiter-aware walk over a command's lines, shared by both heredoc
@@ -657,7 +657,7 @@ const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
  * and `openLine` carries the line that opened that body so a caller can decide
  * per-heredoc. Opening and closing delimiter lines report inBody=false.
  */
-function walkHeredoc(
+export function walkHeredoc(
   cmd: string,
   visit: (line: string, inBody: boolean, openLine: string | null) => void,
 ): void {
@@ -678,7 +678,7 @@ function walkHeredoc(
 
 /** Every heredoc BODY concatenated: the code a `python3 <<EOF` will actually
  *  run -- visible, therefore scannable. */
-function heredocBodies(cmd: string): string {
+export function heredocBodies(cmd: string): string {
   if (!cmd || !cmd.includes("<<")) return "";
   const out: string[] = [];
   walkHeredoc(cmd, (line, inBody) => { if (inBody) out.push(line); });
@@ -687,11 +687,11 @@ function heredocBodies(cmd: string): string {
 
 /** A heredoc whose body is DATA, not code. A pipe on the opening line
  *  disqualifies it: `cat <<EOF | bash` names a text sink but feeds a shell. */
-function isTextSinkLine(line: string): boolean {
+export function isTextSinkLine(line: string): boolean {
   return !line.includes("|") && TEXT_SINK_RE.test(line);
 }
 
-function stripHeredocBodies(cmd: string): string {
+export function stripHeredocBodies(cmd: string): string {
   if (!cmd || !cmd.includes("<<")) return cmd;
   const out: string[] = [];
   walkHeredoc(cmd, (line, inBody, openLine) => {
@@ -716,7 +716,7 @@ function stripHeredocBodies(cmd: string): string {
  *  (-c/-e) detector below and the heredoc-body scanner in pipedInterpreterSink.
  *  Call/removal FORMS only -- a bare `rmtree` would fire on `grep rmtree`.
  *  Mirror of core/policy.ts. */
-const DELETE_VERBS: Array<[RegExp, string]> = [
+export const DELETE_VERBS: Array<[RegExp, string]> = [
   [/shutil\.rmtree/i, "shutil.rmtree"],
   [/\bos\.remove(dirs)?\s*\(/i, "os.remove"],
   [/\bos\.unlink\s*\(/i, "os.unlink"],
@@ -729,12 +729,12 @@ const DELETE_VERBS: Array<[RegExp, string]> = [
   [/\bunlink\b/i, "unlink"],
   [/File\.delete|FileUtils\.rm|Dir\.delete/i, "ruby File/Dir delete"],
 ];
-function deleteVerbHit(text: string): string | null {
+export function deleteVerbHit(text: string): string | null {
   for (const [re, name] of DELETE_VERBS) if (re.test(text)) return name;
   return null;
 }
 
-function interpreterDeleteHit(cmd: string): string | null {
+export function interpreterDeleteHit(cmd: string): string | null {
   const interp = /\b(python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)\b[^\n]*?\s-(?:c|e|eval|\-eval)\b/i;
   if (!interp.test(cmd)) return null;
   const verb = deleteVerbHit(cmd);
@@ -750,13 +750,13 @@ function interpreterDeleteHit(cmd: string): string | null {
 // Measured 2026-10-23: `py` matched the ".py" in `python3 process.py <<< "x"`,
 // so running a NAMED (on-disk, reviewable) script read as an opaque sink. The
 // dot in the lookbehind is the whole point -- \b alone does not exclude it.
-const _CODE_INTERP = "(?<![\\w.])(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
-const PIPE_SINK_RE = new RegExp(
+export const _CODE_INTERP = "(?<![\\w.])(?:python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)";
+export const PIPE_SINK_RE = new RegExp(
   "\\|\\s*(?:sudo\\s+|env\\s+\\S+=\\S+\\s+)*" + _CODE_INTERP +
   "(?:\\s+-\\S*)*\\s*(?:$|[;&|<>])", "i");
-const HEREDOC_SINK_RE = new RegExp(
+export const HEREDOC_SINK_RE = new RegExp(
   "\\b" + _CODE_INTERP + "\\b(?:\\s+-)?\\s*(?:<<-?\\s*[\"'\\w]|<<<)", "i");
-function pipedInterpreterSink(cmd: string): string | null {
+export function pipedInterpreterSink(cmd: string): string | null {
   if (!cmd) return null;
   // PIPE: the program arrives from upstream DATA (network, another process).
   // Nothing to read, so nothing to judge -> stays blocked unconditionally.
@@ -785,7 +785,7 @@ function pipedInterpreterSink(cmd: string): string | null {
 // class where --dry-run is an honored convention, (b) an explicit --dry-run
 // flag, (c) NO destructive builtin anywhere, so a chained real delete cannot
 // ride along. Package-manager teardowns are deliberately NOT covered.
-function teardownScriptDryRun(cmd: string): boolean {
+export function teardownScriptDryRun(cmd: string): boolean {
   if (!cmd) return false;
   const scan = stripQuoted(cmd);
   if (!/(^|[\s;&|])(bash|sh|source|\.)\s+\S+\.sh\b|(^|[\s;&|])\.?\/\S+\.sh\b/i.test(scan)) return false;
@@ -797,7 +797,7 @@ function teardownScriptDryRun(cmd: string): boolean {
 // Translate a raw detector reason ("exec ~ /rm\s+-rf/", "write X ~ Y", ...) into
 // a plain-language sentence a non-technical owner can act on. Falls back to the
 // raw reason if nothing matches (never hides info).
-function humanizeReason(esc: string): string {
+export function humanizeReason(esc: string): string {
   const m = /^exec ~ \/(.+)\/$/.exec(esc);
   if (m) {
     const pat = m[1];
@@ -1103,12 +1103,12 @@ function ownerIntentMatches(ownerText: string, event: any, esc: string, requireF
 // trusted scoped-critical gate uses it as a hard wall so "clean your own
 // workspace" can never become "write yourself into openclaw.json/.env".
 // Mirror of policy.isPathWriteEscalation.
-function isPathWriteEscalation(esc: string): boolean {
+export function isPathWriteEscalation(esc: string): boolean {
   return /^(write|exec-write)\s/.test((esc || "").toLowerCase());
 }
 
 // Severity of an escalationHit() reason string (mirror of policy.escalationSeverity).
-function escSeverity(esc: string): "additive" | "destructive" {
+export function escSeverity(esc: string): "additive" | "destructive" {
   const s = (esc || "").toLowerCase();
   if (/\bopenclaw\.json\b/.test(s)) return "destructive"; // crash-loop risk
   if (isPathWriteEscalation(s)) return "additive";         // .env key-add etc
@@ -1117,7 +1117,7 @@ function escSeverity(esc: string): "additive" | "destructive" {
 
 // Plain affirmative (additive tier). Small, deterministic allowlist. Anchored so
 // "no"/"not now"/"nope" never match. Multilingual affirmatives kept conservative.
-function isAffirmative(text: string): boolean {
+export function isAffirmative(text: string): boolean {
   const t = (text || "").trim().toLowerCase().replace(/[!.]+$/g, "");
   if (!t || t.length > 24) return false; // a long sentence is not a bare confirm
   return /^(y|ya|yes|yep|yeah|yup|ok|okay|oke|sure|do it|go|go ahead|proceed|approve|approved|confirm|confirmed|lanjut|boleh|iya|ya lanjut|ya boleh)$/.test(t);
@@ -1187,7 +1187,7 @@ function markPendingResolved(c: Cfg, intentId: string) {
 // (a) critical/irreversible exec commands, (b) writes to an escalationPathGlobs
 // target (openclaw.json/.env: brick or privilege-escalation risk). Reversible
 // security-doc edits are NOT here -> see criticalDocHit.
-function escalationHit(event: any, c: Cfg): string | null {
+export function escalationHit(event: any, c: Cfg): string | null {
   const toolName = String(event?.toolName ?? "");
   if (["write", "edit", "apply_patch"].includes(toolName)) {
     for (const tp of targetPaths(event)) {
@@ -1233,7 +1233,7 @@ function escalationHit(event: any, c: Cfg): string | null {
 // SECURITY-DOC detector -> owner gets `warn` only (reversible: git + backups),
 // never approval/block. A write (tool or exec-redirect) to a criticalPathGlobs
 // doc (security_rules.md / AGENTS.md). Also feeds the trusted-tier ceiling.
-function criticalDocHit(event: any, c: Cfg): string | null {
+export function criticalDocHit(event: any, c: Cfg): string | null {
   const toolName = String(event?.toolName ?? "");
   if (["write", "edit", "apply_patch"].includes(toolName)) {
     for (const tp of targetPaths(event)) {
@@ -1276,11 +1276,11 @@ function invokedScript(command: string): string | null {
 }
 
 /** Shell metacharacters that make a command more than ONE plain invocation. */
-const SHELL_META = /[;|&><`$(){}]/;
+export const SHELL_META = /[;|&><`$(){}]/;
 /** Does this command's argv[0] (or interpreter target) name an allowlisted script?
  * Split out of execRunsAllowedScript so execDenyReason can reuse the SAME name
  * test instead of carrying a second copy that could drift. */
-function namesAllowlistedScript(cmd: string, scripts: string[]): boolean {
+export function namesAllowlistedScript(cmd: string, scripts: string[]): boolean {
   const script = invokedScript(cmd);
   if (!script || !script.endsWith(".py")) return false;
   // Resolve ".." BEFORE trusting the name: without this "../../evil/exchange_data.py"
@@ -1294,7 +1294,7 @@ function namesAllowlistedScript(cmd: string, scripts: string[]): boolean {
   }
   return false;
 }
-function execRunsAllowedScript(event: any, scripts: string[]): boolean {
+export function execRunsAllowedScript(event: any, scripts: string[]): boolean {
   if (event?.toolName !== "exec") return false;
   const cmd = String((event?.params ?? {}).command ?? "");
   if (!cmd) return false;
@@ -1342,7 +1342,7 @@ function wrapperForBinary(command: string, scripts: string[]): string | null {
   }
   return null;
 }
-function execDenyReason(cmd: string, scripts: string[]): string {
+export function execDenyReason(cmd: string, scripts: string[]): string {
   const generic = "non-owner exec restricted to allowlisted tools";
   const wrapper = wrapperForBinary(cmd, scripts);
   if (wrapper) {
@@ -1372,7 +1372,7 @@ function isChannelLane(sessionKey: string): boolean {
   return parts.length >= 3 && parts[0] === "agent" && CHANNEL_LANES.has(String(parts[2]).toLowerCase());
 }
 
-function resolveSenderId(event: any, ctx: any): string | null {
+export function resolveSenderId(event: any, ctx: any): string | null {
   for (const src of [ctx, event, event?.metadata]) {
     if (src && src.senderId != null && String(src.senderId).length > 0) return String(src.senderId);
   }
