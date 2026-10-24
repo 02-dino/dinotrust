@@ -5,6 +5,24 @@ resolve sibling imports at hook-load time, so it INLINES the policy engine.
 Any change to the enforcement decision MUST land in BOTH files, and BOTH
 selftests must pass (enforce/core/policy.selftest.mjs + adapters/openclaw/selftest.mjs).
 
+## Mirrored helpers (keep this list current)
+
+These functions exist as hand-kept copies in more than one file. Changing one
+without the others is invisible in review and silent at runtime:
+
+| helper | surfaces |
+|---|---|
+| `targetPaths` / `target_paths` | core policy caller, `adapters/openclaw/handler.ts`, `adapters/pre_tool_call/handler.py`, **`adapters/openclaw/selftest.mjs`** |
+| `wrapperForBinary` / `wrapper_for_binary` | `core/policy.ts`, `adapters/openclaw/handler.ts`, `adapters/pre_tool_call/handler.py` |
+| `execDenyReason` / `exec_deny_reason` | same three as above |
+
+Measured 2026-10-23: the vision-path fix (`image`/`images[]`) was landed in both
+handlers and the suite went green — but `selftest.mjs` carries its OWN copy of
+`targetPaths`, so every assertion had been testing the unfixed logic. A selftest
+that mirrors the code it tests can pass VACUOUSLY; when you touch a mirrored
+helper, grep for the function name across `enforce/` and fix every hit,
+including test fixtures.
+
 ## FOUR surfaces, not two (a pattern lives in all of them)
 
 Two-file parity is NOT enough for `criticalExecPatterns`. The same pattern list

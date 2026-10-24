@@ -711,8 +711,42 @@ export function execRunsAllowedScript(call: ToolCall, scripts: string[]): boolea
  * CONTRACT: diagnostic ONLY. Returns a string; never widens what is allowed --
  * execRunsAllowedScript alone decides allow/deny, and is unchanged.
  */
+/**
+ * Is the caller invoking a BARE BINARY that has a wrapper in the allowlist?
+ *
+ * WHY (measured 2026-10-23, cost: 2 hours): the allowlist matches *.py, so a raw
+ * binary can NEVER match it -- and the generic denial reads as a missing
+ * permission. An agent hit exactly that, concluded access was not granted, and
+ * asked the owner to widen the allowlist... which already contained the wrapper.
+ * The gate blocked correctly and explained wrongly, and the wrong explanation is
+ * what the caller acted on.
+ *
+ * Matching is deliberately tight: exact stem or `<binary>_*` (yt-dlp -> yt_dlp,
+ * matching key yt_dlp_tool). A substring test would name an unrelated script and
+ * send the caller somewhere worse than silence. Hyphens/dots fold to underscore
+ * because a binary name is rarely a legal Python module name.
+ */
+export function wrapperForBinary(command: string | undefined, scripts: string[]): string | null {
+  if (!command) return null;
+  const script = invokedScript(command);
+  if (!script || script.endsWith(".py")) return null;
+  const base = (script.split("/").pop() || script).toLowerCase().replace(/[-.]/g, "_");
+  if (!base) return null;
+  for (const s of scripts) {
+    const sn = String(s).toLowerCase();
+    if (sn === base || sn.startsWith(`${base}_`)) return String(s);
+  }
+  return null;
+}
 export function execDenyReason(command: string | undefined, scripts: string[]): string {
   const generic = "non-owner exec restricted to allowlisted tools";
+  const wrapper = wrapperForBinary(command, scripts);
+  if (wrapper) {
+    return `non-owner exec restricted to allowlisted tools. This is NOT a missing permission: `
+      + `the binary cannot be allowlisted directly (the allowlist matches .py scripts), but a `
+      + `wrapper for it IS already allowed -- re-issue the command as '${wrapper}.py <args>' `
+      + `instead of calling the binary. Do not ask for the allowlist to be widened.`;
+  }
   if (!command || !SHELL_META.test(command)) return generic;
   // Only the segment before the first metachar can be the intended invocation.
   if (!namesAllowlistedScript(command.split(SHELL_META)[0] ?? "", scripts)) return generic;

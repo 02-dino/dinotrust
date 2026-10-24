@@ -421,6 +421,36 @@ def exec_runs_allowed_script(command, scripts):
     return names_allowlisted_script(command, scripts)
 
 
+def wrapper_for_binary(command, scripts):
+    """Is the caller invoking a BARE BINARY that has a wrapper in the allowlist?
+
+    WHY (measured 2026-10-23, cost: 2 hours): the allowlist matches *.py, so a raw
+    binary can NEVER match it -- and the generic denial reads as a missing
+    permission. An agent hit exactly that, concluded access was not granted, and
+    asked the owner to widen the allowlist... which already contained the wrapper.
+    The gate blocked correctly and explained wrongly, and the wrong explanation is
+    what the caller acted on.
+
+    Matching is deliberately tight: exact stem or `<binary>_*` (yt-dlp -> yt_dlp,
+    matching key yt_dlp_tool). A substring test would name an unrelated script and
+    send the caller somewhere worse than silence.
+    MIRROR of enforce/core/policy.ts wrapperForBinary -- keep all three in sync.
+    """
+    if not command:
+        return None
+    script = invoked_script(command)
+    if not script or script.endswith(".py"):
+        return None
+    base = script.split("/")[-1].lower().replace("-", "_").replace(".", "_")
+    if not base:
+        return None
+    for s in scripts:
+        sn = str(s).lower()
+        if sn == base or sn.startswith(base + "_"):
+            return str(s)
+    return None
+
+
 def exec_deny_reason(command, scripts):
     """The SPECIFIC reason an exec failed the allowlist, for the block message.
 
@@ -436,6 +466,15 @@ def exec_deny_reason(command, scripts):
     exec_runs_allowed_script alone decides allow/deny, and is unchanged.
     """
     generic = "non-owner exec restricted to allowlisted tools"
+    wrapper = wrapper_for_binary(command, scripts)
+    if wrapper:
+        return (
+            "non-owner exec restricted to allowlisted tools. This is NOT a missing "
+            "permission: the binary cannot be allowlisted directly (the allowlist matches "
+            ".py scripts), but a wrapper for it IS already allowed -- re-issue the command "
+            "as '%s.py <args>' instead of calling the binary. Do not ask for the allowlist "
+            "to be widened." % wrapper
+        )
     if not command or not re.search(SHELL_META, command):
         return generic
     # Only the segment before the first metachar can be the intended invocation.

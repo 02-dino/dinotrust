@@ -25,6 +25,25 @@ function r(name, c, sender, reasonRe) {
   ok ? pass++ : fail++;
 }
 const OWNER = "111111", SELF = null, STRANGER = "999";
+// Config whose allowlist SHIPS A WRAPPER -- used by the bare-binary deny-message
+// cases below. r()/t() above bind CFG at call time, so these need their own
+// helpers rather than another sender constant (a sender cannot carry a config).
+const CFG_W = normalizeConfig({
+  ownerIds: ["111111"],
+  nonOwnerAllowedScripts: ["exchange_data", "yt_dlp_tool"],
+});
+function rw(name, c, sender, reasonRe) {
+  const v = decide(c, sender, CFG_W);
+  const ok = v.action === "block" && reasonRe.test(v.reason);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+function tw(name, c, sender, expect) {
+  const v = decide(c, sender, CFG_W);
+  const ok = v.action === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
 
 // owner: allow / warn / approve
 t("owner normal exec", call("exec", { command: "ls -la" }), OWNER, "allow");
@@ -79,6 +98,26 @@ r("chained NON-allowlisted script -> stays generic",
   call("exec", { command: "python3 tools/evil.py; ls" }), STRANGER, /restricted to allowlisted tools/);
 r("plain NON-allowlisted script -> stays generic",
   call("exec", { command: "ls -la /root" }), STRANGER, /restricted to allowlisted tools/);
+// BARE BINARY WITH A SHIPPED WRAPPER (measured 2026-10-23, cost: 2 hours).
+// The allowlist matches *.py, so a raw binary can never match it -- and the
+// generic denial reads as a missing permission. An agent acted on exactly that
+// and asked for an allowlist that already contained the wrapper. Blocking is
+// correct; the EXPLANATION is what the caller acts on one layer up.
+rw("bare binary w/ wrapper -> names the wrapper, not a permission problem",
+  call("exec", { command: "yt-dlp https://youtu.be/abc" }), STRANGER, /yt_dlp_tool\.py/);
+rw("bare binary w/ wrapper -> says it is NOT a missing permission",
+  call("exec", { command: "yt-dlp https://youtu.be/abc" }), STRANGER, /NOT a missing permission/);
+// Still a BLOCK: the hint is diagnostic only and must never widen what runs.
+tw("bare binary w/ wrapper is still blocked",
+  call("exec", { command: "yt-dlp https://youtu.be/abc" }), STRANGER, "block");
+// Tight matching: an unrelated binary must NOT be pointed at someone else's
+// wrapper -- naming the wrong script sends the caller somewhere worse than silence.
+rw("unrelated bare binary -> stays generic",
+  call("exec", { command: "curl https://example.com" }), STRANGER, /restricted to allowlisted tools/);
+// The wrapper itself, invoked properly, must ALLOW -- proving the hint points at
+// a form that actually works rather than at another dead end.
+tw("the wrapper invoked properly -> allow",
+  call("exec", { command: "python3 wrappers/yt_dlp_tool.py info https://youtu.be/abc" }), STRANGER, "allow");
 t("stranger write", call("write", { paths: ["/tmp/x"] }), STRANGER, "block");
 t("stranger edit", call("edit", { paths: ["/tmp/x"] }), STRANGER, "block");
 t("stranger read normal", call("read", { paths: ["/tmp/x"] }), STRANGER, "allow");
