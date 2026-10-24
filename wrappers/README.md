@@ -36,6 +36,43 @@ Two independent reasons a binary lands in **Hard**, and either one is enough:
 A config-driven runner can cover the Easy class completely. It cannot cover
 reason (2), which is why the Hard class stays code.
 
+## The generic runner (Easy class — no new code per binary)
+
+`run_binary.py` is allowlisted ONCE; adding a binary after that is a few lines
+in `binaries.json`. Why this exists: `yt_dlp_tool.py` is 159 lines of which **5**
+are policy. Retyping 154 lines of argparse/JSON/error boilerplate for every
+binary is an entry barrier, and the realistic response to an entry barrier in a
+security tool is to switch the security tool off.
+
+    python3 <wrappers>/run_binary.py --list
+    python3 <wrappers>/run_binary.py jq -r .name data.json
+
+```json
+"jq": { "allowedFlags": ["-r", "-c", "-n"], "forcedFlags": [], "timeout": 60 }
+```
+
+`forcedFlags` is the part a gate can never provide: the runner BUILDS the argv,
+so it can prepend a flag. A gate only judges a finished command.
+
+Four refusals, in this order, each covering a different failure:
+
+1. **Binary must be a NAME from the spec** — never a path. A path would let the
+   caller choose the executable, which is the whole decision being made for them.
+2. **Flags are allowlisted per binary**, matched on the flag name so
+   `--opt=value` cannot slip past a list written as bare names.
+3. **`HARD_DENY` overrides the spec.** Flags that execute, fetch an executable,
+   or load an unseen config file are refused *even if a spec allows them*. The
+   spec is the surface most likely to be edited casually, and "the config said it
+   was fine" is how an allowlist becomes an RCE.
+4. **A group/world-writable spec is refused outright.** A policy file anyone can
+   rewrite is not a policy, and enforcing it would be theatre.
+
+`binaries.json` is per-install policy: the installer seeds it only when absent
+(so updates never revert your tuning) and chmods it 600. Run
+`bash wrappers/selftest.sh` after editing — it is weighted toward the refusal
+paths, because a happy path fails loudly on first use while a refusal that
+quietly stopped refusing looks exactly like a working tool.
+
 ## Installing
 
 `scripts/install.sh` copies this directory next to your config and adds each

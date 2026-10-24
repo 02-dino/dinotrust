@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Policy-as-data for wrappers/run_binary.py. Copy to binaries.json and edit.",
+    "ONLY put EASY-class binaries here: no flag that executes anything, no flag",
+    "that loads an external config file, and raw output that is already usable.",
+    "Everything else needs a real wrapper -- see wrappers/README.md. The runner",
+    "refuses dangerous flags even if a spec lists them, but that is a backstop,",
+    "not a licence to add hard-class binaries here.",
+    "allowedFlags is exact-match on the flag NAME (--opt=value is normalised),",
+    "so a flag not listed simply does not run. Positional args pass through."
+  ],
+  "jq": {
+    "allowedFlags": ["-r", "--raw-output", "-c", "--compact-output", "-n", "--null-input",
+                     "-e", "--exit-status", "-s", "--slurp", "-S", "--sort-keys",
+                     "--tab", "--arg", "--argjson", "-j", "--join-output"],
+    "forcedFlags": [],
+    "timeout": 60
+  },
+  "pdftotext": {
+    "allowedFlags": ["-f", "-l", "-layout", "-raw", "-nopgbrk", "-enc", "-eol", "-q"],
+    "forcedFlags": [],
+    "timeout": 120
+  },
+  "xmllint": {
+    "allowedFlags": ["--xpath", "--format", "--noout", "--nonet", "--encode", "--pretty"],
+    "forcedFlags": ["--nonet"],
+    "timeout": 60
+  }
+}

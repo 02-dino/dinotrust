@@ -881,6 +881,22 @@ if [[ -d "$DT_WRAP_SRC" ]]; then
   DT_WRAP_DEST="$(dirname "$CONFIG_FILE")/wrappers"
   if mkdir -p "$DT_WRAP_DEST" 2>/dev/null && cp "$DT_WRAP_SRC"/*.py "$DT_WRAP_DEST"/ 2>/dev/null; then
     chmod +x "$DT_WRAP_DEST"/*.py 2>/dev/null || true
+    # Seed the generic runner's policy file. Copied ONLY if absent: this file is
+    # per-install policy (which binaries + which flags), so overwriting it on
+    # every update would silently revert an operator's tuning. chmod 600 because
+    # run_binary.py REFUSES a group/world-writable spec -- a policy file anyone
+    # can rewrite is not a policy, and shipping it loose would make the runner
+    # fail on first use with a confusing error.
+    if [[ -f "$DT_WRAP_SRC/binaries.default.json" ]]; then
+      cp "$DT_WRAP_SRC/binaries.default.json" "$DT_WRAP_DEST/binaries.default.json" 2>/dev/null || true
+      if [[ ! -f "$DT_WRAP_DEST/binaries.json" ]]; then
+        cp "$DT_WRAP_SRC/binaries.default.json" "$DT_WRAP_DEST/binaries.json" 2>/dev/null || true
+        info "Seeded generic-runner spec -> $DT_WRAP_DEST/binaries.json"
+      else
+        info "Kept existing binaries.json (per-install policy, not overwritten)"
+      fi
+      chmod 600 "$DT_WRAP_DEST/binaries.json" 2>/dev/null || true
+    fi
     # Allowlist key = FULL filename stem (yt_dlp_tool.py -> "yt_dlp_tool").
     # Deliberately NOT a short prefix like "yt_dlp": the gate also accepts
     # <key><suffix>.py, so a short key would silently admit any future

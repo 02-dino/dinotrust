@@ -13,3 +13,6 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
+
+# dinotrust: per-install binary spec (copy from binaries.default.json)
+wrappers/binaries.json
