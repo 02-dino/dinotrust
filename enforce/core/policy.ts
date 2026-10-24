@@ -404,18 +404,18 @@ function stripQuoted(cmd: string): string {
  * to run as shell either.
  */
 const TEXT_SINK_RE = /(^|[;&|]\s*)(git\s+(commit|tag|notes)\b|cat\b|tee\b)/i;
+/** A heredoc whose body is DATA, not code. Pipe on the opening line disqualifies
+ *  it: `cat <<EOF | bash` names a text sink but feeds a shell. */
+function isTextSinkLine(line: string): boolean {
+  return !line.includes("|") && TEXT_SINK_RE.test(line);
+}
 export function stripHeredocBodies(cmd: string): string {
   if (!cmd || !cmd.includes("<<")) return cmd;
-  const OPEN = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
   const out: string[] = [];
-  let delim: string | null = null;
-  for (const line of cmd.split("\n")) {
-    if (delim !== null) { if (line.trim() === delim) delim = null; continue; }
+  walkHeredoc(cmd, (line, inBody, openLine) => {
+    if (inBody && openLine !== null && isTextSinkLine(openLine)) return;  // prose, drop it
     out.push(line);
-    if (line.includes("|") || !TEXT_SINK_RE.test(line)) continue;
-    const hits = [...line.matchAll(OPEN)];
-    if (hits.length) delim = hits[hits.length - 1][2];
-  }
+  });
   return out.join("\n");
 }
 
@@ -472,26 +472,70 @@ function rmRfScratchOnly(cmd: string): boolean {
 // command, but ONLY when it is an interpreter inline-code invocation (-c/-e/-eval),
 // and ONLY for delete verbs INSIDE that payload. Closes the shutil.rmtree/-c
 // bypass without re-flagging quoted mentions in ordinary commands.
+/** Interpreter-language delete verbs. ONE table, two callers: the inline
+ *  (-c/-e) detector below and the heredoc-body scanner in pipedInterpreterSink.
+ *  Kept to call/removal FORMS only -- a bare `rmtree`/`unlink` would fire on
+ *  `grep rmtree`. */
+const DELETE_VERBS: Array<[RegExp, string]> = [
+  [/shutil\.rmtree/i, "shutil.rmtree"],
+  [/\bos\.remove(dirs)?\s*\(/i, "os.remove"],
+  [/\bos\.unlink\s*\(/i, "os.unlink"],
+  [/\bos\.rmdir\s*\(/i, "os.rmdir"],
+  [/\.unlink\s*\(/i, "Path.unlink"],
+  [/\brmtree\s*\(/i, "rmtree"],
+  [/fs\.rm(Sync)?\s*\(/i, "fs.rm"],
+  [/fs\.unlink(Sync)?\s*\(/i, "fs.unlink"],
+  [/fs\.rmdir(Sync)?\s*\(/i, "fs.rmdir"],
+  [/\bunlink\b/i, "unlink"],
+  [/File\.delete|FileUtils\.rm|Dir\.delete/i, "ruby File/Dir delete"],
+];
+function deleteVerbHit(text: string): string | null {
+  for (const [re, name] of DELETE_VERBS) if (re.test(text)) return name;
+  return null;
+}
+
 function interpreterDeleteHit(cmd: string): string | null {
   const interp = /\b(python[0-9.]*|py|node|deno|bun|perl|ruby|php|bash|sh|zsh)\b[^\n]*?\s-(?:c|e|eval|\-eval)\b/i;
   if (!interp.test(cmd)) return null;
-  const deleteVerbs: Array<[RegExp, string]> = [
-    [/shutil\.rmtree/i, "shutil.rmtree"],
-    [/\bos\.remove(dirs)?\s*\(/i, "os.remove"],
-    [/\bos\.unlink\s*\(/i, "os.unlink"],
-    [/\bos\.rmdir\s*\(/i, "os.rmdir"],
-    [/\.unlink\s*\(/i, "Path.unlink"],
-    [/\brmtree\s*\(/i, "rmtree"],
-    [/fs\.rm(Sync)?\s*\(/i, "fs.rm"],
-    [/fs\.unlink(Sync)?\s*\(/i, "fs.unlink"],
-    [/fs\.rmdir(Sync)?\s*\(/i, "fs.rmdir"],
-    [/\bunlink\b/i, "unlink"],
-    [/File\.delete|FileUtils\.rm|Dir\.delete/i, "ruby File/Dir delete"],
-  ];
-  for (const [re, name] of deleteVerbs) {
-    if (re.test(cmd)) return `exec ~ interpreter-inline-delete (${name})`;
+  const verb = deleteVerbHit(cmd);
+  return verb ? `exec ~ interpreter-inline-delete (${verb})` : null;
+}
+
+/**
+ * ONE delimiter-aware walk over a command's lines, shared by the two heredoc
+ * consumers so the state machine exists exactly once.
+ *
+ * visit() gets every line; `inBody` says whether it sits INSIDE a heredoc body,
+ * and `openLine` carries the line that opened that body so a caller can decide
+ * per-heredoc (e.g. "was this opened by a text sink?"). Opening and closing
+ * delimiter lines are reported with inBody=false.
+ */
+function walkHeredoc(
+  cmd: string,
+  visit: (line: string, inBody: boolean, openLine: string | null) => void,
+): void {
+  const OPEN = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
+  let delim: string | null = null;
+  let openLine: string | null = null;
+  for (const line of cmd.split("\n")) {
+    if (delim !== null) {
+      if (line.trim() === delim) { delim = null; openLine = null; visit(line, false, null); continue; }
+      visit(line, true, openLine);
+      continue;
+    }
+    visit(line, false, null);
+    const hits = [...line.matchAll(OPEN)];
+    if (hits.length) { delim = hits[hits.length - 1][2]; openLine = line; }
   }
-  return null;
+}
+
+/** Every heredoc BODY in the command, concatenated. The code a `python3 <<EOF`
+ *  will actually run -- visible, therefore scannable. */
+function heredocBodies(cmd: string): string {
+  if (!cmd || !cmd.includes("<<")) return "";
+  const out: string[] = [];
+  walkHeredoc(cmd, (line, inBody) => { if (inBody) out.push(line); });
+  return out.join("\n");
 }
 
 // Opaque piped/heredoc interpreter sink. When a code interpreter is the SINK of a
@@ -512,9 +556,24 @@ const HEREDOC_SINK_RE = new RegExp(
   "\\b" + _CODE_INTERP + "\\b(?:\\s+-)?\\s*(?:<<-?\\s*[\"'\\w]|<<<)", "i");
 function pipedInterpreterSink(cmd: string): string | null {
   if (!cmd) return null;
+  // PIPE: the program arrives from upstream DATA (network, another process).
+  // Nothing to read, so nothing to judge -> stays blocked unconditionally.
   if (PIPE_SINK_RE.test(cmd)) return "exec ~ opaque-piped-interpreter (code from pipe, unreviewable)";
-  if (HEREDOC_SINK_RE.test(cmd)) return "exec ~ opaque-heredoc-interpreter (code from heredoc/stdin, unreviewable)";
-  return null;
+  if (!HEREDOC_SINK_RE.test(cmd)) return null;
+  // HEREDOC: "opaque" was WRONG (measured 2026-10-24). The body is sitting right
+  // there in the same command string -- stripHeredocBodies() already proved we
+  // can read it. Blind-blocking it cost 7 unattended cron runs in 2 days: the
+  // approval card expired at 00:51 / 03:05 / 03:06 with nobody awake, and the
+  // work silently never ran. A gate that stops routine reads but is bypassable
+  // by anyone willing to retype the command is friction, not safety.
+  // So: READ the body and judge it by the same rules as any other command.
+  const body = heredocBodies(cmd);
+  // Unreadable after all (here-string `<<<`, or `python3 -` with no delimiter):
+  // no body to scan -> fall back to the strict verdict.
+  if (!body.trim()) return "exec ~ opaque-heredoc-interpreter (code from heredoc/stdin, unreviewable)";
+  const verb = deleteVerbHit(body);
+  if (verb) return `exec ~ heredoc-interpreter-delete (${verb})`;
+  return null;   // readable AND clean -> the criticalExecPatterns scan still runs on it
 }
 
 /**
