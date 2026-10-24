@@ -918,6 +918,18 @@ if [[ -d "$DT_WRAP_SRC" ]]; then
              | sed '1d;$d' | sed 's/^# \{0,1\}//')
       [[ -n "$_doc" ]] && DT_DOC_BODY+="${_doc}"$'\n\n'
     done
+    # HAND-EDIT GUARD: same contract as the main ruleset block. Marker-scoped
+    # upsert is idempotent for the INSTALLER's own output but DESTRUCTIVE for a
+    # human's edit inside the same markers -- an org that tunes a usage note here
+    # would lose it on the next update with no diff and no error. Without --force
+    # we detect the edit and skip the rewrite instead of silently winning.
+    if [[ -n "$DT_DOC_BODY" && -f "$CONFIG_FILE" ]] \
+       && declare -f block_guard_check >/dev/null 2>&1 \
+       && ! block_guard_check "$CONFIG_FILE" "$DT_DOC_BEGIN" "$DT_DOC_END" dinotrust-wrappers "$OPT_FORCE"; then
+      warn "Wrapper docs block in $(basename "$CONFIG_FILE") was hand-edited -- leaving it alone."
+      warn "Re-run with --force to overwrite, after merging anything you want to keep."
+      DT_DOC_BODY=""
+    fi
     if [[ -n "$DT_DOC_BODY" && -f "$CONFIG_FILE" ]]; then
       _tmp_doc=$(mktemp)
       awk -v b="$DT_DOC_BEGIN" -v e="$DT_DOC_END" \
@@ -935,6 +947,8 @@ if [[ -d "$DT_WRAP_SRC" ]]; then
         printf '%s' "$DT_DOC_BODY"
         echo "$DT_DOC_END"
       } >> "$CONFIG_FILE"
+      declare -f block_guard_record >/dev/null 2>&1 \
+        && block_guard_record "$CONFIG_FILE" "$DT_DOC_BEGIN" "$DT_DOC_END" dinotrust-wrappers
       info "Wired wrapper usage docs into $(basename "$CONFIG_FILE")"
     fi
   else
@@ -1155,6 +1169,12 @@ chain_enforce() {
   [[ -n "$OPT_ALLOW_SCRIPTS" ]] && _args+=(--allow-scripts "$OPT_ALLOW_SCRIPTS")
   [[ -n "${OPT_AGENT:-}" ]] && _args+=(--agent "$OPT_AGENT")
   [[ -n "$OPT_CONFIG" ]] && _args+=(--config "$OPT_CONFIG")
+  # MULTI-AGENT: tell the enforce installer WHICH gateway config to merge into.
+  # Without this it falls back to $HOME/.openclaw/openclaw.json while this script
+  # already honoured ${OPENCLAW_CONFIG:-...} -- so on a one-gateway-per-agent box
+  # the lane's config is never touched and every per-lane run overwrites the SAME
+  # main config with a different lane's settings. Silent in both directions.
+  [[ -n "${OPENCLAW_CONFIG:-}" ]] && _args+=(--oc-json "$OPENCLAW_CONFIG")
   [[ "$OPT_ENFORCE_SHADOW" == "true" ]] && _args+=(--shadow)
   [[ "$OPT_FORCE" == "true" ]] && _args+=(--force)
   $OPT_DRY_RUN && _args+=(--dry-run)

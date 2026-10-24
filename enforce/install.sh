@@ -34,6 +34,7 @@ warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
 err()     { echo -e "${RED}✗${NC}  $*" >&2; }
 
 OPT_PLATFORM=""; OPT_OWNER_ID=""; OPT_ALLOW_SCRIPTS=""; OPT_CONFIG=""; OPT_AGENT_FILTER=""
+OPT_OC_JSON=""               # --oc-json: WHICH gateway config to merge into (multi-agent)
 OPT_ENFORCE="true"; OPT_DRY_RUN=false; OPT_FORCE=false; OPT_NONINTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --allow-scripts) OPT_ALLOW_SCRIPTS="$2"; shift 2 ;;
     --agent|--agent-filter) OPT_AGENT_FILTER="$2"; shift 2 ;;
     --config)        OPT_CONFIG="$2"; shift 2 ;;
+    --oc-json)       OPT_OC_JSON="$2"; shift 2 ;;
     --workspace)     OPT_CONFIG="${2%/}"; shift 2 ;;
     --shadow|--dry-enforce) OPT_ENFORCE="false"; shift ;;
     --dry-run)       OPT_DRY_RUN=true; shift ;;
@@ -153,7 +155,15 @@ case "$OPT_PLATFORM" in
     # own (ownerIds/nonOwnerAllowedScripts/enforce/agentFilter) WITHOUT clobbering
     # other user-set keys or the rest of the file. Falls back to paste-instructions
     # only if python3 is missing or the file can't be parsed.
-    OC_JSON="${HOME}/.openclaw/openclaw.json"
+    # MULTI-AGENT TARGETING (measured 2026-10-24): this used to hardcode
+    # $HOME/.openclaw/openclaw.json while the PARENT installer already resolved
+    # ${OPENCLAW_CONFIG:-...}. On a box with one gateway per agent that mismatch
+    # is silent and wrong in BOTH directions: the lane's own config is never
+    # touched, and every per-lane run rewrites the SAME main config with a
+    # different lane's settings. Nothing errors, so N runs look like N installs
+    # and are really one file overwritten N times.
+    # Precedence: explicit flag > env (what the parent passes) > default.
+    OC_JSON="${OPT_OC_JSON:-${OPENCLAW_CONFIG:-${HOME}/.openclaw/openclaw.json}}"
     AGENT_FILTER="${OPT_AGENT_FILTER:-}"
     if $OPT_DRY_RUN; then
       info "[dry-run] would merge plugins.entries.dinotrust-enforce into $OC_JSON"
