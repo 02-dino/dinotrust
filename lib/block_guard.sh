@@ -70,6 +70,38 @@ block_guard_check() {
   [ "$_bg_cur" = "$_bg_was" ]
 }
 
+# block_guard_status FILE BEGIN END TAG — report, never decide. Prints one of:
+#   no-block   no managed span on disk (fresh wire)
+#   unguarded  span exists but NO sidecar -> block_guard_check fails OPEN here,
+#              i.e. the next run overwrites it WITHOUT needing --force. This is
+#              every box installed before the guard shipped, and it is invisible
+#              from the outside: the sidecar's absence looks identical to a
+#              clean install. Bulk tooling MUST surface it before writing.
+#   pinned     sidecar holds the PROTECTED sentinel -> closed until --force
+#   installer  hash matches what we recorded -> safe to refresh
+#   edited     hash differs -> a human edited it, check() will refuse
+# Exists so a fleet/bulk caller can show guard state per lane without
+# duplicating the extract+hash logic (and drifting from check()).
+block_guard_status() {
+  _bg_file="$1"; _bg_begin="$2"; _bg_end="$3"; _bg_tag="$4"
+  [ -f "$_bg_file" ] || { echo "no-block"; return 0; }
+  _bg_txt="$(_bg_extract "$_bg_file" "$_bg_begin" "$_bg_end")"
+  [ -n "$_bg_txt" ] || { echo "no-block"; return 0; }
+  _bg_side="$(_bg_sidecar "$_bg_file" "$_bg_tag")"
+  [ -f "$_bg_side" ] || { echo "unguarded"; return 0; }
+  [ "$(head -n1 "$_bg_side" 2>/dev/null)" = "PROTECTED" ] && { echo "pinned"; return 0; }
+  if [ "$(printf '%s\n' "$_bg_txt" | _bg_sha)" = "$(cat "$_bg_side" 2>/dev/null)" ]
+  then echo "installer"; else echo "edited"; fi
+}
+# block_guard_pin FILE TAG — write the PROTECTED sentinel.
+# For a block whose provenance we CANNOT know (pre-guard install): recording its
+# current hash would assert "this is installer output" and green-light the very
+# overwrite the guard exists to stop. Pinning instead fails closed until a human
+# passes --force, which is the correct default when the answer is unknown.
+block_guard_pin() {
+  _bg_side="$(_bg_sidecar "$1" "$2")"
+  printf 'PROTECTED\n' > "$_bg_side" 2>/dev/null
+}
 # block_guard_record FILE BEGIN END TAG — call AFTER a successful write.
 block_guard_record() {
   _bg_side="$(_bg_sidecar "$1" "$4")"
