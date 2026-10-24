@@ -60,6 +60,13 @@ while [[ $# -gt 0 ]]; do
     --instruction-only) INSTRUCTION_ONLY=true; shift ;;
     --force)            PASS_FORCE=true; shift ;;
     --list)             LIST_ONLY=true; shift ;;
+    # PIN-ONLY MODE, not an install modifier (fixed 2026-10-24 after it bit me).
+    # It first read as "also pin unguarded lanes during the normal run", so a
+    # maintenance invocation silently performed a FULL INSTALL on every lane that
+    # happened not to be unguarded. Nothing was lost (the one lane it hit had no
+    # block and a backup was written), but a flag whose name describes a narrow
+    # safety action must never widen into writing config -- that is the same
+    # surprising-behaviour class this whole tool exists to remove.
     --pin-unguarded)    PIN_UNGUARDED=true; shift ;;
     -h|--help)
       sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -165,8 +172,16 @@ while IFS=$'\t' read -r agent gateway workspace owners; do
       skip_n=$((skip_n+1)); continue
     fi
     warn "SKIP  $agent — block is UNGUARDED (pre-guard install, provenance unknown)"
+    # (pin-only mode returns above; this path is the plain run's refusal)
     warn "      a write here cannot be distinguished from clobbering a hand-edit"
     warn "      run with --pin-unguarded to pin it closed, or --force to overwrite"
+    skip_n=$((skip_n+1)); continue
+  fi
+
+  # Pin-only mode never installs: a lane that is already guarded has nothing to
+  # pin, so there is simply no work here.
+  if $PIN_UNGUARDED; then
+    printf '  %-14s guard=%s — nothing to pin\n' "$agent" "$_gs"
     skip_n=$((skip_n+1)); continue
   fi
 
