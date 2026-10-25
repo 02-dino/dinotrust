@@ -129,9 +129,31 @@ with open(path) as f:
     data = json.load(f)
 cfg = (data.get("plugins", {}).get("entries", {}).get("dinotrust-enforce", {}).get("config", {})
        if os.environ["KIND"] == "oc" else data)
+scripts = cfg.get("nonOwnerAllowedScripts") or []
 for key, label in (("nonOwnerAllowedTools", "tools  "), ("nonOwnerAllowedScripts", "scripts")):
     vals = cfg.get(key) or []
     print(f"    {label}: {', '.join(str(v) for v in vals) if vals else '(none — nothing granted)'}")
+
+# WHO ACTUALLY RECEIVES THE SCRIPT LIST. A trusted entry that sets its own
+# allowedScripts is CUT OFF from this list permanently -- the engine does
+# `entry.allowedScripts ?? global`, which is override, not merge. Measured
+# 2026-10-25: two ids sat out a fleet-wide grant for exactly this reason, and
+# nothing in any list output would have shown it. Adding to the global list is
+# the natural next action after reading this screen, so the exception belongs
+# ON this screen -- otherwise the operator walks away believing it applied.
+cut = [e for e in (cfg.get("trustedIds") or [])
+       if isinstance(e, dict) and e.get("allowedScripts") is not None]
+if cut:
+    print()
+    print("    ⚠ these trusted ids do NOT inherit the script list above:")
+    for e in cut:
+        own = e.get("allowedScripts") or []
+        missing = [s for s in scripts if s not in own]
+        print(f"      {e.get('id')}: has [{', '.join(own) or 'empty'}]")
+        if missing:
+            print(f"        missing: {', '.join(missing)}")
+            print(f"        fix: manage-access.sh trusted add {e.get('id')} "
+                  f"--add-scripts {','.join(missing)}")
 PY
 }
 

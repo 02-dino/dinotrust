@@ -68,7 +68,31 @@ warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
 err()     { echo -e "${RED}✗${NC}  $*" >&2; }
 error()   { err "$*"; exit 1; }
 
-USAGE="Usage: manage-access.sh trusted <list|show|add|remove> [id] [--tools t1,t2,...] [--scripts s1,s2,...] [--scope glob1,glob2,...] [--agents agent:x,agent:y] [--allow-scoped-critical|--no-scoped-critical] [--oc-json PATH] [--dt-conf PATH]"
+read -r -d '' USAGE <<'EOU' || true
+Usage: manage-access.sh trusted <list|show|add|remove> [id] [flags]
+
+Lists (pick the verb that matches your intent):
+  --add-tools a,b      union into the current list   (safe, idempotent)
+  --del-tools a        subtract from the current list
+  --tools a,b          REPLACE the whole list
+  --add-scripts / --del-scripts / --scripts   same three for the exec allowlist
+
+Scope:
+  --scope glob1,glob2        confine to these paths (replaces)
+  --agents agent:x,agent:y   confine to these agents (replaces)
+  --allow-scoped-critical | --no-scoped-critical
+
+Other:
+  --dry-run            show the field-level diff, write nothing
+  --oc-json PATH       target a specific gateway config (multi-agent boxes)
+  --dt-conf PATH       target a CLI-runtime config
+
+WHY --add-* EXISTS: --tools/--scripts replace. Measured 2026-10-25:
+`--scripts yt_dlp_tool` on an entry holding ["sheet_fill_links"] silently
+produced ["yt_dlp_tool"] -- the prior grant vanished with no warning. Replace
+is legitimate, but it must be chosen, not be the default of someone who meant
+"also allow this". Use --dry-run first when you are unsure.
+EOU
 
 ACTION="${1:-}"; shift || true
 [[ "$ACTION" != "list" && "$ACTION" != "show" && "$ACTION" != "add" && "$ACTION" != "remove" ]] && \
@@ -83,16 +107,28 @@ fi
 OPT_TOOLS=""; OPT_SCRIPTS=""; OPT_SCOPE=""; OPT_AGENTS=""; OPT_OC_JSON=""; OPT_DT_CONF=""
 # tri-state: "" = flag not passed (preserve prior value on merge), true/false = set it
 OPT_SCOPED_CRIT=""
+# LIST MODE per field. WHY (measured 2026-10-25): `--scripts X` on an entry
+# already holding ["sheet_fill_links"] silently produced ["X"] -- the prior grant
+# vanished with no warning, and the loss is invisible until someone's workflow
+# breaks. Replace is a legitimate operation but it must be CHOSEN, not be the
+# accidental default of someone who meant "also allow this". --add-*/--del-* are
+# the safe verbs; --tools/--scripts keep replacing (back-compat) but now say so.
+TOOLS_MODE="set"; SCRIPTS_MODE="set"; DRY_RUN="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tools)    OPT_TOOLS="$2"; shift 2 ;;
-    --scripts)  OPT_SCRIPTS="$2"; shift 2 ;;
+    --tools)        OPT_TOOLS="$2";   TOOLS_MODE="set";   shift 2 ;;
+    --add-tools)    OPT_TOOLS="$2";   TOOLS_MODE="add";   shift 2 ;;
+    --del-tools)    OPT_TOOLS="$2";   TOOLS_MODE="del";   shift 2 ;;
+    --scripts)      OPT_SCRIPTS="$2"; SCRIPTS_MODE="set"; shift 2 ;;
+    --add-scripts)  OPT_SCRIPTS="$2"; SCRIPTS_MODE="add"; shift 2 ;;
+    --del-scripts)  OPT_SCRIPTS="$2"; SCRIPTS_MODE="del"; shift 2 ;;
     --scope)    OPT_SCOPE="$2"; shift 2 ;;
     --agents)   OPT_AGENTS="$2"; shift 2 ;;
     --allow-scoped-critical) OPT_SCOPED_CRIT="true"; shift ;;
     --no-scoped-critical)    OPT_SCOPED_CRIT="false"; shift ;;
     --oc-json)  OPT_OC_JSON="$2"; shift 2 ;;
     --dt-conf)  OPT_DT_CONF="$2"; shift 2 ;;
+    --dry-run)  DRY_RUN="true"; shift ;;
     *) error "Unknown option: $1" ;;
   esac
 done
@@ -116,42 +152,28 @@ fi
 
 # ── list / show: read-only, just print current trustedIds from whichever store(s) exist ──
 if [[ "$ACTION" == "list" || "$ACTION" == "show" ]]; then
+  # ONE renderer for both stores (was two identical heredocs). Its job is not
+  # prettiness: it makes INHERITED vs PINNED visible. `allowedScripts` ABSENT
+  # means the id keeps inheriting every future global addition; `allowedScripts:
+  # [...]` means cut off forever (the engine does `entry ?? global` -- override,
+  # not merge). Measured 2026-10-25: two ids were silently excluded from a
+  # fleet-wide grant for exactly that reason, and the old one-line output gave
+  # no way to see it.
+  echo ""
   if [[ "$HAS_OC" == "true" ]]; then
     info "OpenClaw ($OPT_OC_JSON):"
-    python3 - "$OPT_OC_JSON" "$ACTION" "$ARG_ID" <<'PY'
-import json, sys
-path, action, filter_id = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    data = json.load(f)
-entries = data.get("plugins", {}).get("entries", {}).get("dinotrust-enforce", {}).get("config", {}).get("trustedIds", [])
-if action == "show":
-    entries = [e for e in entries if str(e.get("id")) == filter_id]
-    if not entries:
-        print(f"    (no trusted entry for id {filter_id})")
-if not entries and action == "list":
-    print("    (none)")
-for e in entries:
-    print(f"    id={e.get('id')}  tools={e.get('allowedTools', '(default)')}  scripts={e.get('allowedScripts', '(shared default)')}  scope={e.get('scopePathGlobs', '(none - unrestricted paths)')}  agents={e.get('scopeAgents', '(none - ALL agents)')}")
-PY
+    python3 "$SCRIPT_DIR/_trusted_view.py" "$OPT_OC_JSON" oc "$ACTION" "$ARG_ID"
   fi
   if [[ "$HAS_DT" == "true" ]]; then
     info "CLI runtime ($OPT_DT_CONF):"
-    python3 - "$OPT_DT_CONF" "$ACTION" "$ARG_ID" <<'PY'
-import json, sys
-path, action, filter_id = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    data = json.load(f)
-entries = data.get("trustedIds", [])
-if action == "show":
-    entries = [e for e in entries if str(e.get("id")) == filter_id]
-    if not entries:
-        print(f"    (no trusted entry for id {filter_id})")
-if not entries and action == "list":
-    print("    (none)")
-for e in entries:
-    print(f"    id={e.get('id')}  tools={e.get('allowedTools', '(default)')}  scripts={e.get('allowedScripts', '(shared default)')}  scope={e.get('scopePathGlobs', '(none - unrestricted paths)')}  agents={e.get('scopeAgents', '(none - ALL agents)')}")
-PY
+    python3 "$SCRIPT_DIR/_trusted_view.py" "$OPT_DT_CONF" dt "$ACTION" "$ARG_ID"
   fi
+  echo ""
+  echo "  Change a list without clobbering it:"
+  echo "    trusted add <id> --add-scripts a,b     union (safe, idempotent)"
+  echo "    trusted add <id> --del-scripts a       subtract"
+  echo "    trusted add <id> --scripts a,b         REPLACE the whole list"
+  echo "    ...add --dry-run to preview the diff without writing."
   exit 0
 fi
 
@@ -204,100 +226,25 @@ fi
 apply_to_store() {
   local store_kind="$1" store_path="$2"
   local backup="${store_path}.dinotrust-bak.$(date -u +%Y%m%d-%H%M%S)"
-  cp "$store_path" "$backup"
-
   local rc=0
-  if [[ "$store_kind" == "oc" ]]; then
-    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" "${SCOPED_CRIT_JSON:-null}" <<'PY' && rc=0 || rc=$?
-import json, sys
-path, action, arg_id, tools_j, scripts_j, scope_j, agents_j, crit_j = sys.argv[1:9]
-with open(path) as f:
-    data = json.load(f)
-entry = data.setdefault("plugins", {}).setdefault("entries", {}).setdefault("dinotrust-enforce", {})
-cfg = entry.setdefault("config", {})
-trusted = cfg.get("trustedIds", [])
-if not isinstance(trusted, list):
-    trusted = []
 
-if action == "remove":
-    before = len(trusted)
-    trusted = [e for e in trusted if str(e.get("id")) != arg_id]
-    if len(trusted) == before:
-        sys.stderr.write(f"NOOP: '{arg_id}' is not a trusted id. No change.\n")
-        sys.exit(3)
-else:  # add
-    # MERGE, never rebuild. WHY (incident 2026-10-21): this used to drop the old
-    # entry and construct {"id": ...} from scratch, so every field the CLI has no
-    # flag for -- scopeAgents above all -- was SILENTLY ERASED by an unrelated
-    # update. Measured: six per-agent grants became cross-agent in one command.
-    # Silent privilege WIDENING is the one failure mode this script must not have,
-    # so unknown keys are carried over untouched and only passed flags override.
-    prior = next((e for e in trusted if str(e.get("id")) == arg_id), {})
-    trusted = [e for e in trusted if str(e.get("id")) != arg_id]
-    new_entry = dict(prior)
-    new_entry["id"] = arg_id
-    if tools_j != "null":
-        new_entry["allowedTools"] = json.loads(tools_j)
-    if scripts_j != "null":
-        new_entry["allowedScripts"] = json.loads(scripts_j)
-    if scope_j != "null":
-        new_entry["scopePathGlobs"] = json.loads(scope_j)
-    if agents_j != "null":
-        new_entry["scopeAgents"] = json.loads(agents_j)
-    if crit_j != "null":
-        new_entry["allowScopedCritical"] = json.loads(crit_j)
-    trusted.append(new_entry)
+  # ONE merge engine for BOTH store kinds. WHY: this was two near-identical
+  # heredocs differing only in where trustedIds lives. Two hand-kept copies of a
+  # privilege-granting merge is drift waiting to happen -- and the incident this
+  # code carries a comment about (silently erased scopeAgents) is exactly that
+  # class of bug. The engine also prints a field-level diff, so a grant change is
+  # visible BEFORE it is trusted.
+  if [[ "$DRY_RUN" != "true" ]]; then
+    cp "$store_path" "$backup"
+  fi
+  python3 "$SCRIPT_DIR/_trusted_merge.py" \
+    "$store_path" "$store_kind" "$ACTION" "$ARG_ID" \
+    "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" \
+    "${AGENTS_JSON:-null}" "${SCOPED_CRIT_JSON:-null}" \
+    "$TOOLS_MODE" "$SCRIPTS_MODE" "$DRY_RUN" || rc=$?
 
-cfg["trustedIds"] = trusted
-entry["config"] = cfg
-with open(path, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-PY
-  else  # dt
-    python3 - "$store_path" "$ACTION" "$ARG_ID" "${TOOLS_JSON:-null}" "${SCRIPTS_JSON:-null}" "${SCOPE_JSON:-null}" "${AGENTS_JSON:-null}" "${SCOPED_CRIT_JSON:-null}" <<'PY' && rc=0 || rc=$?
-import json, sys
-path, action, arg_id, tools_j, scripts_j, scope_j, agents_j, crit_j = sys.argv[1:9]
-with open(path) as f:
-    data = json.load(f)
-trusted = data.get("trustedIds", [])
-if not isinstance(trusted, list):
-    trusted = []
-
-if action == "remove":
-    before = len(trusted)
-    trusted = [e for e in trusted if str(e.get("id")) != arg_id]
-    if len(trusted) == before:
-        sys.stderr.write(f"NOOP: '{arg_id}' is not a trusted id. No change.\n")
-        sys.exit(3)
-else:  # add
-    # MERGE, never rebuild. WHY (incident 2026-10-21): this used to drop the old
-    # entry and construct {"id": ...} from scratch, so every field the CLI has no
-    # flag for -- scopeAgents above all -- was SILENTLY ERASED by an unrelated
-    # update. Measured: six per-agent grants became cross-agent in one command.
-    # Silent privilege WIDENING is the one failure mode this script must not have,
-    # so unknown keys are carried over untouched and only passed flags override.
-    prior = next((e for e in trusted if str(e.get("id")) == arg_id), {})
-    trusted = [e for e in trusted if str(e.get("id")) != arg_id]
-    new_entry = dict(prior)
-    new_entry["id"] = arg_id
-    if tools_j != "null":
-        new_entry["allowedTools"] = json.loads(tools_j)
-    if scripts_j != "null":
-        new_entry["allowedScripts"] = json.loads(scripts_j)
-    if scope_j != "null":
-        new_entry["scopePathGlobs"] = json.loads(scope_j)
-    if agents_j != "null":
-        new_entry["scopeAgents"] = json.loads(agents_j)
-    if crit_j != "null":
-        new_entry["allowScopedCritical"] = json.loads(crit_j)
-    trusted.append(new_entry)
-
-data["trustedIds"] = trusted
-with open(path, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-PY
+  if [[ "$DRY_RUN" == "true" ]]; then
+    return 0
   fi
   if [[ $rc -eq 3 ]]; then
     info "No change needed for $store_path."
