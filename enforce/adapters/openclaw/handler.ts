@@ -1342,8 +1342,27 @@ function wrapperForBinary(command: string, scripts: string[]): string | null {
   }
   return null;
 }
-export function execDenyReason(cmd: string, scripts: string[]): string {
+/** Tools ALLOWED in this lane, rendered for a deny message. "none" when empty. */
+function laneAlternatives(allowedTools?: string[]): string {
+  const t = (allowedTools ?? []).filter(Boolean);
+  return t.length ? t.join(", ") : "none";
+}
+
+/** Plain file-READ shapes. Used only to redirect the caller to the `read` tool. */
+const FILE_READ_CMD = /^\s*(sudo\s+)?(cat|head|tail|sed|nl|more|less|strings|od|xxd)\b/;
+
+export function execDenyReason(cmd: string, scripts: string[], allowedTools?: string[]): string {
   const generic = "non-owner exec restricted to allowlisted tools";
+  // WHY THE EXTRA SENTENCES (measured 2026-10-26): the bare generic reads as a
+  // TRANSIENT permission gap, so the caller retries it. In one WhatsApp group
+  // lane 28 of 34 denied exec calls were `echo ok` liveness probes fired ~3s
+  // apart -- the model was testing whether exec had "come back". It never does:
+  // this allowlist is a fixed policy wall. Saying so, and naming what IS
+  // available, is what ends the loop. Diagnostic only: widens nothing.
+  const wall = `${generic}. This is a FIXED policy wall for this lane, not an outage and not a `
+    + `transient failure: re-running the same command -- or probing with 'echo ok' -- is denied `
+    + `identically every time, so do NOT retry and do NOT ask for exec to be restored. `
+    + `Available here instead: ${laneAlternatives(allowedTools)}.`;
   const wrapper = wrapperForBinary(cmd, scripts);
   if (wrapper) {
     return `non-owner exec restricted to allowlisted tools. This is NOT a missing permission: `
@@ -1351,9 +1370,17 @@ export function execDenyReason(cmd: string, scripts: string[]): string {
       + `wrapper for it IS already allowed -- re-issue the command as '${wrapper}.py <args>' `
       + `instead of calling the binary. Do not ask for the allowlist to be widened.`;
   }
-  if (!cmd || !SHELL_META.test(cmd)) return generic;
+  // READING A FILE THROUGH exec: the `read` tool already does this and is
+  // allowed, so the capability exists -- only the door is wrong. Naming the
+  // working door beats a denial the caller reads as "no access to that file".
+  if (cmd && FILE_READ_CMD.test(cmd) && (allowedTools ?? []).includes("read")) {
+    return `${generic}. You are reading a file through exec, which this lane never permits -- but `
+      + `the 'read' tool IS allowed here and does exactly that. Re-issue it as read(<path>). `
+      + `Retrying this through exec will fail identically every time.`;
+  }
+  if (!cmd || !SHELL_META.test(cmd)) return wall;
   // Only the segment before the first metachar can be the intended invocation.
-  if (!namesAllowlistedScript(cmd.split(SHELL_META)[0] ?? "", scripts)) return generic;
+  if (!namesAllowlistedScript(cmd.split(SHELL_META)[0] ?? "", scripts)) return wall;
   return "exec allowlist takes ONE plain script invocation: the script is allowlisted but the "
     + "command adds shell chaining/redirection (; | & > < ` $ ( ) { }). Re-issue as separate "
     + "exec calls, one script each, and use the script's own flags instead of a pipe.";
@@ -1778,7 +1805,7 @@ export default definePluginEntry({
             audit(c, { evt: "allow", rule: "R-nonowner-script", toolName, sessionKey, sender });
             return;
           }
-          const denyReason = execDenyReason(String((event?.params ?? {}).command ?? ""), c.nonOwnerAllowedScripts);
+          const denyReason = execDenyReason(String((event?.params ?? {}).command ?? ""), c.nonOwnerAllowedScripts, c.nonOwnerAllowedTools);
           audit(c, { evt: "block", rule: "R-nonowner-exec", toolName, sessionKey, sender, reason: denyReason, blocked: c.enforce });
           if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: ${denyReason}` };
           return;

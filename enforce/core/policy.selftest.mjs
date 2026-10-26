@@ -118,6 +118,63 @@ rw("unrelated bare binary -> stays generic",
 // a form that actually works rather than at another dead end.
 tw("the wrapper invoked properly -> allow",
   call("exec", { command: "python3 wrappers/yt_dlp_tool.py info https://youtu.be/abc" }), STRANGER, "allow");
+
+// RETRY-LOOP DEFENCE (measured 2026-10-26). In one WhatsApp group lane 28 of 34
+// denied exec calls were `echo ok` liveness probes ~3s apart: the model read the
+// bare generic denial as a TRANSIENT outage and kept testing whether exec had
+// "come back". The wall is fixed policy, so the reason must SAY it is fixed and
+// name what IS available -- otherwise the gate blocks correctly and still burns
+// a retry loop one layer up. Diagnostic only: widens nothing (tw asserts block).
+const CFG_L = normalizeConfig({
+  ownerIds: ["111111"],
+  nonOwnerAllowedTools: ["read", "web_search", "web_fetch", "peer_recall"],
+  nonOwnerAllowedScripts: ["yt_dlp_tool", "run_binary"],
+});
+function rl(name, c, sender, reasonRe) {
+  const v = decide(c, sender, CFG_L);
+  const ok = v.action === "block" && reasonRe.test(v.reason);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+function tl(name, c, sender, expect) {
+  const v = decide(c, sender, CFG_L);
+  const ok = v.action === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+rl("liveness probe -> reason says FIXED wall, not an outage",
+  call("exec", { command: "echo ok" }), STRANGER, /FIXED policy wall/);
+rl("liveness probe -> reason tells caller NOT to retry",
+  call("exec", { command: "echo ok" }), STRANGER, /do NOT retry/);
+rl("liveness probe -> reason names the tools that ARE available",
+  call("exec", { command: "echo ok" }), STRANGER, /read, web_search, web_fetch, peer_recall/);
+// Wrong-door case: reading a file via exec when the `read` tool is allowed. The
+// capability EXISTS; only the door is wrong. Naming the working door beats a
+// denial the caller reads as "no access to that file".
+rl("file read via exec -> points at the allowed read tool",
+  call("exec", { command: "sed -n '1,40p' scripts/x.sh" }), STRANGER, /'read' tool IS allowed/);
+rl("cat via exec -> points at the allowed read tool",
+  call("exec", { command: "cat /etc/hosts" }), STRANGER, /read\(<path>\)/);
+// Still blocks: every hint is diagnostic and must never widen what runs.
+tl("liveness probe is still blocked", call("exec", { command: "echo ok" }), STRANGER, "block");
+tl("file read via exec is still blocked",
+  call("exec", { command: "cat /etc/hosts" }), STRANGER, "block");
+// The read-tool hint must NOT appear when `read` is not allowed in that lane --
+// pointing at a door that is also shut is worse than silence.
+const CFG_NR = normalizeConfig({ ownerIds: ["111111"], nonOwnerAllowedTools: ["web_search"], nonOwnerAllowedScripts: [] });
+{
+  const v = decide(call("exec", { command: "cat /etc/hosts" }), STRANGER, CFG_NR);
+  const ok = v.action === "block" && !/'read' tool IS allowed/.test(v.reason);
+  console.log(`${ok ? "PASS" : "FAIL"}  no read tool in lane -> no read hint  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+// Empty allowlist must render "none", never an empty dangling sentence.
+{
+  const v = decide(call("exec", { command: "echo ok" }), STRANGER, CFG_NR);
+  const ok = v.action === "block" && /Available here instead: web_search/.test(v.reason);
+  console.log(`${ok ? "PASS" : "FAIL"}  lane alternatives are rendered  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
 t("stranger write", call("write", { paths: ["/tmp/x"] }), STRANGER, "block");
 t("stranger edit", call("edit", { paths: ["/tmp/x"] }), STRANGER, "block");
 t("stranger read normal", call("read", { paths: ["/tmp/x"] }), STRANGER, "allow");
