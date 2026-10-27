@@ -1003,10 +1003,34 @@ function pruneInbound(now: number) {
   }
 }
 
+/**
+ * Keys an inbound message is latched under.
+ *
+ * WHY: OpenClaw group lanes append a suffix to the session key --
+ * ":thread:<account>" (WhatsApp groups) and ":topic:<id>" (Telegram forums).
+ * The key seen when the message ARRIVES and the key seen at the later tool call
+ * are not always the same string, so latching under the full key alone loses the
+ * sender and the owner's approval reads as if it never happened. Latch under the
+ * full key AND the base, so either shape finds it.
+ */
+function latchKeysForSession(sessionKey: string): string[] {
+  const sk = String(sessionKey || "");
+  if (!sk) return [];
+  const keys: string[] = [sk];
+  for (const sep of [":thread:", ":topic:"]) {
+    const i = sk.indexOf(sep);
+    if (i >= 0) {
+      const base = sk.slice(0, i);
+      if (base && !keys.includes(base)) keys.push(base);
+    }
+  }
+  return keys;
+}
+
 function recordInbound(sessionKey: string, m: InboundMsg) {
   if (!sessionKey) return;
   pruneInbound(m.tsMs);
-  lastInbound.set(sessionKey, m);
+  for (const key of latchKeysForSession(sessionKey)) lastInbound.set(key, m);
 }
 
 // Read WITHOUT consuming: the gate must be able to evaluate and still decline.
@@ -1351,6 +1375,19 @@ function laneAlternatives(allowedTools?: string[]): string {
 /** Plain file-READ shapes. Used only to redirect the caller to the `read` tool. */
 const FILE_READ_CMD = /^\s*(sudo\s+)?(cat|head|tail|sed|nl|more|less|strings|od|xxd)\b/;
 
+/**
+ * `process` actions that only READ state. Everything else in that tool
+ * (write/send-keys/submit/paste/kill/clear/remove) mutates a running session
+ * and is NOT result retrieval. Closed set on purpose: an unknown action falls
+ * through to the write side, never the read side (fail-closed).
+ *
+ * DUPLICATED from core/policy.ts by design -- this adapter is a standalone
+ * single file (it imports nothing from core/), which is what lets it be dropped
+ * into an OpenClaw install on its own. core/policy.ts is the source of truth;
+ * keep the two literals in sync.
+ */
+const PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log"]);
+
 export function execDenyReason(cmd: string, scripts: string[], allowedTools?: string[]): string {
   const generic = "non-owner exec restricted to allowlisted tools";
   // WHY THE EXTRA SENTENCES (measured 2026-10-26): the bare generic reads as a
@@ -1424,7 +1461,13 @@ export function resolveSenderId(event: any, ctx: any): string | null {
   // lockout), an unclaimed one only inside the short TTL, and nothing survives
   // the hard ceiling. Read-only except for the adoption stamp.
   try {
-    const m = lastInbound.get(sk);
+    // Try every latch shape (full key, then base) and take the first that
+    // actually carries a sender -- a hit with a null sender is not an identity.
+    let m: InboundMsg | undefined;
+    for (const lk of latchKeysForSession(sk)) {
+      const hit = lastInbound.get(lk);
+      if (hit && hit.senderId != null && String(hit.senderId).length > 0) { m = hit; break; }
+    }
     if (m && m.senderId != null && String(m.senderId).length > 0) {
       const age = Date.now() - m.tsMs;
       const runId = String(ctx?.runId ?? event?.runId ?? "") || null;
@@ -1797,6 +1840,38 @@ export default definePluginEntry({
         if (c.nonOwnerAllowedTools.includes(toolName)) {
           // Log-only: the decision is unchanged, we just stop it being invisible.
           if (c.auditAllowedNonOwnerTools) audit(c, { evt: "allow", rule: "R-nonowner-tool", toolName, sessionKey, sender });
+          return;
+        }
+        // 2b. EXEC RESULT RETRIEVAL -- the other half of an allowed exec.
+        //
+        // WHY (measured 2026-10-27): an exec that outruns the foreground yield
+        // window comes back as a BACKGROUND SESSION HANDLE ("Command still
+        // running ... use process to follow up"), and `process` is the ONLY door
+        // to that output. Allowing the exec while blocking that door means every
+        // allowlisted script slower than the yield window finishes and is then
+        // unreadable. The agent sees nothing, concludes its permission was
+        // revoked, and tells the user it hit a policy wall -- for work this
+        // policy had ALREADY allowed. The grant was real; only its second half
+        // was missing. A gate that allows an action but not the reading of its
+        // result has not allowed the action.
+        //
+        // Deliberately narrow: READ actions only, and only for a lane that can
+        // reach exec at all (no allowlisted scripts => no background output to
+        // collect => nothing to grant). Mutating actions stay blocked unless an
+        // install names `process` in nonOwnerAllowedTools -- that branch ran
+        // above, so reaching here means it did not.
+        if (toolName === "process" && c.nonOwnerAllowedScripts.length > 0) {
+          const act = String((event?.params ?? {}).action ?? "").trim().toLowerCase();
+          if (PROCESS_READ_ACTIONS.has(act)) {
+            if (c.auditAllowedNonOwnerTools) audit(c, { evt: "allow", rule: "R-nonowner-exec-result", toolName, sessionKey, sender, action: act });
+            return;
+          }
+          const why = `non-owner process action ${act || "(unset)"} is not result retrieval. `
+            + `This lane may READ its own background exec via process list|poll|log; `
+            + `write/send-keys/submit/paste/kill/clear/remove mutate a running session and stay blocked. `
+            + `Re-issue with a read action instead of asking for the allowlist to be widened.`;
+          audit(c, { evt: "block", rule: "R-nonowner-process-write", toolName, sessionKey, sender, action: act, reason: why, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: ${why}` };
           return;
         }
         // 3. exec -> only allowlisted read-only tools/ scripts

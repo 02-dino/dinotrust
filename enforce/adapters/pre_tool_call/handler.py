@@ -88,6 +88,25 @@ DEFAULT_TRUSTED_TOOLS = [
 
 # tool-name normalization: map runtime-native tool names to canonical roles.
 EXEC_TOOLS = {"exec", "Bash", "shell", "run_command"}
+
+# EXEC RESULT RETRIEVAL -- the other half of an allowed exec.
+#
+# WHY (measured 2026-10-27): an exec that outruns the foreground yield window is
+# handed back as a BACKGROUND SESSION HANDLE, and these tools are the only door
+# to its output. Allowing the exec while blocking that door means every
+# allowlisted script slower than the window completes and is then unreadable --
+# the agent sees nothing and reports a policy wall for work already allowed.
+# Not hypothetical in THIS adapter's harnesses either: Claude Code's
+# Bash(run_in_background) returns a shell id read back via BashOutput.
+#
+# Read-only by construction: BashOutput only reads. KillShell is NOT here --
+# it mutates, so it falls through to the default block.
+EXEC_RESULT_TOOLS = {"BashOutput"}
+
+# OpenClaw's `process` tool is one name carrying many actions, so it splits by
+# action instead. Closed set: an unknown action falls through to the write side,
+# never the read side (fail-closed). Mirrors core/policy.ts PROCESS_READ_ACTIONS.
+PROCESS_READ_ACTIONS = {"list", "poll", "log"}
 WRITE_TOOLS = {"write", "edit", "apply_patch", "Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 
@@ -525,7 +544,7 @@ def decide_trusted(tool, paths, command, entry, cfg):
         return ("allow", "trusted: %s tool allowed" % entry_id)
     return ("block", "trusted: %s tool %s not allowlisted" % (entry_id, tool))
 
-def decide(tool, paths, command, sender_id, cfg):
+def decide(tool, paths, command, sender_id, cfg, action=""):
     # NOTE (parity gap, deliberate -- 2026-10-22): the OpenClaw adapter splits a
     # null sender by LANE (null on a chat lane = lost metadata, never owner;
     # null elsewhere = the agent running itself). This adapter's stdin contract
@@ -561,6 +580,21 @@ def decide(tool, paths, command, sender_id, cfg):
         return ("block", "non-owner protected resource: " + protected)
     if tool in cfg["nonOwnerAllowedTools"]:
         return ("allow", "non-owner allowed tool")
+    # Result retrieval is scoped to lanes that can reach exec at all: no
+    # allowlisted scripts => no background output to collect => nothing to grant.
+    if cfg["nonOwnerAllowedScripts"]:
+        if tool in EXEC_RESULT_TOOLS:
+            return ("allow", "non-owner exec result retrieval (%s)" % tool)
+        if tool == "process":
+            act = str(action or "").strip().lower()
+            if act in PROCESS_READ_ACTIONS:
+                return ("allow", "non-owner exec result retrieval (process %s)" % act)
+            return ("block",
+                    "non-owner process action %s is not result retrieval. "
+                    "This lane may READ its own background exec via process list|poll|log; "
+                    "write/send-keys/submit/paste/kill/clear/remove mutate a running session "
+                    "and stay blocked. Re-issue with a read action instead of asking for the "
+                    "allowlist to be widened." % (act or "(unset)"))
     if tool in EXEC_TOOLS:
         if exec_runs_allowed_script(command, cfg["nonOwnerAllowedScripts"]):
             return ("allow", "non-owner allowlisted script")
@@ -605,9 +639,11 @@ def main():
 
     paths = target_paths(tool_input)
     command = get_command(tool_input)
+    # Sub-action for multi-action tools (OpenClaw `process`). Empty elsewhere.
+    tool_action = str(tool_input.get("action") or "")
 
     try:
-        action, reason = decide(tool, paths, command, sender, cfg)
+        action, reason = decide(tool, paths, command, sender, cfg, tool_action)
     except Exception as e:
         audit(cfg, dict(evt="error", error=str(e)))
         emit({})  # fail-open

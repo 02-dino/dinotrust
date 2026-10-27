@@ -106,6 +106,41 @@ tt("owner unaffected by trustedIds config", "write", "111111", "allow", paths=["
 # back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 CFG_BACKCOMPAT = dict(handler.DEFAULTS)
 CFG_BACKCOMPAT["ownerIds"] = ["111111"]
+# ── EXEC RESULT RETRIEVAL (parity with core/policy.ts) ───────────────────────
+# WHY: an allowed exec that outruns the foreground window returns a background
+# handle, and these are the only doors to its output. Allowing the exec but not
+# the read left every slow allowlisted script unreadable (measured 2026-10-27).
+def ta(name, tool, sender, expect, action_arg="", cfg=None):
+    global _pass, _fail
+    act, reason = handler.decide(tool, [], "", sender, cfg or CFG, action_arg)
+    ok = act == expect
+    print(("PASS" if ok else "FAIL") + "  %s  -> %s (%s)" % (name, act, reason))
+    if ok:
+        _pass += 1
+    else:
+        _fail += 1
+
+ta("exec-result: process poll -> allow", "process", STRANGER, "allow", "poll")
+ta("exec-result: process log -> allow", "process", STRANGER, "allow", "log")
+ta("exec-result: process list -> allow", "process", STRANGER, "allow", "list")
+ta("exec-result: action case-insensitive (POLL) -> allow", "process", STRANGER, "allow", "POLL")
+ta("exec-result: BashOutput (Claude Code) -> allow", "BashOutput", STRANGER, "allow")
+# Mutating actions are NOT result retrieval.
+ta("exec-result: process kill -> block", "process", STRANGER, "block", "kill")
+ta("exec-result: process send-keys -> block", "process", STRANGER, "block", "send-keys")
+ta("exec-result: KillShell stays blocked", "KillShell", STRANGER, "block")
+# FAIL-CLOSED: unknown / missing action lands on the write side.
+ta("exec-result: unknown action -> block (fail-closed)", "process", STRANGER, "block", "teleport")
+ta("exec-result: absent action -> block (fail-closed)", "process", STRANGER, "block")
+# Owner untouched by the split.
+ta("exec-result: OWNER process kill -> allow", "process", OWNER, "allow", "kill")
+# Tied to the exec grant: no allowlisted scripts => no background output => nothing.
+CFG_NOEXEC = dict(handler.DEFAULTS)
+CFG_NOEXEC["ownerIds"] = ["111111"]
+CFG_NOEXEC["nonOwnerAllowedScripts"] = []
+ta("exec-result: no allowlisted scripts -> process poll blocked", "process", STRANGER, "block", "poll", CFG_NOEXEC)
+ta("exec-result: no allowlisted scripts -> BashOutput blocked", "BashOutput", STRANGER, "block", "", CFG_NOEXEC)
+
 action, reason = handler.decide("read", [], "", "555555", CFG_BACKCOMPAT)
 ok = action == "allow" and reason == "non-owner allowed tool"
 print(("PASS" if ok else "FAIL") + "  back-compat: empty trustedIds unaffected  -> %s (%s)" % (action, reason))

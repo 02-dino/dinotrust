@@ -23,6 +23,8 @@ as an actual gate:
 | **Non-owner** | read / web / memory tools | **allow** |
 | **Non-owner** | exec of an allowlisted read-only script (e.g. `tools/exchange_data.py`) | **allow** |
 | **Non-owner** | any other exec / shell | **block** |
+| **Non-owner** | read own background exec result (`process list\|poll\|log`, `BashOutput`) — only when the lane has allowlisted scripts | **allow** |
+| **Non-owner** | mutate a running session (`process kill\|send-keys\|write\|…`, `KillShell`) | **block** |
 | **Non-owner** | write / edit / apply_patch | **block** |
 | **Non-owner** | touch a secret path (`.env`, keys, `credentials`, `secrets/**`) | **block** |
 

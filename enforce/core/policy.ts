@@ -235,7 +235,25 @@ export type ToolCall = {
   paths: string[];
   /** For exec: the raw command string. Empty otherwise. */
   command: string;
+  /**
+   * For multi-action tools (today: `process`): the sub-action name, lowercased
+   * by the adapter or here. Empty/absent when the tool has no sub-action.
+   *
+   * WHY this exists: without it a verdict can only be "all of `process`" or
+   * "none of it", and neither is right for a non-owner -- reading your own
+   * exec output is retrieval, killing a session is not.
+   */
+  action?: string;
 };
+
+/**
+ * `process` actions that only READ state. Everything else in that tool
+ * (write/send-keys/submit/paste/kill/clear/remove) mutates a running session
+ * and is NOT result retrieval. Keep this list closed: an unknown action must
+ * fall through to the write side, never the read side (fail-closed).
+ * Mirrored in adapters/openclaw/handler.ts -- this file is the source of truth.
+ */
+export const PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log"]);
 
 export type Verdict =
   | { action: "allow"; reason: string }
@@ -1024,6 +1042,35 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
   // ── NON-OWNER: strict + allowlist ──
   if (protectedHit) return { action: "block", reason: `non-owner protected resource: ${protectedHit}` };
   if (c.nonOwnerAllowedTools.includes(call.toolName)) return { action: "allow", reason: "non-owner allowed tool" };
+  // EXEC RESULT RETRIEVAL -- the other half of an allowed exec.
+  //
+  // WHY (measured 2026-10-27, OpenClaw lane): an exec that outruns the
+  // foreground yield window is handed back as a BACKGROUND SESSION HANDLE
+  // ("Command still running ... use process to follow up"), and `process` is
+  // the only door to that output. Allowing the exec while blocking that door
+  // means every allowlisted script slower than the yield window completes and
+  // is then unreadable. The agent sees nothing, concludes the permission was
+  // revoked, and tells the user it hit a policy wall -- for work this policy
+  // had ALREADY allowed. The grant was real; only the second half was missing.
+  //
+  // Scope is deliberately narrow: READ actions only, and only when this lane
+  // can reach exec at all (a lane with no allowlisted scripts has no output to
+  // collect, so it gets nothing). Mutating actions stay blocked unless an
+  // install names `process` in nonOwnerAllowedTools explicitly -- that branch
+  // ran above, so reaching here means it did not.
+  if (call.toolName === "process" && c.nonOwnerAllowedScripts.length > 0) {
+    const act = (call.action ?? "").trim().toLowerCase();
+    if (PROCESS_READ_ACTIONS.has(act)) {
+      return { action: "allow", reason: `non-owner exec result retrieval (process ${act})` };
+    }
+    return {
+      action: "block",
+      reason: `non-owner process action ${act || "(unset)"} is not result retrieval. `
+        + `This lane may READ its own background exec via process list|poll|log; `
+        + `write/send-keys/submit/paste/kill/clear/remove mutate a running session and stay blocked. `
+        + `Re-issue with a read action instead of asking for the allowlist to be widened.`,
+    };
+  }
   if (call.toolName === "exec") {
     return execRunsAllowedScript(call, c.nonOwnerAllowedScripts)
       ? { action: "allow", reason: "non-owner allowlisted script" }

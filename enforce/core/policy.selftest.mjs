@@ -9,7 +9,7 @@ const CFG = normalizeConfig({
 });
 
 let pass = 0, fail = 0;
-function call(toolName, { command = "", paths = [] } = {}) { return { toolName, command, paths }; }
+function call(toolName, { command = "", paths = [], action } = {}) { return { toolName, command, paths, action }; }
 function t(name, c, sender, expect) {
   const v = decide(c, sender, CFG);
   const ok = v.action === expect;
@@ -312,6 +312,37 @@ t("BYPASS GUARD: rm -rf with --dry-run -> approve (rm has no such flag)", call("
 t("BYPASS GUARD: dry-run script chained with real rm -> approve", call("exec", { command: "bash uninstall.sh --dry-run && rm -rf /root/data" }), OWNER, "approve");
 t("BYPASS GUARD: apt remove --dry-run -> approve (pkg mgr not covered)", call("exec", { command: "apt remove rea-agents --dry-run" }), OWNER, "approve");
 t("BYPASS GUARD: dry-run script + force-push -> approve", call("exec", { command: "bash uninstall.sh --dry-run; git push origin main --force" }), OWNER, "approve");
+
+// ── EXEC RESULT RETRIEVAL (process read-vs-write split) ──────────────────────
+// WHY these exist: an allowed exec that outruns the foreground yield window is
+// handed back as a background session handle, and `process` is the only door to
+// that output. Allowing the exec but not the read made every slow allowlisted
+// script silently unreadable (measured 2026-10-27). These lock BOTH halves: the
+// read half opens, the write half stays shut.
+t("exec-result: non-owner process poll -> allow", call("process", { action: "poll" }), STRANGER, "allow");
+t("exec-result: non-owner process log -> allow", call("process", { action: "log" }), STRANGER, "allow");
+t("exec-result: non-owner process list -> allow", call("process", { action: "list" }), STRANGER, "allow");
+t("exec-result: action is case-insensitive (POLL) -> allow", call("process", { action: "POLL" }), STRANGER, "allow");
+// Mutating actions are NOT result retrieval -- they stay blocked.
+t("exec-result: non-owner process kill -> block", call("process", { action: "kill" }), STRANGER, "block");
+t("exec-result: non-owner process send-keys -> block", call("process", { action: "send-keys" }), STRANGER, "block");
+t("exec-result: non-owner process write -> block", call("process", { action: "write" }), STRANGER, "block");
+// FAIL-CLOSED: an unknown or missing action must land on the write side.
+t("exec-result: unknown action -> block (fail-closed)", call("process", { action: "teleport" }), STRANGER, "block");
+t("exec-result: absent action -> block (fail-closed)", call("process"), STRANGER, "block");
+r("exec-result: deny names the read actions, not the allowlist", call("process", { action: "kill" }), STRANGER, /process list\|poll\|log/);
+// Owner is untouched by the split.
+t("exec-result: OWNER process kill -> allow", call("process", { action: "kill" }), OWNER, "allow");
+// A lane that cannot reach exec at all has no background output to collect,
+// so it gets nothing -- the grant is tied to the exec grant, not standalone.
+const CFG_NOEXEC = normalizeConfig({ ownerIds: ["111111"], nonOwnerAllowedScripts: [] });
+function tn(name, c, sender, expect) {
+  const v = decide(c, sender, CFG_NOEXEC);
+  const ok = v.action === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+tn("exec-result: no allowlisted scripts -> process poll blocked", call("process", { action: "poll" }), STRANGER, "block");
 
 // back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 const v = decide(call("read"), "555555", CFG);
