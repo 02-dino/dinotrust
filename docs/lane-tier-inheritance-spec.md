@@ -125,16 +125,49 @@ The obvious repair is unavailable. **Q2 is now answered:** the hook's only retur
 provenance stamp**. No stamp -> no fire-time tier resolution -> the only lever left is allow-or-block
 at creation.
 
-That makes the remaining decision binary, and it is an OWNER decision, not an implementation detail:
+### 3c. DECIDED: allow freely, audit on allow (owner ruling 2026-10-28)
 
-| option | effect | cost |
-|---|---|---|
-| **A (recommended)** | trusted may not create/update `agentTurn` cron jobs | loses "schedule an LLM task"; `systemEvent` reminders + CLI `--command` (already scope-gated) remain |
-| B | allow, document the residual | a trusted id can schedule an owner-tier LLM turn -- the exact escalation this spec exists to close |
+The decision looked binary (block vs allow). It is not, and the framing was wrong:
 
-`systemEvent` is the quieter third case: it injects text into a main session, i.e. prompt-injection into
-an owner-tier lane rather than direct execution. Lower severity, same family. Gate it only if A proves
-insufficient; do not bundle it without a reason.
+> **A control that stops trusted staff from scheduling work is a failed design, not a safe one.**
+> The trusted tier exists for *hired people doing their job*. Blocking `agentTurn` cron would cost
+> 16 staff the ability to schedule any LLM task, permanently, to defend against a scenario that
+> requires one of them to be adversarial.
+
+The third path costs **zero** productivity and recovers most of the safety:
+
+**ALLOW `agentTurn` cron creation from trusted ids, and AUDIT it on allow.**
+
+- no friction: trusted staff schedule whatever they need, exactly as today
+- full visibility: every trusted-authored owner-tier job is one grep away in the audit log
+- precedent exists: `auditAllowedNonOwnerTools` already audits ALLOWED calls for precisely this reason
+  ("an allowed tool returns before any audit() call, so a tool that is itself a security boundary
+  leaves ZERO trace")
+- nothing new is opened: those 16 ids can already do this today; the change is that it stops being
+  invisible
+
+What the residual actually is, stated plainly: a trusted id can schedule an LLM turn that later runs at
+owner tier. Detection, not prevention. That is the correct trade for an **insider-trust** tier, where
+the realistic threat is a mistake or a compromised account rather than a hostile employee -- and both of
+those are caught by a log, while neither is prevented by friction that pushes people to work around it.
+
+`systemEvent` and `command` need no separate treatment under this ruling.
+
+### 3d. Why provenance stamping is dead for good
+
+One more measurement closes the door the other way. The job `owner` field is **caller-supplied**:
+
+```
+const ownerSessionKey = normalizeOptionalString(input.owner?.sessionKey);
+...ownerAgentId || ownerSessionKey ? { owner: { ...ownerSessionKey ? { sessionKey: ownerSessionKey } : {} } }
+```
+
+It is read from `input.owner`, never stamped by the runtime from the calling session. So it is
+attacker-controlled and cannot serve as provenance even if the hook could write it (it cannot -- Q2).
+
+Combined with §2 (a group-lane sessionKey carries no sender id anyway), provenance-based tier
+inheritance is **not buildable on this runtime**. Audit-on-allow is not a compromise chosen over a
+better mechanism; it is the best mechanism that exists here.
 
 ### 4. Exposure on this box
 
@@ -172,14 +205,18 @@ for enforcement, and must not be allowed to block shipping the gate.
 Revised after §3/§3b. The gate lives on the **`cron` tool branch** of `decideTrusted`, which today
 allows the whole tool without reading params:
 
-- MUST cover `add` **and** `update` (otherwise: create a benign job, then mutate its payload)
-- `payload.kind=agentTurn` -> **block for trusted** (option A). This is the actual escalation.
-- `payload.kind=systemEvent` -> allow for now; lower severity, revisit only if A proves insufficient
-- `payload.kind=command` -> **not reachable from this tool**; the CLI route already traverses the exec
-  ladder. Do NOT write a second gate for it -- a duplicate control drifts out of sync with the one that
-  actually runs.
-- read-only actions (`list`, `get`, `runs`, `status`) -> allow; mirror the `PROCESS_READ_ACTIONS` set
-  already in `policy.ts` rather than inventing a second shape (DRY: reuse before reinvent)
+Revised again after the §3c ruling. There is **no blocking gate**. The work is audit instrumentation:
+
+- `cron` + mutating action (`add`/`update`/`remove`/`run`) by a trusted id -> **allow**, and emit one
+  audit line naming the id, the action, and `payload.kind`
+- `cron` + read action (`list`/`get`/`runs`/`status`) -> allow silently; mirror the
+  `PROCESS_READ_ACTIONS` set already in `policy.ts` rather than inventing a second shape
+  (DRY: reuse before reinvent)
+- `payload.kind=command` -> unreachable from this tool; the CLI route already traverses the exec ladder.
+  Do NOT write a second control for it -- a duplicate drifts out of sync with the one actually enforcing.
+- owner and non-owner paths are untouched
+
+This is strictly additive: no call that succeeds today starts failing.
 
 IMPLEMENTATION NOTE: `ToolCall` already carries an optional `action` field (added for `process`), so the
 sub-action is available without a schema change -- but the **adapter must populate it for `cron` too**,
