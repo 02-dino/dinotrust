@@ -34,7 +34,9 @@ import {
   lookupLaneTier,
   matchesProtected,
   pipedInterpreterSink,
+  laneTierOverride,
   recordLaneTier,
+  resolveLaneIdentity,
   resolveSenderId,
   spawnLaneIds,
   tierOf,
@@ -698,6 +700,75 @@ const C3 = { ...DEFAULTS, logFile: pathx.join(L3, "dinotrust-enforce.log"), pend
     lookupLaneTier(C3, laneTierKey("agent:bob:subagent:ownerchild"))?.tier === "owner");
 }
 try { fsx.rmSync(L3, { recursive: true, force: true }); } catch { /* temp cleanup */ }
+
+// ── 5d: ENFORCE — replay the recorded tier on the FIRE lane ─────────────────
+// THE DANGEROUS ONE: this sits directly on the owner-resolution path. Today
+// sender==null off a channel lane => agentSelf => OWNER. 5d inserts a ledger
+// lookup in front of that. Every invariant below is a way this could go wrong,
+// written BEFORE the implementation.
+const L4 = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "dinotrust-5d-"));
+const C4 = {
+  ...DEFAULTS,
+  logFile: pathx.join(L4, "dinotrust-enforce.log"),
+  pendingLedgerMaxLines: 500,
+  ownerIds: ["111111"],
+  trustedIds: [{ id: "555555", scopePathGlobs: ["workspace-bob/**"] }],
+};
+// Config with the SAME ledger but NO trusted tier configured at all.
+const C4_NOTRUST = { ...C4, trustedIds: [] };
+recordLaneTier(C4, "job-trusted", "trusted", "555555");
+recordLaneTier(C4, "job-owner", "owner", "111111");
+recordLaneTier(C4, "job-nonowner", "nonowner", "999999");
+recordLaneTier(C4, "job-exstaff", "trusted", "777777");   // recorded, later removed from config
+recordLaneTier(C4, "agent:bob:subagent:kid", "trusted", "555555");
+
+function id4(name, sessionKey, sender, expectOwner, expectTrustedId, cfg = C4) {
+  const r = resolveLaneIdentity(sender, sessionKey, cfg);
+  const gotTrusted = r.trusted?.id ?? null;
+  const ok = r.isOwner === expectOwner && gotTrusted === expectTrustedId;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> owner=${r.isOwner} trusted=${JSON.stringify(gotTrusted)}`);
+  ok ? pass++ : fail++;
+}
+
+// GRANDFATHER — the ship blocker. 72 pre-existing jobs have no ledger entry and
+// MUST keep running exactly as today.
+id4("5d: cron lane with NO ledger entry -> owner (grandfather, 72 jobs safe)",
+  "agent:bob:cron:job-unknown", null, true, null);
+id4("5d: owner-created job stays owner (no demotion)",
+  "agent:bob:cron:job-owner", null, true, null);
+// The actual fix: a trusted creator's job runs at THEIR tier, not owner's.
+id4("5d: trusted-created job runs as that trusted entry",
+  "agent:bob:cron:job-trusted", null, false, "555555");
+id4("5d: trusted-spawned subagent runs as that trusted entry",
+  "agent:bob:subagent:kid", null, false, "555555");
+id4("5d: non-owner-created job runs as non-owner",
+  "agent:bob:cron:job-nonowner", null, false, null);
+// REVOCATION: someone recorded as trusted who has since been removed from the
+// config must NOT keep the grant, and must NOT fall upward to owner either.
+id4("5d: recorded-trusted id removed from config -> strictest, never owner",
+  "agent:bob:cron:job-exstaff", null, false, null);
+// BACK-COMPAT SHIP BLOCKER: an install that grants no trust at all behaves
+// exactly as it did before this field existed, ledger file or not.
+id4("5d: empty trustedIds -> ledger cannot demote anyone (pre-patch behaviour)",
+  "agent:bob:cron:job-trusted", null, true, null, C4_NOTRUST);
+// A REAL sender is authoritative; a stale file must never override a live human.
+id4("5d: real owner sender on a cron lane wins over the ledger",
+  "agent:bob:cron:job-trusted", "111111", true, null);
+id4("5d: real trusted sender resolves from config, not from the ledger",
+  "agent:bob:telegram:group:-100:topic:1", "555555", false, "555555");
+// Channel lanes are never looked up at all (laneTierKey already returns null).
+lt("5d: channel lane yields no override (real sender is authoritative)",
+  laneTierOverride("agent:bob:telegram:group:-100:topic:1", C4) === null);
+lt("5d: explicit lane yields no override (inert, 0 tool calls measured)",
+  laneTierOverride("agent:bob:explicit:model-run-1", C4) === null);
+// Lost metadata on a channel lane must stay strictest — unchanged by 5d.
+id4("5d: null sender on a CHANNEL lane is still not owner",
+  "agent:bob:telegram:group:-100:topic:1", null, false, null);
+// Degradation: an unreadable ledger must fall back to today's behaviour rather
+// than locking anyone out of their own automation.
+lt("5d: missing ledger file -> no override -> owner",
+  laneTierOverride("agent:bob:cron:job-trusted", { ...C4, logFile: pathx.join(L4, "nope", "x.log") }) === null);
+try { fsx.rmSync(L4, { recursive: true, force: true }); } catch { /* temp cleanup */ }
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────

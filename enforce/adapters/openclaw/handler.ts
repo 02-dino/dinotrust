@@ -470,6 +470,62 @@ export function cronJobIdOf(event: any): string | null {
   return null;
 }
 
+/** Ledger verdict for a lane that fires with NO sender, or null for "no opinion".
+ *
+ * Returns null (and the caller keeps today's behaviour) when:
+ *   - the lane is a channel/explicit/main lane -> laneTierKey() gives no key.
+ *     A channel lane carries a REAL sender; a file must never outrank a human.
+ *   - nothing was recorded for that key -> GRANDFATHER. Every job created before
+ *     this ledger existed (72 on the reference box) keeps running as owner.
+ *   - the install grants no trust at all (trustedIds empty) -> an install that
+ *     never opted into the trusted tier cannot be demoted by a ledger. This is
+ *     the back-compat ship blocker, enforced here so BOTH callers inherit it.
+ *   - the ledger is unreadable -> degrade to today's behaviour, never lock
+ *     someone out of their own automation. */
+export function laneTierOverride(sessionKey: string, c: Cfg): { tier: LaneTier; id: string | null } | null {
+  if (!c.trustedIds || c.trustedIds.length === 0) return null;
+  const key = laneTierKey(sessionKey);
+  if (!key) return null;
+  return lookupLaneTier(c, key);
+}
+
+/** Owner/trusted resolution for one call, INCLUDING the ledger replay (5d).
+ *
+ * This is the hinge of the whole project, so the ordering is deliberate:
+ *   1. A real sender always wins. Identity observed this turn beats anything
+ *      persisted earlier -- a stale file must never override a live human.
+ *   2. Only when there is NO sender AND the lane is non-channel (the
+ *      agentSelf case that today means "owner, unattended") do we consult the
+ *      ledger, because that is exactly the gap: a cron job fires on
+ *      agent:<a>:cron:<jobId> and a subagent on agent:<a>:subagent:<uuid>,
+ *      neither carries a sender, and both are handed full owner tier.
+ *   3. No ledger opinion -> unchanged behaviour (owner).
+ *
+ * REVOCATION: a lane recorded as `trusted` whose id is no longer in the config
+ * resolves to NEITHER owner NOR trusted -- it falls to the strictest tier. The
+ * grant is gone, and it must not fail upward into owner just because the
+ * recorded tier was once privileged. */
+export function resolveLaneIdentity(
+  sender: string | null,
+  sessionKey: string,
+  c: Cfg,
+): { isOwner: boolean; trusted: TrustedEntry | null } {
+  if (sender != null) {
+    if (pickAgentOwners(sessionKey, c).includes(sender)) return { isOwner: true, trusted: null };
+    return { isOwner: false, trusted: c.trustedIds.length > 0 ? findTrusted(sender, c, sessionKey) : null };
+  }
+  // Null sender on a CHANNEL lane = lost platform metadata -> strictest tier,
+  // never owner. Unchanged by 5d.
+  if (isChannelLane(sessionKey)) return { isOwner: false, trusted: null };
+
+  const hit = laneTierOverride(sessionKey, c);
+  if (!hit || hit.tier === "owner") return { isOwner: true, trusted: null };   // incl. grandfather
+  if (hit.tier === "trusted" && hit.id) {
+    return { isOwner: false, trusted: findTrusted(hit.id, c, sessionKey) };    // null here = revoked
+  }
+  return { isOwner: false, trusted: null };
+}
+
 /** The two lanes a subagent_spawned event ties together, or nulls.
  *
  * MEASURED SHAPE (2026-10-28) -- this is why 5c is NOT a copy of 5b:
@@ -1855,14 +1911,17 @@ export default definePluginEntry({
         // Multi-agent owner scoping: resolve the effective owner list for this
         // sessionKey via the agentOwners map (falls back to flat ownerIds when
         // the map is absent/empty or nothing matches -> single-agent back-compat).
-        const owners = pickAgentOwners(sessionKey, c);
         // null sender is owner ONLY when it is the agent itself (non-channel
         // lane). On a channel lane a missing id = lost metadata -> falls through
         // to the strictest tier, never owner. See isChannelLane doc above.
         const agentSelf = sender == null && !isChannelLane(sessionKey);
-        const isOwner = agentSelf || (sender != null && owners.includes(sender));
+        // 5d: resolveLaneIdentity() owns owner/trusted resolution now, INCLUDING
+        // the ledger replay. A real sender still wins outright; the ledger is
+        // consulted only for the sender-less non-channel lanes (cron/subagent)
+        // that would otherwise be handed owner tier outright. No ledger entry ->
+        // owner, so every pre-existing job keeps running unchanged.
+        const { isOwner, trusted } = resolveLaneIdentity(sender, sessionKey, c);
         const protectedHit = anyProtected(event, c.protectedGlobs);
-        const trusted = (!isOwner && sender != null && c.trustedIds.length > 0) ? findTrusted(sender, c, sessionKey) : null;
 
         // ===== OWNER / agent-operated-by-owner: ALL ACCESS =====
         // Only friction is approval on genuinely critical/irreversible or
