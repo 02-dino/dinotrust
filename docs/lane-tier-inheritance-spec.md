@@ -142,16 +142,44 @@ Candidate mechanisms, with honest costs:
 exists that C can stand on. Shipping A without solving the restart case would create a security control
 that silently stops existing — worse than the honest denial of B.
 
-## The `explicit` lane: newly discovered, unresolved
+## The `explicit` lane: measured, OUT OF SCOPE (reason recorded)
 
-`explicit:model-run-<uuid>` is **264 of 307 keys** on analyst — the largest non-channel lane, and it
-inherits owner by the same predicate. It was not part of the original problem statement.
+`explicit:model-run-<uuid>` is the largest non-channel lane everywhere it appears (analyst 264/307;
+cs 390, event 324, marketing 216, modul 135). It inherits owner by the same predicate, so it was
+flagged as a potential "we lock the small door while the big one stands open" failure.
 
-**UNKNOWN (must be measured before any code):** what creates these, and whether a trusted id can cause
-one. If they are only ever owner/CLI-initiated, risk is low and they stay out of scope with that reason
-recorded. If a trusted id can trigger one, the cron fix is cosmetic while the bigger door stands open.
+**Measured 2026-10-28 — it is not an enforcement surface at all.**
 
-Do not design for this lane until that is measured.
+Read every reachable session file for this lane across 5 gateways:
+
+```
+explicit lanes total (5 gw) : 1329
+session files read          : 794   (535 missing — archived/pruned)
+event types                 : session 794, model_change 794,
+                              thinking_level_change 794, message 1589, custom 1
+TOOL CALLS                  : 0   (zero, in all 794)
+```
+
+**Zero tool calls in 794 sessions.** dinotrust enforces at the tool-call boundary, so a lane that never
+issues one never reaches the hook. Its owner-tier status is inert: there is nothing to gate.
+
+Corroborating evidence for what creates them (consistent, though not proven from source):
+
+- `scripts/fix-kaka689-model-resolution-mitigations.sh` names the cause directly: a non-empty
+  `WARM_MAIN_AGENTS` *"caused `agent:kaka689:explicit:model-run-*` warm"* — a background model-catalog
+  warm, not a user action
+- model distribution is 255/264 `ag/gemini-3.8-flash-medium` across only 3 distinct models — a cheap
+  probe model, not an agent doing work
+- creation arrives in bursts (four separate bursts of exactly 14 sessions inside 60s) — machine-
+  scheduled, not human-paced
+- the lane content is `session` + `model_change` + `thinking_level_change` + 2 messages, then ends
+
+NOT fully proven: `grep -r "model-run"` across the installed openclaw package returns **0 hits**, so the
+key is assembled from parts at runtime and the constructing code was not located. The out-of-scope call
+rests on the **zero-tool-call measurement**, which is sufficient on its own — even if a trusted id could
+somehow induce one, an inert lane grants nothing.
+
+**Decision: out of scope.** Revisit only if a `model-run` session is ever observed issuing a tool call.
 
 ## Back-compat contract (the ship blocker)
 
@@ -203,8 +231,12 @@ v1.27.0's own notes record this drift trap. Any change here lands in **all three
 
 ## Open questions (blocking implementation)
 
-1. What creates `explicit:model-run-*`, and can a trusted id cause one? (largest lane, unresolved)
+1. ~~What creates `explicit:model-run-*`~~ — **RESOLVED 2026-10-28**: inert lane, 0 tool calls in 794
+   sessions, out of scope. See the section above.
 2. Can the enforce hook **modify** tool-call params, or only allow/block? Decides whether an audit-only
    provenance stamp is even writable from here. The gate itself does not depend on the answer.
 3. Of the 7 jobs on editor/modul/marketing, were any created by a trusted id? (~10 min audit; affects
    nothing in the design, only what we tell the owner about existing state)
+
+Neither remaining question blocks implementation: Q2 concerns an audit-only nicety, Q3 concerns reporting
+on existing state. **Step 5 (implement the cron creation gate) is unblocked.**
