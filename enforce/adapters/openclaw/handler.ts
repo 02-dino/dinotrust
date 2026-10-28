@@ -515,6 +515,41 @@ export function matchesProtected(p: string, globs: string[]): string | null {
   return null;
 }
 
+/** Scratch dirs a workspace-scoped entry may always touch. WHY: a PIC writing a
+ * temp file (`--out /tmp/x.json`) was blocked over a path that grants nothing.
+ * protectedGlobs still runs FIRST, so /tmp/.env stays denied. */
+const SCRATCH_GLOBS = ["/tmp/**", "/var/tmp/**"];
+
+/** Is this exec path token inside the entry's scope?
+ *
+ * WHY this is not a plain matchesProtected: the token filter keeps any argument
+ * containing "/", and a RELATIVE token ("tools/mine.py", "./venv/bin/python")
+ * can NEVER match an absolute-rooted glob. Measured 2026-10-28: a PIC could run
+ * `python3 /abs/workspace-x/tools/mine.py` but not `python3 tools/mine.py` --
+ * the same file, and the relative form is the one the workspace docs tell them
+ * to use ("no cd needed, exec cwd IS the workspace").
+ *
+ * REGRESSION GUARD (caught by selftest 2026-10-28, do not reintroduce): an
+ * earlier draft re-rooted against the scope globs themselves when no cwd was
+ * known. That made EVERY relative token in-scope -- "workspace-alice/x.py"
+ * became "workspace-bob/workspace-alice/x.py" and matched "workspace-bob/**".
+ * Without a known cwd a relative token is genuinely unresolvable -> stays blocked. */
+export function tokenInScope(tok: string, globs: string[], cwd?: string): boolean {
+  if (matchesProtected(tok, globs)) return true;
+  if (matchesProtected(tok, SCRATCH_GLOBS)) return true;
+  if (tok.startsWith("/") || !cwd) return false;
+  return matchesProtected(normalizePathLexical(`${cwd}/${tok}`), globs) !== null;
+}
+
+/** The exec tool's schema field is `workdir`, NOT `cwd`
+ * (execSchema = Type.Object({ command, workdir?, ... }), measured 2026-10-28).
+ * Reading only params.cwd here would silently yield undefined forever. */
+export function execCwdOf(event: any): string | undefined {
+  const p = event?.params ?? {};
+  const v = String(p.workdir ?? p.cwd ?? "").trim();
+  return v || undefined;
+}
+
 export function targetPaths(event: any): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -1808,7 +1843,8 @@ export default definePluginEntry({
               const toks = cmd
                 .split(/[\s;|&><'"()]+/)
                 .filter((t) => t && !t.startsWith("-") && t.includes("/"));
-              const outOfScope = toks.filter((t) => matchesProtected(t, trusted.scopePathGlobs!) === null);
+              const execCwd = execCwdOf(event);
+              const outOfScope = toks.filter((t) => !tokenInScope(t, trusted.scopePathGlobs!, execCwd));
               if (outOfScope.length === 0) {
                 audit(c, { evt: "allow", rule: "R-trusted-exec-scoped", toolName, sessionKey, sender, id: trusted.id });
                 return;
