@@ -28,6 +28,24 @@ export type PolicyConfig = {
    * behavior is identical to the single-agent flat `ownerIds` model.
    */
   agentOwners?: Record<string, string[]>;
+  /**
+   * Agent-key -> that agent's workspace dir, e.g.
+   * { "agent:editor": "/root/.openclaw/workspace-editor" }. Same substring
+   * matching as agentOwners.
+   *
+   * WHY (measured 2026-10-28): exec's schema field is `workdir` and its own
+   * description says "omit to use the default cwd" -- so the COMMON call omits
+   * it, and the hook then has no cwd to resolve a relative token against. The
+   * runtime's before_tool_call context carries toolName/agentId/sessionKey/
+   * sessionId/runId/trace/toolCallId/channelId and NO workspaceDir, so the
+   * default cwd is simply not observable from the event. Declaring it here is
+   * the only deterministic source; guessing it is what caused the re-rooting
+   * regression guarded against in tokenInScope.
+   *
+   * Empty default = unchanged behaviour (a relative token with no known cwd
+   * stays blocked).
+   */
+  agentWorkspaces?: Record<string, string>;
   /** When true (default) owner is never hard-blocked, only warn-logged — except critical* below. */
   ownerWarnOnly: boolean;
   /** Regex strings: critical/irreversible exec commands -> requireApproval even for owner. */
@@ -168,6 +186,7 @@ export const DEFAULT_TRUSTED_TOOLS: string[] = [
 export const DEFAULT_POLICY: PolicyConfig = {
   ownerIds: [],
   agentOwners: {},
+  agentWorkspaces: {},
   ownerWarnOnly: true,
   criticalExecPatterns: [
     // Word-guard on rm: without one this matched the TAIL of any word ending in
@@ -284,6 +303,7 @@ export function normalizeConfig(raw: Partial<PolicyConfig> | undefined | null): 
   ];
   for (const k of arrKeys) if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULT_POLICY as any)[k];
   if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
+  if (c.agentWorkspaces == null || typeof c.agentWorkspaces !== "object" || Array.isArray(c.agentWorkspaces)) c.agentWorkspaces = {};
   if (typeof c.auditAllowedNonOwnerTools !== "boolean") c.auditAllowedNonOwnerTools = DEFAULT_POLICY.auditAllowedNonOwnerTools;
   return c;
 }
@@ -959,7 +979,25 @@ function findTrusted(senderId: string, c: PolicyConfig, sessionKey: string): Tru
  * Decision for a matched trusted/delegated entry. Below owner, above
  * non-owner. See TrustedEntry doc comment for the ceiling rules.
  */
-function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Verdict {
+/** The declared workspace dir for this session's agent, or undefined.
+ * Mirrors pickAgentOwners' substring match so one convention covers both. */
+export function pickAgentWorkspace(sessionKey: string, c: PolicyConfig): string | undefined {
+  const map = c.agentWorkspaces;
+  if (!map || typeof map !== "object") return undefined;
+  for (const key of Object.keys(map)) {
+    if (key && sessionKey.includes(key) && typeof map[key] === "string" && map[key].trim()) return map[key].trim();
+  }
+  return undefined;
+}
+
+/** Working dir to resolve relative exec tokens against: what the caller asked
+ * for, else the agent's declared workspace. Undefined when neither is known --
+ * and undefined must stay BLOCKING, never permissive. */
+function execCwdFor(call: ToolCall, c: PolicyConfig, sessionKey: string): string | undefined {
+  return call.cwd?.trim() || pickAgentWorkspace(sessionKey, c);
+}
+
+function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig, sessionKey = ""): Verdict {
   // protectedGlobs ALWAYS wins, even inside this entry's own scopePathGlobs.
   // No self-service escalation over secrets/system files/other workspaces.
   const protectedHit = anyProtected(call, c.protectedGlobs);
@@ -1016,7 +1054,8 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
       const toks = (call.command ?? "")
         .split(/[\s;|&><'"()]+/)
         .filter((t) => t && !t.startsWith("-") && t.includes("/"));
-      const outOfScope = toks.filter((t) => !tokenInScope(t, entry.scopePathGlobs!, call.cwd));
+      const execCwd = execCwdFor(call, c, sessionKey);
+      const outOfScope = toks.filter((t) => !tokenInScope(t, entry.scopePathGlobs!, execCwd));
       return outOfScope.length === 0
         ? { action: "allow", reason: `trusted: ${entry.id} exec within scope` }
         : { action: "block", reason: `trusted: ${entry.id} exec path outside scope (${outOfScope.join(", ")})` };
@@ -1084,7 +1123,7 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
   // ── TRUSTED / delegated (above non-owner, below owner) ──
   if (senderId != null && c.trustedIds.length > 0) {
     const entry = findTrusted(senderId, c, sessionKey);
-    if (entry) return decideTrusted(call, entry, c);
+    if (entry) return decideTrusted(call, entry, c, sessionKey);
   }
 
   // ── NON-OWNER: strict + allowlist ──

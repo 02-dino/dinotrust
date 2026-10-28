@@ -57,6 +57,23 @@ type Cfg = {
   // that agent's owner id list. Present = resolver scopes owners per agent;
   // absent/empty = identical to flat ownerIds (single-agent back-compat).
   agentOwners?: Record<string, string[]>;
+  /**
+   * Agent-key -> that agent's workspace dir, e.g.
+   * { "agent:editor": "/root/.openclaw/workspace-editor" }. Same substring
+   * matching as agentOwners.
+   *
+   * WHY (measured 2026-10-28): exec's schema field is `workdir` and its own
+   * description says "omit to use the default cwd" -- so the COMMON call omits
+   * it, and the hook then has no cwd to resolve a relative token against. The
+   * runtime's before_tool_call context (buildToolContext) carries toolName/
+   * agentId/sessionKey/sessionId/runId/trace/toolCallId/channelId and NO
+   * workspaceDir, so the default cwd is simply not observable from the event.
+   * Declaring it here is the only deterministic source; guessing it is what
+   * caused the re-rooting regression guarded against in tokenInScope.
+   *
+   * Empty default = unchanged behaviour.
+   */
+  agentWorkspaces?: Record<string, string>;
   ownerWarnOnly: boolean;
   criticalExecPatterns: string[];
   // Privilege-escalation / brick-risk paths: owner write here -> approval.
@@ -131,6 +148,7 @@ export const DEFAULTS: Cfg = {
   agentFilter: "",
   ownerIds: [],
   agentOwners: {},
+  agentWorkspaces: {},
   ownerWarnOnly: true,
   // Owner is warn-only EXCEPT these critical/irreversible actions -> requireApproval
   // ("are you sure?") even for the owner. Regex strings, tested against exec command.
@@ -212,6 +230,7 @@ function cfg(raw: any): Cfg {
     if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
   }
   if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
+  if (c.agentWorkspaces == null || typeof c.agentWorkspaces !== "object" || Array.isArray(c.agentWorkspaces)) c.agentWorkspaces = {};
   if (c.ownerSelfApproval !== "warn" && c.ownerSelfApproval !== "gate") c.ownerSelfApproval = DEFAULTS.ownerSelfApproval;
   if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
   if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
@@ -548,6 +567,17 @@ export function execCwdOf(event: any): string | undefined {
   const p = event?.params ?? {};
   const v = String(p.workdir ?? p.cwd ?? "").trim();
   return v || undefined;
+}
+
+/** The declared workspace dir for this session's agent, or undefined.
+ * Mirrors pickAgentOwners' substring match so one convention covers both. */
+export function pickAgentWorkspace(sessionKey: string, c: Cfg): string | undefined {
+  const map = c.agentWorkspaces;
+  if (!map || typeof map !== "object" || Array.isArray(map)) return undefined;
+  for (const key of Object.keys(map)) {
+    if (key && sessionKey.includes(key) && typeof map[key] === "string" && map[key].trim()) return map[key].trim();
+  }
+  return undefined;
 }
 
 export function targetPaths(event: any): string[] {
@@ -1843,7 +1873,7 @@ export default definePluginEntry({
               const toks = cmd
                 .split(/[\s;|&><'"()]+/)
                 .filter((t) => t && !t.startsWith("-") && t.includes("/"));
-              const execCwd = execCwdOf(event);
+              const execCwd = execCwdOf(event) ?? pickAgentWorkspace(sessionKey, c);
               const outOfScope = toks.filter((t) => !tokenInScope(t, trusted.scopePathGlobs!, execCwd));
               if (outOfScope.length === 0) {
                 audit(c, { evt: "allow", rule: "R-trusted-exec-scoped", toolName, sessionKey, sender, id: trusted.id });

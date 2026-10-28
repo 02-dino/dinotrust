@@ -326,6 +326,36 @@ tt("SCRATCH: /tmp output arg allowed",
 tt("SCRATCH: protectedGlobs still wins inside /tmp",
   call("exec", { command: "cat /tmp/.env" }), "555555", "block");
 
+// ── agentWorkspaces: the COMMON call omits workdir entirely (exec's own schema
+// says "omit to use the default cwd", and fleet docs tell people to omit it).
+// The runtime's before_tool_call ctx carries NO workspaceDir, so the declared
+// map is the only deterministic source for that default.
+const CFG_WS = normalizeConfig({
+  ownerIds: ["111111"],
+  agentWorkspaces: { "agent:bob": "workspace-bob" },
+  trustedIds: [{ id: "555555", scopePathGlobs: ["workspace-bob/**"] }],
+});
+function tws(name, c, sender, expect, sessionKey = "agent:bob:telegram:group:-100:topic:1") {
+  const v = decide(c, sender, CFG_WS, sessionKey);
+  const ok = v.action === expect;
+  if (ok) { pass++; console.log(`PASS  ${name}  -> ${v.action} (${v.reason})`); }
+  else { fail++; console.log(`FAIL  ${name}  -> ${v.action} (${v.reason})`); }
+}
+tws("WS: no workdir -> declared agent workspace resolves the relative token",
+  call("exec", { command: "python3 tools/mine.py" }), "555555", "allow");
+tws("WS: no workdir -> venv prefix resolves too",
+  call("exec", { command: "./venv/bin/python tools/mine.py" }), "555555", "allow");
+tws("WS: declared workspace does NOT rescue a cross-workspace relative token",
+  call("exec", { command: "python3 ../workspace-alice/x.py" }), "555555", "block");
+tws("WS: explicit workdir still wins over the declared default",
+  call("exec", { command: "python3 tools/mine.py", cwd: "workspace-bob" }), "555555", "allow");
+tws("WS: wrong agent lane -> map does not apply, relative token blocked",
+  call("exec", { command: "python3 tools/mine.py" }), "555555", "block", "agent:zed:telegram:group:-100:topic:1");
+// BACK-COMPAT: an install that never declares agentWorkspaces must behave exactly
+// as before this field existed.
+tt("WS: empty agentWorkspaces -> relative token still blocked (pre-patch behaviour)",
+  call("exec", { command: "python3 tools/mine.py" }), "555555", "block");
+
 // ── D3: teardown SCRIPT in --dry-run -> not critical (narrow carve-out) ──
 // The carve-out must NOT become a magic word: `rm` has no --dry-run flag, so a
 // blanket skip would let `rm -rf /x --dry-run` delete /x while reading as safe.
