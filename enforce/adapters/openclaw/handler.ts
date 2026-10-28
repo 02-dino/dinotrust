@@ -113,6 +113,11 @@ type Cfg = {
   // Cap the append-only pending-approvals ledger so resolvePendingIfRefire's
   // full-file O(n) read never becomes a per-critical-action stall.
   pendingLedgerMaxLines: number;
+  /** Cap for the lane-tier ledger. SEPARATE from pendingLedgerMaxLines on
+   * purpose: approval rows resolve in minutes, tier rows must outlive the job
+   * they describe. Sharing one number made a busy week silently evict a cron
+   * job's tier (measured 2026-10-28) and hand it back to owner. */
+  tierLedgerMaxLines: number;
   // LLM-MEDIATED CRITICAL APPROVAL (v2 design). When true, a critical-tier hit on
   // an owner/self turn is returned to the LLM as a BLOCK with a specific reason
   // (naming the resolved target) instead of the old fail-open approval card. The
@@ -221,6 +226,7 @@ export const DEFAULTS: Cfg = {
   ownerSelfApproval: "warn",   // noob-safe: agent's own UNATTENDED criticals warn-log, don't hang the turn
   approvalTimeoutMs: 90_000,    // 90s cap (runtime default is 30min) so a headless gate can't freeze the agent
   pendingLedgerMaxLines: 500,   // prune ledger to last 500 lines -> re-fire lookups stay O(small)
+  tierLedgerMaxLines: 5000,     // DISTINCT lanes, not traffic (dedupe first); ~72 jobs on the reference box
   llmMediatedCritical: true,    // v2: critical hits BLOCK w/ specific reason + fail-CLOSED, not fail-open card
 };
 
@@ -234,6 +240,7 @@ function cfg(raw: any): Cfg {
   if (c.ownerSelfApproval !== "warn" && c.ownerSelfApproval !== "gate") c.ownerSelfApproval = DEFAULTS.ownerSelfApproval;
   if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
   if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
+  if (typeof c.tierLedgerMaxLines !== "number" || !(c.tierLedgerMaxLines > 0)) c.tierLedgerMaxLines = DEFAULTS.tierLedgerMaxLines;
   if (typeof c.llmMediatedCritical !== "boolean") c.llmMediatedCritical = DEFAULTS.llmMediatedCritical;
   if (typeof c.auditAllowedNonOwnerTools !== "boolean") c.auditAllowedNonOwnerTools = DEFAULTS.auditAllowedNonOwnerTools;
   return c;
@@ -567,8 +574,67 @@ export function recordLaneTier(c: Cfg, key: string, tier: LaneTier, id: string |
   try {
     const p = tierLedgerPath(c);
     fs.appendFileSync(p, JSON.stringify({ key, tier, id, tsMs: Date.now() }) + "\n");
-    prunePendingLedger(c, p);   // reuse the existing line-cap helper, don't write a second
+    compactTierLedger(c, p);
   } catch { /* best-effort by contract */ }
+}
+
+/** Keep the NEWEST record per key, then cap. Never a blind line-cap.
+ *
+ * WHY NOT prunePendingLedger (measured 2026-10-28, with a cap of 10):
+ *   record job-longlived = trusted
+ *   ...20 ordinary subagent spawns later...
+ *   lookupLaneTier("job-longlived") -> null
+ * The entry was EVICTED by unrelated activity, so 5d then grandfathers that job
+ * straight back to OWNER. A security control that silently expires because the
+ * team was busy is worse than one that was never installed -- nothing fails,
+ * nothing logs, the grant just quietly returns.
+ *
+ * The pending-approvals ledger can line-cap safely because its rows are
+ * short-lived by nature (an approval resolves within minutes). Tier rows are
+ * the opposite: they must outlive every other row for as long as the job
+ * exists. Same file shape, opposite retention requirement -- which is exactly
+ * why reusing that pruner was wrong.
+ *
+ * Dedupe alone is NOT enough, and the first fix stopped there -- re-running the
+ * repro still evicted the job, because 21 DISTINCT keys against a cap of 10 is
+ * still an eviction. The missing half is that the two key kinds have opposite
+ * lifetimes:
+ *   cron jobId        -- must outlive everything; the job can fire for months
+ *   subagent childKey -- ephemeral; once that run ends the key is never queried
+ *                        again, and spawns are the high-volume source
+ * So eviction is ORDERED: expired subagent rows go first, and a cron row is
+ * only dropped when nothing else is left. Cron rows are naturally bounded by
+ * the number of jobs that exist (72 on the reference box), so in practice a
+ * cron entry is never evicted at all.
+ *
+ * If even the cron rows overflow, the oldest go first and those fall back to
+ * owner -- the same grandfather path, just reached later. */
+function compactTierLedger(c: Cfg, p: string) {
+  try {
+    const max = c.tierLedgerMaxLines;
+    if (!(max > 0) || !fs.existsSync(p)) return;
+    const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean);
+    if (lines.length <= max) return;
+    // Newest-wins per key; Map preserves first-insert order, so walking the
+    // file forwards keeps the ORIGINAL order of keys while the VALUE ends up
+    // being the latest record for each.
+    const newest = new Map<string, string>();
+    for (const line of lines) {
+      try {
+        const o = JSON.parse(line);
+        if (o && typeof o.key === "string" && o.key) newest.set(o.key, line);
+      } catch { /* drop unparseable rows during compaction */ }
+    }
+    let kept = [...newest.entries()];
+    if (kept.length > max) {
+      // Oldest-first within each class, ephemeral class sacrificed first.
+      const durable = kept.filter(([k]) => !k.includes(":subagent:"));
+      const ephemeral = kept.filter(([k]) => k.includes(":subagent:"));
+      const room = Math.max(0, max - durable.length);
+      kept = [...durable.slice(Math.max(0, durable.length - max)), ...ephemeral.slice(ephemeral.length - room)];
+    }
+    fs.writeFileSync(p, kept.map(([, line]) => line).join("\n") + "\n");
+  } catch { /* silent by contract */ }
 }
 
 /** Most recent recorded tier for a lane key, or null when unknown.

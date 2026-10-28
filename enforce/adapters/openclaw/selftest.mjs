@@ -770,6 +770,44 @@ lt("5d: missing ledger file -> no override -> owner",
   laneTierOverride("agent:bob:cron:job-trusted", { ...C4, logFile: pathx.join(L4, "nope", "x.log") }) === null);
 try { fsx.rmSync(L4, { recursive: true, force: true }); } catch { /* temp cleanup */ }
 
+// ── 5e: RETENTION — a tier row must outlive ordinary traffic ────────────────
+// MEASURED BUG (2026-10-28): 5a reused prunePendingLedger(), a blind line-cap.
+// With cap 10: record one trusted cron job, then 20 ordinary subagent spawns ->
+// the job's row was EVICTED -> lookup returns null -> 5d grandfathers it ->
+// the job silently runs as OWNER again. A control that expires because the team
+// was busy is worse than one never installed: nothing fails, nothing logs, the
+// grant just quietly comes back.
+//
+// Root cause: the two key kinds have OPPOSITE lifetimes. A cron row must live
+// as long as the job (months); a subagent row is dead once that run ends, and
+// spawns are the high-volume source. Dedupe alone did NOT fix it -- 21 distinct
+// keys against a cap of 10 is still an eviction -- so eviction is ORDERED:
+// ephemeral subagent rows are sacrificed first.
+const L5 = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "dinotrust-5e-"));
+const C5 = { ...DEFAULTS, logFile: pathx.join(L5, "dinotrust-enforce.log"), tierLedgerMaxLines: 10 };
+recordLaneTier(C5, "job-longlived", "trusted", "555555");
+for (let i = 0; i < 20; i++) recordLaneTier(C5, `agent:bob:subagent:spawn-${i}`, "trusted", "555555");
+lt("5e: a cron row SURVIVES 20 subagent spawns at cap 10 (the measured bug)",
+  lookupLaneTier(C5, "job-longlived")?.tier === "trusted");
+lt("5e: the newest ephemeral rows are the ones kept",
+  lookupLaneTier(C5, "agent:bob:subagent:spawn-19")?.tier === "trusted");
+lt("5e: the file is actually capped, not growing unbounded",
+  fsx.readFileSync(pathx.join(L5, "dinotrust-enforce-tier-ledger.jsonl"), "utf8").split("\n").filter(Boolean).length <= 10);
+// Dedupe: a job edited many times must cost ONE row, so the cap is reached by
+// DISTINCT lanes rather than by traffic.
+for (let i = 0; i < 30; i++) recordLaneTier(C5, "job-edited", "trusted", "555555");
+lt("5e: re-recording one key collapses to a single row (cap counts lanes, not traffic)",
+  lookupLaneTier(C5, "job-edited")?.tier === "trusted"
+  && fsx.readFileSync(pathx.join(L5, "dinotrust-enforce-tier-ledger.jsonl"), "utf8").split("\n").filter(Boolean).length <= 10);
+// A later re-record by a DIFFERENT tier must still win after compaction.
+recordLaneTier(C5, "job-edited", "owner", "111111");
+lt("5e: newest-wins survives compaction",
+  lookupLaneTier(C5, "job-edited")?.tier === "owner");
+// The two caps are independent: sharing one number is what caused the bug.
+lt("5e: tierLedgerMaxLines defaults separately from pendingLedgerMaxLines",
+  DEFAULTS.tierLedgerMaxLines !== DEFAULTS.pendingLedgerMaxLines && DEFAULTS.tierLedgerMaxLines > 0);
+try { fsx.rmSync(L5, { recursive: true, force: true }); } catch { /* temp cleanup */ }
+
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
 h("humanize rm -rf", "exec ~ /rm\\s+-rf/", "permanently delete");
