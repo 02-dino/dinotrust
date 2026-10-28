@@ -153,7 +153,87 @@ those are caught by a log, while neither is prevented by friction that pushes pe
 
 `systemEvent` and `command` need no separate treatment under this ruling.
 
-### 3d. Why provenance stamping is dead for good
+### 3e. LINCHPIN CONFIRMED (2026-10-28) -- ledger-based tier inheritance IS buildable
+
+Two earlier conclusions in this spec were WRONG and are corrected here.
+
+**Correction 1 -- the hook CAN rewrite params.** Q2 was answered "no" from dinotrust's own 13
+`return { block }` sites. That read our code, not the runtime contract. Measured in
+`agent-tools.before-tool-call-*.js`:
+
+```
+adjustedParams = normalized?.params ?? decision.params
+recordAdjustedParamsForToolCall(...)
+executeParams = reconcileCodeModeExecBeforeHookParams({ adjustedParams: outcome.params })
+```
+
+**Correction 2 -- parent->child linkage EXISTS.** `grep parentSessionKey` in our `index.ts` returned 0
+hits, but that searched the plugin, not the runtime's event surface. The runtime publishes 30+ hooks,
+including:
+
+```
+subagent_spawned -> { runId, childSessionKey, agentId, requester{channel,accountId,to,threadId}, mode }
+after_tool_call  -> { toolName, params, result, error, durationMs, toolCallId }
+```
+
+**Linchpin proven.** The gateway `cron.add` handler responds with the created job:
+
+```
+respond(true, "job" in result ? { created: result.created, ..., job: cronJobReadView(job) } ...)
+```
+
+So `after_tool_call` on a successful `cron add` carries the new jobId back to the hook.
+
+**Mechanism (ledger, not stamp):**
+
+| step | cron | subagent |
+|---|---|---|
+| capture | `before_tool_call(cron add)` on a channel lane -> sender id readable -> tier resolved | `before_tool_call(sessions_spawn)` -> tier resolved |
+| bind | `after_tool_call` result -> jobId | `subagent_spawned` -> childSessionKey |
+| persist | append `{jobId -> tier}` to a dinotrust-owned ledger on disk | `{childSessionKey -> tier}` |
+| enforce | fire lane is `agent:<a>:cron:<jobId>` (§1) -> lookup -> apply tier | child lane -> lookup -> apply tier |
+
+This supersedes §3c (audit-on-allow) and §3d: it is **prevention at zero creation-time friction**. Trusted
+staff create cron/subagents exactly as freely as today; only the RESULT is bounded to what that person
+could already do by hand.
+
+It also answers "gate the prompt deterministically" (owner idea #2): you do not judge prompt text at all.
+The child runs at the creator's tier, so every tool call it makes traverses the existing ladder. No
+AGENTS.md SOP needed -- that would be advisory, this is enforced.
+
+The earlier objection to an in-memory map (dies on restart -> silent fail-open) does not apply: dinotrust
+already persists state to disk (`appendFileSync`/`readFileSync`, ~10 sites). And because the ledger is
+OURS, written by the hook, the forgeable caller-supplied `job.owner` of §3d is irrelevant.
+
+Grandfathering is unchanged: no ledger entry -> owner tier -> all 72 existing jobs run exactly as today.
+
+### 3f. MEASURED FRICTION: relative paths break self-written tools
+
+The owner asked whether a trusted id can exec a tool they wrote themselves that is in no allowlist.
+**Yes -- but only with absolute paths.** Replaying the scoped-exec token check against scope
+`**/workspace-editor/**`:
+
+```
+ALLOW   python3 /root/.openclaw/workspace-editor/tools/mine.py
+ALLOW   bash /root/.openclaw/workspace-editor/scripts/deploy.sh
+ALLOW   node /root/.openclaw/workspace-editor/x.js
+BLOCK   python3 tools/mine.py                      out=tools/mine.py
+BLOCK   bash scripts/deploy.sh                     out=scripts/deploy.sh
+BLOCK   ./venv/bin/python tools/mine.py            out=./venv/bin/python, tools/mine.py
+BLOCK   cd <ws> && python3 tools/mine.py           out=<ws>, tools/mine.py  (also trips SHELL_META on &&)
+BLOCK   python3 <abs>/mine.py --out /tmp/x.json    out=/tmp/x.json
+```
+
+The token filter is `t.includes("/")`, so a RELATIVE path is a path-ish token that cannot match an
+absolute-rooted glob. Three everyday forms die: relative invocation, the venv interpreter prefix, and
+writing output to `/tmp`. Workspace-local conventions documented elsewhere in this fleet ("no `cd`
+needed, exec cwd IS the workspace") produce exactly the blocked form.
+
+This is real productivity friction and is independent of everything else in this spec. Candidate fixes:
+resolve relative tokens against the session cwd before matching; allow a scratch glob (`/tmp/**`) for
+outputs; treat a known interpreter prefix as non-path. Not yet designed -- recorded so it is not lost.
+
+### 3g. Why CALLER-SUPPLIED provenance is dead (superseded by §3e)
 
 One more measurement closes the door the other way. The job `owner` field is **caller-supplied**:
 
