@@ -244,6 +244,21 @@ export type ToolCall = {
    * exec output is retrieval, killing a session is not.
    */
   action?: string;
+  /**
+   * For exec: the explicit working directory the caller asked for, when it gave
+   * one. Used to root RELATIVE path tokens before scope matching (see
+   * tokenInScope).
+   *
+   * ADAPTER CONTRACT (measured 2026-10-28): the exec tool's schema field is
+   * `workdir`, NOT `cwd` -- `execSchema = Type.Object({ command, workdir?, ... })`.
+   * An adapter reading `params.cwd` for exec silently gets undefined forever.
+   * Read `params.workdir ?? params.cwd` and assign it here.
+   *
+   * ABSENT is the COMMON case: the schema says "omit to use the default cwd",
+   * and fleet docs tell people exactly that. Absent must therefore stay safe,
+   * not permissive -- see the regression guard in tokenInScope.
+   */
+  cwd?: string;
 };
 
 /**
@@ -334,6 +349,39 @@ export function matchesGlob(p: string, globs: string[]): string | null {
     if (re.test(norm) || re.test(base) || gBaseRe.test(norm) || gBaseRe.test(base)) return g;
   }
   return null;
+}
+
+/** Scratch dirs a workspace-scoped entry may always touch. WHY: a PIC writing a
+ * temp file (`--out /tmp/x.json`) was blocked over a path that grants nothing.
+ * protectedGlobs still runs FIRST, so /tmp/.env stays denied. */
+const SCRATCH_GLOBS = ["/tmp/**", "/var/tmp/**"];
+
+/** Is this exec path token inside the entry's scope?
+ *
+ * WHY this is not a plain matchesGlob: the token filter keeps any argument
+ * containing "/", and a RELATIVE token ("tools/mine.py", "./venv/bin/python")
+ * can NEVER match an absolute-rooted glob. Measured 2026-10-28: a PIC could run
+ * `python3 /abs/workspace-x/tools/mine.py` but not `python3 tools/mine.py` --
+ * the same file, and the relative form is the one the workspace docs tell them
+ * to use ("no cd needed, exec cwd IS the workspace"). Three everyday forms died
+ * that way: relative invocation, the ./venv/bin/python prefix, and /tmp output.
+ *
+ * So: resolve a relative token against the caller's KNOWN cwd, and only that.
+ * `..` is normalised FIRST, so "../workspace-other/x" still resolves outside and
+ * still blocks. An ABSOLUTE token that misses the scope is genuinely outside and
+ * is never re-rooted.
+ *
+ * REGRESSION GUARD (caught by selftest 2026-10-28, do not reintroduce): an
+ * earlier draft also re-rooted against the scope globs themselves when no cwd
+ * was known. That made EVERY relative token in-scope -- "workspace-alice/x.py"
+ * became "workspace-bob/workspace-alice/x.py", which matches "workspace-bob/**".
+ * A cross-workspace path silently turned into an allow. Without a known cwd a
+ * relative token is genuinely unresolvable, so it must stay blocked. */
+function tokenInScope(tok: string, globs: string[], cwd?: string): boolean {
+  if (matchesGlob(tok, globs)) return true;
+  if (matchesGlob(tok, SCRATCH_GLOBS)) return true;
+  if (tok.startsWith("/") || !cwd) return false;
+  return matchesGlob(normalizePathLexical(`${cwd}/${tok}`), globs) !== null;
 }
 
 function anyProtected(call: ToolCall, globs: string[]): string | null {
@@ -968,7 +1016,7 @@ function decideTrusted(call: ToolCall, entry: TrustedEntry, c: PolicyConfig): Ve
       const toks = (call.command ?? "")
         .split(/[\s;|&><'"()]+/)
         .filter((t) => t && !t.startsWith("-") && t.includes("/"));
-      const outOfScope = toks.filter((t) => matchesGlob(t, entry.scopePathGlobs!) === null);
+      const outOfScope = toks.filter((t) => !tokenInScope(t, entry.scopePathGlobs!, call.cwd));
       return outOfScope.length === 0
         ? { action: "allow", reason: `trusted: ${entry.id} exec within scope` }
         : { action: "block", reason: `trusted: ${entry.id} exec path outside scope (${outOfScope.join(", ")})` };

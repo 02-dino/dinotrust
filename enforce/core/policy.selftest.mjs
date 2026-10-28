@@ -9,7 +9,7 @@ const CFG = normalizeConfig({
 });
 
 let pass = 0, fail = 0;
-function call(toolName, { command = "", paths = [], action } = {}) { return { toolName, command, paths, action }; }
+function call(toolName, { command = "", paths = [], action, cwd } = {}) { return { toolName, command, paths, action, cwd }; }
 function t(name, c, sender, expect) {
   const v = decide(c, sender, CFG);
   const ok = v.action === expect;
@@ -301,6 +301,30 @@ tt("SCOPED-EXEC: own-scope script runs", call("exec", { command: "python3 worksp
 tt("SCOPED-EXEC: out-of-scope script blocked", call("exec", { command: "python3 workspace-alice/tools/x.py" }), "555555", "block");
 tt("SCOPED-EXEC: tokenless command allowed", call("exec", { command: "git status" }), "555555", "allow");
 tt("SCOPED-EXEC: no-scope entry still allowlist-only", call("exec", { command: "python3 tools/whatever.py" }), "777777", "block");
+
+// ── RELATIVE-PATH FRICTION (measured 2026-10-28): the token filter keeps any arg
+// containing "/", and a relative token can never match an absolute-rooted glob.
+// A PIC could run their tool by absolute path but not the relative form the
+// workspace docs tell them to use. Resolve relative tokens against the caller's
+// KNOWN cwd -- and ONLY a known cwd (see the regression guard below).
+tt("REL: relative token + cwd in scope -> allow",
+  call("exec", { command: "python3 tools/mine.py", cwd: "workspace-bob" }), "555555", "allow");
+tt("REL: venv interpreter prefix + cwd -> allow",
+  call("exec", { command: "./venv/bin/python tools/mine.py", cwd: "workspace-bob" }), "555555", "allow");
+tt("REL: ../ escape is normalised BEFORE matching -> block",
+  call("exec", { command: "python3 ../workspace-alice/x.py", cwd: "workspace-bob" }), "555555", "block");
+tt("REL: absolute out-of-scope token is never re-rooted by cwd",
+  call("exec", { command: "python3 /etc/evil.py", cwd: "workspace-bob" }), "555555", "block");
+// REGRESSION GUARD: an earlier draft re-rooted against the scope globs when no
+// cwd was known, which made EVERY relative token in-scope -- "workspace-alice/x.py"
+// became "workspace-bob/workspace-alice/x.py" and matched. Caught by selftest.
+tt("REL: no cwd -> relative token stays blocked (not re-rooted into scope)",
+  call("exec", { command: "python3 workspace-alice/tools/x.py" }), "555555", "block");
+// SCRATCH: writing a temp file was blocked over a path that grants nothing.
+tt("SCRATCH: /tmp output arg allowed",
+  call("exec", { command: "python3 workspace-bob/tools/mine.py --out /tmp/x.json" }), "555555", "allow");
+tt("SCRATCH: protectedGlobs still wins inside /tmp",
+  call("exec", { command: "cat /tmp/.env" }), "555555", "block");
 
 // ── D3: teardown SCRIPT in --dry-run -> not critical (narrow carve-out) ──
 // The carve-out must NOT become a magic word: `rm` has no --dry-run flag, so a
