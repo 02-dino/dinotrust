@@ -431,6 +431,57 @@ export function laneTierKey(sessionKey: string): string | null {
   return null;
 }
 
+/** cron actions that create or change what a job will DO. `remove` is excluded
+ * on purpose: a deleted job never fires, so there is no lane left to inherit a
+ * tier, and recording one would only grow the ledger. */
+const CRON_TIER_ACTIONS: ReadonlySet<string> = new Set(["add", "update"]);
+
+/** The jobId a cron tool call pertains to, or null.
+ *
+ * add    -> the id does not exist until the gateway creates it, so it can only
+ *           be read from the RESULT. Measured: the gateway responds
+ *           respond(true, { created, job: cronJobReadView(job) }) and the tool
+ *           wraps that with jsonResult(p) = { content:[{type:"text",text}], details: p },
+ *           so the id lands at result.details.job.id. `details` is not touched
+ *           by sanitizeToolResult (verified), it rides the {...record} spread.
+ * update -> the caller already named the job, so params carry it.
+ *
+ * The text-content fallback exists because jsonResult ships the SAME payload
+ * twice (structured + JSON string). If a future sanitiser ever drops `details`,
+ * the string still carries the id, and this capture degrades to "no entry" =
+ * grandfather-to-owner rather than to a wrong tier. */
+export function cronJobIdOf(event: any): string | null {
+  const p = event?.params ?? {};
+  const fromParams = String(p.jobId ?? p.id ?? "").trim();
+  if (fromParams) return fromParams;
+  const r = event?.result;
+  const direct = r?.details?.job?.id ?? r?.details?.id;
+  if (direct) return String(direct).trim() || null;
+  try {
+    const text = Array.isArray(r?.content)
+      ? r.content.find((x: any) => x?.type === "text")?.text
+      : null;
+    if (typeof text === "string" && text.trim().startsWith("{")) {
+      const o = JSON.parse(text);
+      const id = o?.job?.id ?? o?.id;
+      if (id) return String(id).trim() || null;
+    }
+  } catch { /* unparseable -> no id -> grandfather, never a guessed tier */ }
+  return null;
+}
+
+/** Which tier a sender occupies on this lane. Mirrors decide()'s own ladder so
+ * the tier we RECORD is the tier that would have been ENFORCED on that caller.
+ *
+ * null sender follows the same split decide() uses: on a channel lane it means
+ * platform metadata was lost -> strictest tier, never owner; off a channel lane
+ * it is the agent operating itself unattended -> owner. */
+export function tierOf(senderId: string | null, c: Cfg, sessionKey: string): LaneTier {
+  if (senderId == null) return isChannelLane(sessionKey) ? "nonowner" : "owner";
+  if (pickAgentOwners(sessionKey, c).includes(senderId)) return "owner";
+  return findTrusted(senderId, c, sessionKey) ? "trusted" : "nonowner";
+}
+
 /** Record a creator's tier. Best-effort: a write failure must never block the
  * tool call that triggered it (same contract as audit()). */
 export function recordLaneTier(c: Cfg, key: string, tier: LaneTier, id: string | null) {
@@ -1711,6 +1762,38 @@ export default definePluginEntry({
           runId: null, // unclaimed; the first turn to peek adopts it
         });
       } catch { /* never break message intake */ }
+    });
+
+    // CAPTURE (5b): record the CREATOR's tier for a cron job, keyed by jobId.
+    //
+    // WHY HERE AND NOT IN before_tool_call: on `add` the job does not exist yet,
+    // so its id can only be read from the RESULT. after_tool_call is the only
+    // hook that carries one.
+    //
+    // WHY THE TIER IS TRUSTWORTHY AT THIS POINT: the cron tool CALL happens on a
+    // channel lane, where the sender id is real and resolvable. The job later
+    // FIRES on agent:<a>:cron:<jobId>, which is not a channel lane -- sender is
+    // null there and the agentSelf fallback would hand it full owner tier. This
+    // line is what lets 5d replay the creator's real tier instead.
+    //
+    // Fire-and-forget by contract (runVoidHook), so nothing here can block or
+    // fail the tool call that triggered it.
+    api.on("after_tool_call", async (event: any, ctx: any) => {
+      try {
+        if (String(event?.toolName ?? ctx?.toolName ?? "") !== "cron") return;
+        const sessionKey = String(ctx?.sessionKey ?? event?.sessionKey ?? "");
+        if (c.agentFilter && !sessionKey.includes(c.agentFilter)) return;
+        // A failed call created nothing -> no lane will ever exist for it.
+        if (event?.error) return;
+        const action = String((event?.params ?? {}).action ?? "").trim().toLowerCase();
+        if (!CRON_TIER_ACTIONS.has(action)) return;
+        const jobId = cronJobIdOf(event);
+        if (!jobId) return;   // no id -> no entry -> 5d grandfathers it to owner
+        const sender = resolveSenderId(event, ctx);
+        const tier = tierOf(sender, c, sessionKey);
+        recordLaneTier(c, jobId, tier, sender);
+        audit(c, { evt: "lane-tier", rule: "R-ledger-cron", toolName: "cron", sessionKey, sender, action, jobId, tier });
+      } catch { /* never break the tool result path */ }
     });
 
     api.on("before_tool_call", async (event: any, ctx: any) => {

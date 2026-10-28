@@ -28,6 +28,7 @@ import {
   humanizeReason,
   interpreterDeleteHit,
   isAffirmative,
+  cronJobIdOf,
   isPathWriteEscalation,
   laneTierKey,
   lookupLaneTier,
@@ -35,6 +36,7 @@ import {
   pipedInterpreterSink,
   recordLaneTier,
   resolveSenderId,
+  tierOf,
   rmRfScratchOnly,
   stripQuoted,
   targetPaths,
@@ -571,6 +573,68 @@ lt("ledger: malformed line is skipped, good records still resolve",
 lt("ledger: sibling path is derived from logFile, not hardcoded",
   fsx.existsSync(pathx.join(LDIR, "dinotrust-enforce-tier-ledger.jsonl")));
 try { fsx.rmSync(LDIR, { recursive: true, force: true }); } catch { /* temp cleanup */ }
+
+// ── 5b: CAPTURE — read the created jobId out of the cron tool RESULT ────────
+// On `add` the id does not exist until the gateway makes it, so after_tool_call
+// is the only hook that can see it. Measured chain: gateway responds
+// respond(true, { created, job: cronJobReadView(job) }) and the tool wraps it
+// with jsonResult(p) = { content:[{type:"text",text}], details: p }.
+function cj(name, event, expect) {
+  const got = cronJobIdOf(event);
+  const ok = got === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${JSON.stringify(got)}`);
+  ok ? pass++ : fail++;
+}
+cj("cronJobIdOf: add -> id read from result.details.job.id",
+  { params: { action: "add" }, result: { details: { created: true, job: { id: "job-abc" } } } }, "job-abc");
+cj("cronJobIdOf: update -> id already in params",
+  { params: { action: "update", jobId: "job-xyz" } }, "job-xyz");
+cj("cronJobIdOf: legacy `id` param accepted",
+  { params: { action: "update", id: "job-legacy" } }, "job-legacy");
+// jsonResult ships the SAME payload twice; if a future sanitiser ever drops
+// `details`, the JSON text still carries the id.
+cj("cronJobIdOf: falls back to the JSON text content",
+  { params: { action: "add" }, result: { content: [{ type: "text", text: '{"created":true,"job":{"id":"job-text"}}' }] } }, "job-text");
+// No id -> NO ledger entry -> 5d grandfathers that lane to owner. Never guess.
+cj("cronJobIdOf: no id anywhere -> null (grandfather, not a guess)",
+  { params: { action: "add" }, result: { details: { created: true } } }, null);
+cj("cronJobIdOf: unparseable text -> null, does not throw",
+  { params: { action: "add" }, result: { content: [{ type: "text", text: "{not json" }] } }, null);
+
+// tierOf must mirror decide()'s own ladder: the tier we RECORD has to be the
+// tier that would have been ENFORCED on that caller.
+const TCFG = { ...DEFAULTS, ownerIds: ["111111"], agentOwners: {}, trustedIds: [{ id: "555555", scopePathGlobs: ["workspace-bob/**"] }] };
+function tr(name, sender, sessionKey, expect) {
+  const got = tierOf(sender, TCFG, sessionKey);
+  const ok = got === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${got}`);
+  ok ? pass++ : fail++;
+}
+tr("tierOf: owner id -> owner", "111111", "agent:bob:telegram:direct:111111", "owner");
+tr("tierOf: trusted id -> trusted", "555555", "agent:bob:telegram:group:-100:topic:1", "trusted");
+tr("tierOf: unknown id -> nonowner", "999999", "agent:bob:telegram:direct:999999", "nonowner");
+// Same null-sender split decide() uses: lost metadata on a channel lane is NOT
+// owner; off a channel lane it is the agent running itself unattended.
+tr("tierOf: null sender on a CHANNEL lane -> nonowner (lost metadata, never owner)",
+  null, "agent:bob:telegram:group:-100:topic:1", "nonowner");
+tr("tierOf: null sender off-channel -> owner (agent operating itself)",
+  null, "agent:bob:cron:job-1", "owner");
+
+// End-to-end shape: what 5b writes is what 5d will read back.
+const L2 = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "dinotrust-5b-"));
+const C2 = { ...DEFAULTS, logFile: pathx.join(L2, "dinotrust-enforce.log"), pendingLedgerMaxLines: 500 };
+{
+  const ev = { toolName: "cron", params: { action: "add" }, result: { details: { job: { id: "job-e2e" } } } };
+  const sk = "agent:bob:telegram:group:-100:topic:1";
+  const jobId = cronJobIdOf(ev);
+  recordLaneTier(C2, jobId, tierOf("555555", TCFG, sk), "555555");
+  // The job will later fire on agent:bob:cron:job-e2e — a lane whose sender is
+  // null and which today resolves to OWNER. This is the whole point of 5b.
+  const back = lookupLaneTier(C2, laneTierKey("agent:bob:cron:job-e2e"));
+  lt("5b e2e: creator tier is recoverable from the FIRE lane key",
+    back?.tier === "trusted" && back?.id === "555555");
+}
+try { fsx.rmSync(L2, { recursive: true, force: true }); } catch { /* temp cleanup */ }
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
