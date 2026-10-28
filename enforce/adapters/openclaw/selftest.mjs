@@ -29,8 +29,11 @@ import {
   interpreterDeleteHit,
   isAffirmative,
   isPathWriteEscalation,
+  laneTierKey,
+  lookupLaneTier,
   matchesProtected,
   pipedInterpreterSink,
+  recordLaneTier,
   resolveSenderId,
   rmRfScratchOnly,
   stripQuoted,
@@ -507,6 +510,67 @@ ex("interp-tail: named .py script + heredoc -> inert", "python3 tools/x.py <<EOF
 ex("interp-tail: named .sh script + heredoc -> inert", "bash deploy.sh <<EOF\ndata\nEOF", false);
 ex("interp-tail: bare interpreter still a sink", `python3 <<< "print(1)"`, true);
 ex("parity: --dry-run must NOT disarm a real rm", "bash scripts/x.sh --dry-run; rm -rf /ws", true);
+
+// ── 5a: LANE TIER LEDGER primitives ─────────────────────────────────────────
+// A cron job fires on agent:<a>:cron:<jobId> and a subagent on
+// agent:<a>:subagent:<uuid>; neither is a channel lane, so sender is null and
+// the agentSelf fallback hands BOTH owner tier. The ledger records the
+// CREATOR's tier at creation (when they ARE on a channel lane) so it can be
+// replayed at fire time.
+function tk(name, sessionKey, expect) {
+  const got = laneTierKey(sessionKey);
+  const ok = got === expect;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${JSON.stringify(got)}`);
+  ok ? pass++ : fail++;
+}
+tk("laneTierKey: cron lane yields the EMBEDDED jobId",
+  "agent:analyst:cron:655decd7-a464-433d-acc5-ec8e9e721ca4", "655decd7-a464-433d-acc5-ec8e9e721ca4");
+tk("laneTierKey: subagent lane yields the full childSessionKey",
+  "agent:analyst:subagent:ef51d710-8442-46c1", "agent:analyst:subagent:ef51d710-8442-46c1");
+// Channel lanes carry a REAL sender; inheriting a stale tier from this file
+// there would override a live human identity. Must never produce a key.
+tk("laneTierKey: channel lane -> null (never second-guess a real sender)",
+  "agent:editor:telegram:group:-100123:topic:5", null);
+tk("laneTierKey: explicit lane -> null (inert, 0 tool calls measured)",
+  "agent:analyst:explicit:model-run-18fb2679", null);
+tk("laneTierKey: main lane -> null", "agent:cs:main", null);
+tk("laneTierKey: empty -> null", "", null);
+
+// Round-trip against a REAL temp file (the ledger is on disk by design: an
+// in-memory map dies on gateway restart, so the control would silently stop
+// existing while still looking installed).
+import fsx from "node:fs";
+import osx from "node:os";
+import pathx from "node:path";
+const LDIR = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "dinotrust-ledger-"));
+const LCFG = { ...DEFAULTS, logFile: pathx.join(LDIR, "dinotrust-enforce.log"), pendingLedgerMaxLines: 500 };
+function lt(name, cond) {
+  console.log(`${cond ? "PASS" : "FAIL"}  ${name}`);
+  cond ? pass++ : fail++;
+}
+// GRANDFATHER: nothing recorded yet -> null -> caller falls back to owner, so
+// all 72 pre-existing jobs on the reference box keep running untouched.
+lt("ledger: unknown key -> null (grandfather to owner)", lookupLaneTier(LCFG, "nope") === null);
+recordLaneTier(LCFG, "job-1", "trusted", "1136773015");
+lt("ledger: records and reads back the creator tier",
+  lookupLaneTier(LCFG, "job-1")?.tier === "trusted" && lookupLaneTier(LCFG, "job-1")?.id === "1136773015");
+recordLaneTier(LCFG, "job-2", "owner", "111111");
+lt("ledger: keys do not bleed into each other",
+  lookupLaneTier(LCFG, "job-2")?.tier === "owner" && lookupLaneTier(LCFG, "job-1")?.tier === "trusted");
+// A job edited later by someone else takes THAT person's tier -> newest wins.
+recordLaneTier(LCFG, "job-1", "owner", "111111");
+lt("ledger: newest record wins (job re-edited by another tier)",
+  lookupLaneTier(LCFG, "job-1")?.tier === "owner");
+lt("ledger: empty key is a no-op, never a wildcard entry",
+  (recordLaneTier(LCFG, "", "trusted", "x"), lookupLaneTier(LCFG, "") === null));
+// A corrupt line must not take the whole lookup down with it: the ledger sits
+// on the owner-resolution path, so it has to degrade to null (= owner), never throw.
+fsx.appendFileSync(pathx.join(LDIR, "dinotrust-enforce-tier-ledger.jsonl"), "{not json\n");
+lt("ledger: malformed line is skipped, good records still resolve",
+  lookupLaneTier(LCFG, "job-2")?.tier === "owner");
+lt("ledger: sibling path is derived from logFile, not hardcoded",
+  fsx.existsSync(pathx.join(LDIR, "dinotrust-enforce-tier-ledger.jsonl")));
+try { fsx.rmSync(LDIR, { recursive: true, force: true }); } catch { /* temp cleanup */ }
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────

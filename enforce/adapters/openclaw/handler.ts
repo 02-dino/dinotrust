@@ -380,11 +380,91 @@ function readDegradedMarker(c: Cfg): any | null {
 // last-writer-wins on read — avoids read-modify-write races with the sweep).
 const RESOLVE_WINDOW_MS = 1800 * 1000; // DEFAULT_EXEC_APPROVAL_TIMEOUT_MS (30m)
 
-function pendingPath(c: Cfg): string {
+// One place that derives a sibling JSONL next to the audit log. Two callers now
+// (pending approvals, tier ledger); a second hand-rolled copy of this 4-line
+// dir/stem dance is exactly the drift this repo has paid for before.
+function siblingLedgerPath(c: Cfg, suffix: string): string {
   const base = logPath(c);
   const dir = path.dirname(base);
   const stem = path.basename(base).replace(/\.log$/i, "");
-  return path.join(dir, `${stem}-pending-approvals.jsonl`);
+  return path.join(dir, `${stem}-${suffix}.jsonl`);
+}
+
+function pendingPath(c: Cfg): string {
+  return siblingLedgerPath(c, "pending-approvals");
+}
+
+/** Tier of whoever CREATED a cron job / spawned a subagent. */
+export type LaneTier = "owner" | "trusted" | "nonowner";
+
+/** Append-only {laneKey -> creator tier} ledger.
+ *
+ * WHY IT EXISTS: a cron job fires on `agent:<a>:cron:<jobId>` and a subagent on
+ * `agent:<a>:subagent:<uuid>`. Neither is a channel lane, so sender is null and
+ * the agentSelf fallback hands BOTH full owner tier -- measured 2026-10-28.
+ * A trusted id who can create either therefore gets an owner-tier lane for free.
+ *
+ * WHY A LEDGER AND NOT A STAMP ON THE JOB: the job record's `owner` field is
+ * caller-supplied (normalizeOptionalString(input.owner?.sessionKey)), i.e.
+ * forgeable, and the hook cannot rewrite it anyway. This file is OURS, written
+ * by the hook at creation time when the caller IS on a channel lane and their
+ * tier is resolvable.
+ *
+ * WHY ON DISK AND NOT IN MEMORY: an in-process Map dies on gateway restart, so
+ * the control would silently stop existing while still looking installed --
+ * strictly worse than not having it. The pending-approvals ledger beside it
+ * already set this precedent. */
+function tierLedgerPath(c: Cfg): string {
+  return siblingLedgerPath(c, "tier-ledger");
+}
+
+/** Lane key a tier can be inherited through, or null for lanes that cannot.
+ *  agent:<a>:cron:<jobId>    -> jobId          (the id is IN the lane, measured)
+ *  agent:<a>:subagent:<uuid> -> full sessionKey (matches subagent_spawned's childSessionKey)
+ * Channel lanes return null: they carry a real sender and must never be
+ * second-guessed from this file. */
+export function laneTierKey(sessionKey: string): string | null {
+  const sk = String(sessionKey || "");
+  const i = sk.indexOf(":cron:");
+  if (i >= 0) return sk.slice(i + ":cron:".length) || null;
+  if (sk.includes(":subagent:")) return sk;
+  return null;
+}
+
+/** Record a creator's tier. Best-effort: a write failure must never block the
+ * tool call that triggered it (same contract as audit()). */
+export function recordLaneTier(c: Cfg, key: string, tier: LaneTier, id: string | null) {
+  if (!key) return;
+  try {
+    const p = tierLedgerPath(c);
+    fs.appendFileSync(p, JSON.stringify({ key, tier, id, tsMs: Date.now() }) + "\n");
+    prunePendingLedger(c, p);   // reuse the existing line-cap helper, don't write a second
+  } catch { /* best-effort by contract */ }
+}
+
+/** Most recent recorded tier for a lane key, or null when unknown.
+ *
+ * Scans newest-first so a later re-record wins (a job edited by someone else
+ * takes that person's tier). null is the GRANDFATHER case: every job created
+ * before this ledger existed has no entry and must keep running as owner --
+ * 72 such jobs on the reference box. Unreadable/corrupt ledger also yields
+ * null, i.e. it degrades to today's behaviour rather than locking anyone out. */
+export function lookupLaneTier(c: Cfg, key: string): { tier: LaneTier; id: string | null } | null {
+  if (!key) return null;
+  try {
+    const p = tierLedgerPath(c);
+    if (!fs.existsSync(p)) return null;
+    const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const o = JSON.parse(lines[i]);
+        if (o && o.key === key && typeof o.tier === "string") {
+          return { tier: o.tier as LaneTier, id: o.id ?? null };
+        }
+      } catch { /* skip a malformed line, keep scanning */ }
+    }
+  } catch { /* unavailable -> null -> grandfather to owner */ }
+  return null;
 }
 
 // Stable fingerprint for {tool, command, session}. dinotrust never sees
