@@ -470,6 +470,28 @@ export function cronJobIdOf(event: any): string | null {
   return null;
 }
 
+/** The two lanes a subagent_spawned event ties together, or nulls.
+ *
+ * MEASURED SHAPE (2026-10-28) -- this is why 5c is NOT a copy of 5b:
+ *   event = { runId, childSessionKey, agentId, label, requester{channel,accountId,to,threadId}, mode }
+ *   ctx   = { runId, childSessionKey, requesterSessionKey }
+ * Neither carries senderId, and neither carries a plain `sessionKey`. So
+ * resolveSenderId(event, ctx) returns null here, and a null sender off a
+ * channel lane is read as OWNER -- i.e. naively reusing the 5b shape would
+ * record the spawner as owner and the ledger would LEGITIMISE the very hole it
+ * exists to close.
+ *
+ * `requesterSessionKey` is the PARENT lane (where the human actually called
+ * sessions_spawn), so identity has to be resolved against that, not the child.
+ *
+ * `requester` is routing metadata (channel/accountId/to/threadId) -- a delivery
+ * address, never an identity. Do not be tempted: a chat id is not a sender id. */
+export function spawnLaneIds(event: any, ctx: any): { child: string | null; requester: string | null } {
+  const child = String(ctx?.childSessionKey ?? event?.childSessionKey ?? "").trim() || null;
+  const requester = String(ctx?.requesterSessionKey ?? event?.requesterSessionKey ?? "").trim() || null;
+  return { child, requester };
+}
+
 /** Which tier a sender occupies on this lane. Mirrors decide()'s own ladder so
  * the tier we RECORD is the tier that would have been ENFORCED on that caller.
  *
@@ -1794,6 +1816,33 @@ export default definePluginEntry({
         recordLaneTier(c, jobId, tier, sender);
         audit(c, { evt: "lane-tier", rule: "R-ledger-cron", toolName: "cron", sessionKey, sender, action, jobId, tier });
       } catch { /* never break the tool result path */ }
+    });
+
+    // CAPTURE (5c): record the SPAWNER's tier for a subagent, keyed by the
+    // child's session key.
+    //
+    // NOT A COPY OF 5b -- the payload shape forces a different resolution path.
+    // Measured: ctx = { runId, childSessionKey, requesterSessionKey }; there is
+    // no senderId and no plain `sessionKey`. Calling resolveSenderId(event, ctx)
+    // as-is therefore returns null, and a null sender off a channel lane reads
+    // as OWNER -- the ledger would record the spawner as owner and LEGITIMISE
+    // the very hole it exists to close. So identity is resolved against the
+    // REQUESTER lane (where the human actually called sessions_spawn), which is
+    // also where the message_received latch for that conversation lives.
+    //
+    // agentFilter is matched on the requester lane for the same reason: the
+    // child key may be shaped differently, and this subscription is about who
+    // ASKED, not where the work landed.
+    api.on("subagent_spawned", async (event: any, ctx: any) => {
+      try {
+        const { child, requester } = spawnLaneIds(event, ctx);
+        if (!child || !requester) return;   // cannot attribute -> no entry -> grandfather
+        if (c.agentFilter && !requester.includes(c.agentFilter)) return;
+        const sender = resolveSenderId({}, { sessionKey: requester });
+        const tier = tierOf(sender, c, requester);
+        recordLaneTier(c, child, tier, sender);
+        audit(c, { evt: "lane-tier", rule: "R-ledger-subagent", toolName: "sessions_spawn", sessionKey: requester, sender, childSessionKey: child, tier });
+      } catch { /* never break a spawn */ }
     });
 
     api.on("before_tool_call", async (event: any, ctx: any) => {

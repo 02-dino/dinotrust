@@ -36,6 +36,7 @@ import {
   pipedInterpreterSink,
   recordLaneTier,
   resolveSenderId,
+  spawnLaneIds,
   tierOf,
   rmRfScratchOnly,
   stripQuoted,
@@ -635,6 +636,68 @@ const C2 = { ...DEFAULTS, logFile: pathx.join(L2, "dinotrust-enforce.log"), pend
     back?.tier === "trusted" && back?.id === "555555");
 }
 try { fsx.rmSync(L2, { recursive: true, force: true }); } catch { /* temp cleanup */ }
+
+// ── 5c: CAPTURE — subagent spawn is NOT a copy of 5b ───────────────────────
+// MEASURED payload shape:
+//   event = { runId, childSessionKey, agentId, label, requester{channel,accountId,to,threadId}, mode }
+//   ctx   = { runId, childSessionKey, requesterSessionKey }
+// Neither carries senderId, and neither carries a plain `sessionKey`. So the
+// 5b shape (resolveSenderId(event, ctx)) returns null here, and a null sender
+// off a channel lane reads as OWNER — the ledger would record the spawner as
+// owner and LEGITIMISE the very hole it exists to close. Identity must come
+// from the REQUESTER lane.
+function sl(name, event, ctx, expectChild, expectRequester) {
+  const got = spawnLaneIds(event, ctx);
+  const ok = got.child === expectChild && got.requester === expectRequester;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${JSON.stringify(got)}`);
+  ok ? pass++ : fail++;
+}
+sl("spawnLaneIds: reads child + requester from ctx",
+  { runId: "r1", childSessionKey: "agent:bob:subagent:c1" },
+  { runId: "r1", childSessionKey: "agent:bob:subagent:c1", requesterSessionKey: "agent:bob:telegram:group:-100:topic:1" },
+  "agent:bob:subagent:c1", "agent:bob:telegram:group:-100:topic:1");
+sl("spawnLaneIds: missing requester -> null (cannot attribute -> no entry)",
+  { childSessionKey: "agent:bob:subagent:c2" }, { childSessionKey: "agent:bob:subagent:c2" },
+  "agent:bob:subagent:c2", null);
+sl("spawnLaneIds: blank strings are null, never empty-key entries",
+  {}, { childSessionKey: "  ", requesterSessionKey: "" }, null, null);
+
+// THE REGRESSION THIS GUARDS: naively reusing 5b's resolution here records the
+// spawner as OWNER. Assert the two paths actually differ.
+lt("5c: naive resolveSenderId(event,ctx) on a spawn event yields null (the trap)",
+  resolveSenderId(
+    { runId: "r1", childSessionKey: "agent:bob:subagent:c1" },
+    { runId: "r1", childSessionKey: "agent:bob:subagent:c1", requesterSessionKey: "agent:bob:telegram:direct:555555" },
+  ) === null);
+lt("5c: resolving against the REQUESTER lane recovers the real sender",
+  resolveSenderId({}, { sessionKey: "agent:bob:telegram:direct:555555" }) === "555555");
+
+// End-to-end: a trusted spawner must be recoverable from the CHILD lane, which
+// is where the child's own tool calls will later be judged.
+const L3 = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "dinotrust-5c-"));
+const C3 = { ...DEFAULTS, logFile: pathx.join(L3, "dinotrust-enforce.log"), pendingLedgerMaxLines: 500 };
+{
+  const ctx3 = {
+    runId: "r9",
+    childSessionKey: "agent:bob:subagent:deadbeef",
+    requesterSessionKey: "agent:bob:telegram:direct:555555",
+  };
+  const { child, requester } = spawnLaneIds({}, ctx3);
+  const sender = resolveSenderId({}, { sessionKey: requester });
+  recordLaneTier(C3, child, tierOf(sender, TCFG, requester), sender);
+  const back = lookupLaneTier(C3, laneTierKey("agent:bob:subagent:deadbeef"));
+  lt("5c e2e: spawner tier is recoverable from the CHILD lane key",
+    back?.tier === "trusted" && back?.id === "555555");
+  // An OWNER-spawned child must stay owner: 5d must not demote the owner's own
+  // subagents just because a ledger now exists.
+  const ownerCtx = { childSessionKey: "agent:bob:subagent:ownerchild", requesterSessionKey: "agent:bob:telegram:direct:111111" };
+  const o = spawnLaneIds({}, ownerCtx);
+  const osender = resolveSenderId({}, { sessionKey: o.requester });
+  recordLaneTier(C3, o.child, tierOf(osender, TCFG, o.requester), osender);
+  lt("5c e2e: owner-spawned child records owner, not a demotion",
+    lookupLaneTier(C3, laneTierKey("agent:bob:subagent:ownerchild"))?.tier === "owner");
+}
+try { fsx.rmSync(L3, { recursive: true, force: true }); } catch { /* temp cleanup */ }
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
