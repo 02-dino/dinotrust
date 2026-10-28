@@ -1539,6 +1539,16 @@ export function resolveSenderId(event: any, ctx: any): string | null {
       if (age <= OWNER_MSG_ADOPTED_MAX_MS) {
         if (m.runId != null) {
           if (m.runId === runId) return String(m.senderId);
+          // Continuation/compaction lanes: new runId, same sessionKey (forum topic/WA thread).
+          // Owner tier must survive; approval paths stay run-scoped via peekInbound.
+          //
+          // WHY THE isChannelLane GUARD IS LOAD-BEARING: without it this would undo the
+          // 2026-10-22 age-bounding above -- an unattended run (cron/subagent/explicit)
+          // firing in the same session would inherit the last human's tier. Those lanes
+          // are NOT channel lanes (cron fires on agent:<a>:cron:<jobId>), so the guard
+          // keeps the widening to lanes that genuinely carry a human, still inside the
+          // 30-minute hard ceiling.
+          if (isChannelLane(sk)) return String(m.senderId);
         } else if (age <= OWNER_MSG_TTL_MS) {
           if (runId) m.runId = runId;   // bind to this turn, same as peekInbound
           return String(m.senderId);
