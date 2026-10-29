@@ -1418,7 +1418,7 @@ function latchKeysForSession(sessionKey: string): string[] {
   return keys;
 }
 
-function recordInbound(sessionKey: string, m: InboundMsg) {
+export function recordInbound(sessionKey: string, m: InboundMsg) {
   if (!sessionKey) return;
   pruneInbound(m.tsMs);
   for (const key of latchKeysForSession(sessionKey)) lastInbound.set(key, m);

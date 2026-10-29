@@ -37,6 +37,7 @@ import {
   ownerIntentMatches,
   pipedInterpreterSink,
   laneTierOverride,
+  recordInbound,
   recordLaneTier,
   resolveLaneIdentity,
   resolveSenderId,
@@ -882,6 +883,73 @@ cw("WORDS: multi-word entry matches", "please do not touch it", ["do not"], true
 cw("WORDS: apostrophe entry matches", "don't do it", ["don't"], true);
 cw("WORDS: does not match inside a longer word", "undeleted", ["delete"], false);
 cw("WORDS: empty list matches nothing", "delete it", [], false);
+
+// ── GitHub issue #1: owner blocked as non-owner in forum topics / WA threads ──
+// https://github.com/02-dino/dinotrust/issues/1 (cursor[bot], 2026-10-28)
+//
+// Owner hit `R-nonowner-exec` with `sender: null` on channel lanes whose
+// session key carries a suffix. TWO independent causes, each fixed separately:
+//
+//   (1) ad53713 (v1.41.0) latchKeysForSession() -- message_received latched on
+//       one key shape while before_tool_call looked up another, so the latch
+//       was never found.
+//   (2) c1bcfb8 (v1.42.0) continuation re-adopt -- after the first turn stamped
+//       the latch with a runId, a continuation/compaction turn carrying a NEW
+//       runId refused it and the owner went null again.
+//
+// The issue was filed in the gap BETWEEN those two commits. Production proof
+// (dinotrust-enforce.log, 21-29 Oct): 110 sender-null blocks on topic/thread
+// lanes before c1bcfb8, 0 after. But NEITHER fix had a test pinning the exact
+// scenario -- so a refactor could silently restore a bug that was costing real
+// owner lockouts. That gap is what these cases close.
+const ISS = "1083618205";
+function iss(name, cond) {
+  console.log(`${cond ? "PASS" : "FAIL"}  ${name}`);
+  cond ? pass++ : fail++;
+}
+function latchThenResolve(latchKey, callKey, latchRunId, callRunId) {
+  recordInbound(latchKey, {
+    text: "ok", replyToId: null, senderId: ISS, tsMs: Date.now(), runId: latchRunId,
+  });
+  return resolveSenderId({ toolName: "exec", sessionKey: callKey, runId: callRunId },
+    { sessionKey: callKey, runId: callRunId });
+}
+
+// (1) SUFFIX MISMATCH -- the latch must be findable from either key shape.
+const TOPIC = "agent:kaka689:telegram:group:-1003941010173:topic:164";
+const TBASE = "agent:kaka689:telegram:group:-1003941010173";
+iss("issue#1: TG topic -- latched on BASE key, resolved from :topic: key",
+  latchThenResolve(TBASE, TOPIC, null, "r1") === ISS);
+iss("issue#1: TG topic -- latched on :topic: key, resolved from BASE key",
+  latchThenResolve(TOPIC, TBASE, null, "r2") === ISS);
+const WA = "agent:konsultan:whatsapp:group:120363420572041876@g.us:thread:whatsapp-account-konsultan-wa";
+const WABASE = "agent:konsultan:whatsapp:group:120363420572041876@g.us";
+iss("issue#1: WA thread -- latched on BASE key, resolved from :thread: key",
+  latchThenResolve(WABASE, WA, null, "r3") === ISS);
+
+// (2) CONTINUATION / COMPACTION -- latch already stamped with an OLD runId,
+// this turn arrives with a NEW one. Owner identity must survive.
+iss("issue#1: continuation runId on a TOPIC lane re-adopts the latch",
+  latchThenResolve(TOPIC, TOPIC, "old-run", "new-run") === ISS);
+iss("issue#1: continuation runId on a WA THREAD lane re-adopts the latch",
+  latchThenResolve(WA, WA, "old-run", "new-run") === ISS);
+
+// THE GUARD THAT MAKES (2) SAFE. Re-adopt is deliberately limited to CHANNEL
+// lanes. An unattended lane (cron/subagent) sharing the session must NOT
+// inherit the last human's identity -- that would undo the 2026-10-22 age
+// bounding and hand a scheduled job the owner's tier. This asserts the
+// widening did not become a hole.
+iss("issue#1 GUARD: cron lane does NOT inherit a human latch across runIds",
+  latchThenResolve("agent:kaka689:cron:job-7", "agent:kaka689:cron:job-7", "old-run", "new-run") === null);
+iss("issue#1 GUARD: subagent lane does NOT inherit a human latch across runIds",
+  latchThenResolve("agent:kaka689:subagent:c1", "agent:kaka689:subagent:c1", "old-run", "new-run") === null);
+
+// A latch older than the 30-minute hard ceiling is dead even on a channel lane.
+recordInbound(TOPIC, { text: "old", replyToId: null, senderId: ISS,
+  tsMs: Date.now() - (31 * 60 * 1000), runId: "old-run" });
+iss("issue#1: latch past the 30-min ceiling does not resolve",
+  resolveSenderId({ toolName: "exec", sessionKey: TOPIC, runId: "new-run" },
+    { sessionKey: TOPIC, runId: "new-run" }) === null);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
