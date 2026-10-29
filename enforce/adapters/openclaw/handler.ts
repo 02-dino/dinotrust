@@ -74,6 +74,30 @@ type Cfg = {
    * Empty default = unchanged behaviour.
    */
   agentWorkspaces?: Record<string, string>;
+  /**
+   * Words that count as "the owner ordered a destructive action" in the
+   * marker self-approve check. CONFIG, not a hardcoded list, because the
+   * hardcoded list was English-only and this ships worldwide: an install whose
+   * team speaks Mandarin, Spanish or Shona could never satisfy it, so every
+   * cleanup fell back to a manual approval reply. Enumerating every language in
+   * this file is not possible and pretending otherwise is worse than admitting
+   * it -- so the install declares its own. Defaults cover English + Indonesian.
+   *
+   * Matched case-insensitively. A missing language fails CLOSED (no match ->
+   * ask the owner), which is the safe direction: friction, never a silent
+   * delete.
+   */
+  approvalIntentVerbs?: string[];
+  /**
+   * Words that VOID self-approve even when a verb and the target both matched.
+   *
+   * WHY THIS EXISTS (measured 2026-10-29): the verb test was a bare substring
+   * scan, so "don't delete /tmp/x" contained "delete" and passed -- the gate
+   * read a REFUSAL as an order. That is fail-OPEN on an irreversible action,
+   * strictly worse than the missing-language gap, which only fails closed.
+   * Any hit here refuses self-approve outright; the owner is then asked.
+   */
+  approvalNegations?: string[];
   ownerWarnOnly: boolean;
   criticalExecPatterns: string[];
   // Privilege-escalation / brick-risk paths: owner write here -> approval.
@@ -154,6 +178,18 @@ export const DEFAULTS: Cfg = {
   ownerIds: [],
   agentOwners: {},
   agentWorkspaces: {},
+  // English + Indonesian. Installs in other languages extend these two lists
+  // via config rather than waiting for a release (see the Cfg doc above).
+  approvalIntentVerbs: [
+    "delete", "remove", "rm", "wipe", "drop", "truncate", "reset", "force-push", "force push",
+    "overwrite", "erase", "nuke", "clear", "clean", "cleanup", "clean up", "destroy", "format",
+    "uninstall", "purge",
+    "hapus", "hapuskan", "bersihin", "bersihkan", "buang", "singkirkan", "musnahkan", "kosongkan",
+  ],
+  approvalNegations: [
+    "don't", "dont", "do not", "never", "without", "instead of",
+    "jangan", "tidak", "nggak", "gak", "bukan", "batal", "cancel", "stop",
+  ],
   ownerWarnOnly: true,
   // Owner is warn-only EXCEPT these critical/irreversible actions -> requireApproval
   // ("are you sure?") even for the owner. Regex strings, tested against exec command.
@@ -237,6 +273,10 @@ function cfg(raw: any): Cfg {
   }
   if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
   if (c.agentWorkspaces == null || typeof c.agentWorkspaces !== "object" || Array.isArray(c.agentWorkspaces)) c.agentWorkspaces = {};
+  for (const k of ["approvalIntentVerbs", "approvalNegations"] as const) {
+    const v = (c as any)[k];
+    if (!Array.isArray(v) || v.length === 0) (c as any)[k] = (DEFAULTS as any)[k];
+  }
   if (c.ownerSelfApproval !== "warn" && c.ownerSelfApproval !== "gate") c.ownerSelfApproval = DEFAULTS.ownerSelfApproval;
   if (typeof c.approvalTimeoutMs !== "number" || !(c.approvalTimeoutMs > 0)) c.approvalTimeoutMs = DEFAULTS.approvalTimeoutMs;
   if (typeof c.pendingLedgerMaxLines !== "number" || !(c.pendingLedgerMaxLines > 0)) c.pendingLedgerMaxLines = DEFAULTS.pendingLedgerMaxLines;
@@ -946,10 +986,21 @@ function stripComments(cmd: string): string {
 export function rmRfScratchOnly(cmd: string): boolean {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
-  const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
+  // OPERANDS OF `rm` ONLY -- i.e. what rm actually deletes.
+  //
+  // WHY (measured 2026-10-29): this used to scan EVERY token in the command, so
+  // a harmless `cd /tmp &&` prefix contributed the BARE token "/tmp", which
+  // fails the `^/tmp/<something>` test and flipped a /tmp-only delete back to
+  // critical:
+  //   rm -rf /tmp/x              -> scratch (warn)
+  //   cd /tmp && rm -rf /tmp/x   -> NOT scratch (blocked)   <- same deletion
+  // The owner hit exactly this and read it as the approval policy being too
+  // strict. It was a tokenizer bug. Only rm's own operands can decide what a
+  // delete touches. Mirror of core/policy.ts.
+  const toks = rmArgvTargets(scan);
   // Real path (contains '/') OR a $VAR/${VAR} target. A variable is treated as
   // scratch ONLY when its NAME clearly signals a throwaway dir (unresolvable at
-  // static-scan time). Mirror of core/policy.ts.
+  // static-scan time).
   const paths = toks.filter(t =>
     !t.startsWith("-") && (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)));
   if (paths.length === 0) return false;
@@ -1426,7 +1477,7 @@ function currentTurnOwnerText(event: any, ctx: any, relayed?: InboundMsg | null)
 // full path ONLY. Set when the text came from the TTL'd relay latch rather than
 // the same tool call: a basename like "logs" is far too easy to hit by accident
 // in a 2-minute-old sentence that was never written about THIS command.
-function ownerIntentMatches(ownerText: string, event: any, esc: string, requireFullPath = false): boolean {
+export function ownerIntentMatches(ownerText: string, event: any, esc: string, requireFullPath = false, c?: Cfg): boolean {
   const text = (ownerText || "").toLowerCase();
   if (text.length < 3) return false;
   const targets = resolvedTargetsOf(event);
@@ -1441,11 +1492,34 @@ function ownerIntentMatches(ownerText: string, event: any, esc: string, requireF
     const distinctive = base.length >= 4 ? base : tl;
     if (!text.includes(tl) && !(distinctive.length >= 4 && text.includes(distinctive))) return false;
   }
-  // (2) the owner's message must signal destructive/action intent (not just
-  //     mention the path in passing). Verb set is tied to the critical class.
-  const actionVerbs = /\b(delete|remove|rm|wipe|drop|truncate|reset|force[- ]?push|overwrite|erase|nuke|clear|destroy|format|uninstall|purge)\b/;
-  if (!actionVerbs.test(text)) return false;
+  // (2) NEGATION VOIDS EVERYTHING. Checked BEFORE the verb, because the verb
+  //     test is a word scan and "don't delete /tmp/x" contains "delete" --
+  //     measured 2026-10-29, the gate read a REFUSAL as an order. Fail-OPEN on
+  //     an irreversible action is the one failure mode that must not exist, so
+  //     any negation hit refuses outright and the owner gets asked instead.
+  if (containsAnyWord(text, c?.approvalNegations ?? DEFAULTS.approvalNegations)) return false;
+  // (3) the owner's message must signal destructive/action intent (not just
+  //     mention the path in passing). CONFIG-DRIVEN, not a hardcoded English
+  //     list: an install whose team speaks another language declares its own
+  //     verbs. An unlisted language fails CLOSED -> the owner is asked, which
+  //     is friction, never a silent delete.
+  if (!containsAnyWord(text, c?.approvalIntentVerbs ?? DEFAULTS.approvalIntentVerbs)) return false;
   return true;
+}
+
+/** Word-boundary-ish membership test for a configured word list.
+ * Uses explicit boundaries instead of \b so multi-word entries ("do not",
+ * "force push") and apostrophes ("don't") behave, and so a verb never matches
+ * inside a longer word ("cleared" must not satisfy "clear"... it does share a
+ * stem, which is why the boundary is non-letter rather than whitespace). */
+export function containsAnyWord(text: string, words: string[]): boolean {
+  for (const w of words) {
+    const needle = String(w || "").toLowerCase().trim();
+    if (!needle) continue;
+    const esc = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^a-z0-9])${esc}([^a-z0-9]|$)`, "i").test(text)) return true;
+  }
+  return false;
 }
 
 // -- REPLY-SCOPED APPROVAL (noob-usable, jailbreak-proof) ----------------------
@@ -2067,7 +2141,7 @@ export default definePluginEntry({
               // ── (1) LEGACY path+verb self-approve (advanced/LLM-mediated) ────
               const markerPresent = cmd.includes(SELF_APPROVE_MARKER)
                 || ownerText.includes(SELF_APPROVE_MARKER);
-              const intentOk = ownerIntentMatches(ownerText, event, esc, relayedOnly);
+              const intentOk = ownerIntentMatches(ownerText, event, esc, relayedOnly, c);
               if (markerPresent && intentOk) {
                 consumeInbound(sessionKey); // single-use: burn the latch on grant
                 audit(c, { evt: "owner-self-approve", rule: "R-escalation-llm-approved", toolName, sessionKey, sender: sender ?? "self", hit: esc, relayed: relayedOnly, note: "current-turn owner intent verified + marker present" });

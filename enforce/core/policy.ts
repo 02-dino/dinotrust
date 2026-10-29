@@ -516,14 +516,42 @@ export function stripHeredocBodies(cmd: string): string {
  * it stays critical. Conservative: requires >=1 explicit /tmp/<x> path AND zero
  * non-/tmp filesystem paths. Bare `/tmp` (no child) and `/` are NOT scratch.
  */
+/** Operands of the `rm` segment(s) ONLY -- i.e. what rm actually deletes.
+ *
+ * WHY (measured 2026-10-29): rmRfScratchOnly used to scan EVERY token in the
+ * command, so a harmless `cd /tmp &&` prefix contributed the BARE token "/tmp",
+ * which fails the `^/tmp/<something>` test and flipped a /tmp-only delete back
+ * to critical:
+ *   rm -rf /tmp/x                 -> scratch (warn)
+ *   cd /tmp && rm -rf /tmp/x      -> NOT scratch (blocked)   <- same deletion
+ * The owner hit exactly this and read it as the approval policy being too
+ * strict. It was a tokenizer bug. Only rm's own operands can decide what a
+ * delete touches. */
+function rmDeleteOperands(scan: string): string[] {
+  const out: string[] = [];
+  for (const seg of scan.split(/(?:\|\||&&|[;|&\n])/)) {
+    const toks = seg.trim().split(/\s+/).filter(Boolean);
+    if (toks.length === 0) continue;
+    const first = toks[0];
+    if (!(first === "rm" || /(^|\/)rm$/.test(first))) continue;
+    for (let i = 1; i < toks.length; i++) {
+      const t = toks[i];
+      if (t === "--") continue;          // end-of-options marker
+      if (t.startsWith("-")) continue;   // flag (rm takes no separate option value)
+      if (/^[<>]/.test(t)) break;        // redirection -> operands end
+      out.push(t);
+    }
+  }
+  return out;
+}
+
 function rmRfScratchOnly(cmd: string): boolean {
   const scan = stripQuoted(cmd);
   if (!/rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/i.test(scan)) return false;
-  const toks = scan.split(/[\s;|&><()]+/).filter(Boolean);
   // Path-like tokens: real path (contains '/') OR a shell-variable target
   // ($VAR / ${VAR}). A variable is unresolvable at static-scan time, so it is
   // treated as scratch ONLY when its NAME clearly signals a throwaway dir.
-  const paths = toks.filter(t =>
+  const paths = rmDeleteOperands(scan).filter(t =>
     !t.startsWith("-") && (t.includes("/") || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(t)));
   if (paths.length === 0) return false; // no explicit path -> ambiguous -> stay critical
   const looksScratchVar = (t: string): boolean => {

@@ -33,6 +33,8 @@ import {
   laneTierKey,
   lookupLaneTier,
   matchesProtected,
+  containsAnyWord,
+  ownerIntentMatches,
   pipedInterpreterSink,
   laneTierOverride,
   recordLaneTier,
@@ -807,6 +809,79 @@ lt("5e: newest-wins survives compaction",
 lt("5e: tierLedgerMaxLines defaults separately from pendingLedgerMaxLines",
   DEFAULTS.tierLedgerMaxLines !== DEFAULTS.pendingLedgerMaxLines && DEFAULTS.tierLedgerMaxLines > 0);
 try { fsx.rmSync(L5, { recursive: true, force: true }); } catch { /* temp cleanup */ }
+
+// ── FIX #1: `cd` prefix must not poison the /tmp scratch carve-out ──────────
+// MEASURED 2026-10-29: rmRfScratchOnly scanned EVERY token, so a harmless
+// `cd /tmp &&` prefix contributed the BARE token "/tmp", which fails the
+// ^/tmp/<something> test and flipped a /tmp-only delete back to critical.
+// Same deletion, different typing, opposite verdict. The owner hit this and
+// read it as the approval policy being too strict; it was a tokenizer bug.
+function sc(name, cmd, want) {
+  const got = rmRfScratchOnly(cmd);
+  const ok = got === want;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${got}`);
+  ok ? pass++ : fail++;
+}
+sc("SCRATCH: bare /tmp delete is scratch", "rm -rf /tmp/tmp.abc", true);
+sc("SCRATCH: `cd /tmp &&` prefix no longer flips it critical (the bug)",
+  "cd /tmp && rm -rf /tmp/tmp.abc", true);
+sc("SCRATCH: cd prefix + several /tmp targets", "cd /tmp && rm -rf /tmp/a /tmp/b", true);
+sc("SCRATCH: cd into a NON-tmp dir while deleting /tmp is still scratch",
+  "cd /root/.openclaw && rm -rf /tmp/a", true);
+// The guard rails must be untouched by the fix.
+sc("SCRATCH: cd into /tmp but deleting a REAL path stays critical",
+  "cd /tmp && rm -rf /root/x", false);
+sc("SCRATCH: mixed /tmp + real path stays critical", "rm -rf /tmp/x /root/.openclaw", false);
+sc("SCRATCH: bare /tmp itself stays critical", "rm -rf /tmp", false);
+sc("SCRATCH: plain real path stays critical", "rm -rf /root/.openclaw", false);
+
+// ── FIX #2: intent words are CONFIG, and negation VOIDS self-approve ───────
+// Two separate defects:
+//   (a) the verb list was hardcoded ENGLISH ONLY, so an install whose team
+//       speaks another language could never self-approve. That fails CLOSED
+//       (owner gets asked) -- friction, not danger.
+//   (b) the verb test was a bare substring scan, so "don't delete /tmp/x"
+//       contained "delete" and PASSED. The gate read a REFUSAL as an order.
+//       That is fail-OPEN on an irreversible action -- far worse than (a).
+const EV = { toolName: "exec", params: { command: "rm -rf /tmp/tmp.abc" } };
+const ESC = "exec ~ /rm -rf/";
+function oi(name, ownerText, want, cfg) {
+  const got = ownerIntentMatches(ownerText, EV, ESC, false, cfg);
+  const ok = got === want;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${got}`);
+  ok ? pass++ : fail++;
+}
+// (b) NEGATION -- the dangerous one. Must refuse even though the verb is there.
+oi("INTENT: \"don't delete\" must NOT self-approve", "don't delete /tmp/tmp.abc", false);
+oi("INTENT: \"do not remove\" must NOT self-approve", "do not remove /tmp/tmp.abc", false);
+oi("INTENT: \"never delete\" must NOT self-approve", "never delete /tmp/tmp.abc", false);
+oi("INTENT: \"jangan hapus\" must NOT self-approve", "jangan hapus /tmp/tmp.abc", false);
+// (a) language coverage: defaults now carry Indonesian + clean/cleanup.
+oi("INTENT: English verb still works", "delete /tmp/tmp.abc", true);
+oi("INTENT: 'clean up' now counts (owner's actual wording)", "clean up /tmp/tmp.abc", true);
+oi("INTENT: Indonesian 'hapus' now counts", "hapus /tmp/tmp.abc", true);
+oi("INTENT: Indonesian 'bersihin' now counts", "bersihin /tmp/tmp.abc", true);
+// An UNLISTED language fails CLOSED -> owner is asked. Friction, never a
+// silent delete. This is the honest limit, asserted rather than hidden.
+oi("INTENT: unlisted language (es) fails CLOSED by default", "borra /tmp/tmp.abc", false);
+// ...and an install can declare its own vocabulary instead of waiting for us.
+oi("INTENT: install-declared Spanish verb works", "borra /tmp/tmp.abc", true,
+  { ...DEFAULTS, approvalIntentVerbs: ["borra", "borrar", "eliminar"], approvalNegations: ["no"] });
+oi("INTENT: install-declared Mandarin verb works", "请 删除 /tmp/tmp.abc", true,
+  { ...DEFAULTS, approvalIntentVerbs: ["删除"], approvalNegations: ["不要"] });
+// Target matching is UNCHANGED by this fix (owner kept it deliberately).
+oi("INTENT: verb present but target never named -> still refuses", "delete everything", false);
+// Word-boundary behaviour of the matcher itself.
+function cw(name, text, words, want) {
+  const got = containsAnyWord(text, words);
+  const ok = got === want;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${got}`);
+  ok ? pass++ : fail++;
+}
+cw("WORDS: multi-word entry matches", "please do not touch it", ["do not"], true);
+cw("WORDS: apostrophe entry matches", "don't do it", ["don't"], true);
+cw("WORDS: does not match inside a longer word", "undeleted", ["delete"], false);
+cw("WORDS: empty list matches nothing", "delete it", [], false);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────
