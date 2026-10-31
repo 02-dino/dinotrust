@@ -1830,11 +1830,21 @@ export function execDenyReason(cmd: string, scripts: string[], allowedTools?: st
       + `Retrying this through exec will fail identically every time.`;
   }
   if (!cmd || !SHELL_META.test(cmd)) return wall;
-  // Only the segment before the first metachar can be the intended invocation.
-  if (!namesAllowlistedScript(cmd.split(SHELL_META)[0] ?? "", scripts)) return wall;
+  // ANY segment, not just the first. A `cd <dir> && <script>.py` prefix puts the
+  // real invocation in segment 2, so checking only segment 1 fell through to the
+  // generic wall -- which says "not allowlisted" about a script that IS
+  // allowlisted, when the only real problem is the chaining. Measured 2026-10-31
+  // in the VIP lane: `cd /root/.openclaw/workspace-analyst && ./venv/bin/python
+  // tools/exchange_data.py price BTC` got the generic text, so the one fix that
+  // works (drop the cd -- exec already starts in the workspace) was never named,
+  // and the caller reads a solvable mistake as a permission they don't have.
+  // Diagnostic ONLY: execRunsAllowedScript still decides allow/deny and rejects
+  // shell metacharacters outright, so widening the message widens no access.
+  if (!cmd.split(SHELL_META).some((seg) => namesAllowlistedScript(seg, scripts))) return wall;
   return "exec allowlist takes ONE plain script invocation: the script is allowlisted but the "
     + "command adds shell chaining/redirection (; | & > < ` $ ( ) { }). Re-issue as separate "
-    + "exec calls, one script each, and use the script's own flags instead of a pipe.";
+    + "exec calls, one script each, and use the script's own flags instead of a pipe. "
+    + "A leading 'cd <dir> &&' is chaining too -- drop it, exec already starts in the workspace.";
 }
 
 /** Resolve verified sender id. null => internal/self turn (agent-operated-by-owner). */
