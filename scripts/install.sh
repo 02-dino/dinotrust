@@ -858,9 +858,90 @@ if [[ -d "$DT_SKILL_SRC" ]]; then
   DT_SKILL_DEST="$(dirname "$CONFIG_FILE")/skills/dinotrust-security-model"
   if mkdir -p "$(dirname "$DT_SKILL_DEST")" 2>/dev/null && cp -r "$DT_SKILL_SRC" "$DT_SKILL_DEST" 2>/dev/null; then
     info "Installed skill: dinotrust-security-model -> $DT_SKILL_DEST"
-    # Auto-discovered from <workspace>/skills (highest-precedence root). Visible
-    # by default; if you pin an agent skills allowlist (agents.*.skills), add
-    # "dinotrust-security-model" to it or the agent won't see the reference layer.
+    # ALLOWLIST CHECK, not just a copy (owner 2026-11-02: "beri warning keras").
+    #
+    # This used to be a COMMENT saying "if you pin an allowlist, add it" — which
+    # is advice nobody reads at install time and nothing verifies afterwards.
+    # Measured on a live box 2026-11-02: a freshly shipped skill sat
+    # installed-but-excluded, and `openclaw skills check` was the only thing
+    # that revealed it. An unwired skill fails SILENTLY and LATE: file on disk,
+    # install green, agent simply never uses it.
+    #
+    # dinotrust deliberately does NOT auto-write the allowlist: it is a security
+    # package, and silently granting itself a config entry is exactly the kind of
+    # move it exists to prevent. So it DETECTS and SHOUTS instead.
+    _dt_cfg="${OPENCLAW_CONFIG_PATH:-${OPENCLAW_CONFIG:-$(dirname "$CONFIG_FILE")/openclaw.json}}"
+    if [[ -f "$_dt_cfg" ]] && command -v python3 >/dev/null 2>&1; then
+      _dt_state="$(python3 - "$_dt_cfg" <<'PY' 2>/dev/null || echo unknown
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("unknown"); raise SystemExit
+SKILL = "dinotrust-security-model"
+agents = cfg.get("agents", {}) or {}
+listed = agents.get("list") or []
+defaults = (agents.get("defaults") or {}).get("skills")
+defaults = defaults if isinstance(defaults, list) else None
+
+# EFFECTIVE allowlist per agent: its OWN list when it pins one, else defaults.
+# Checking defaults unconditionally is a false positive — measured 2026-11-02 on
+# a box where defaults.skills existed but the only agent pinned its own list,
+# so defaults governed nobody yet the check still shouted. Only report an
+# allowlist that some agent actually inherits.
+missing = []
+inherits_defaults = False
+for a in listed:
+    own = a.get("skills")
+    if isinstance(own, list):
+        if SKILL not in own:
+            missing.append(a.get("id") or "<unnamed>")
+    elif defaults is not None:
+        inherits_defaults = True
+if inherits_defaults and SKILL not in defaults:
+    missing.append("agents.defaults")
+# No agents declared at all: defaults is the only allowlist that can apply.
+if not listed and defaults is not None and SKILL not in defaults:
+    missing.append("agents.defaults")
+
+if missing:
+    print("missing:" + ",".join(missing))
+elif not listed and defaults is None:
+    print("no-allowlist")           # nothing pinned; every skill visible
+elif any(isinstance(a.get("skills"), list) for a in listed) or inherits_defaults \
+     or (not listed and defaults is not None):
+    print("wired")
+else:
+    print("no-allowlist")
+PY
+)"
+      case "$_dt_state" in
+        wired)        info "Skill allowlist: dinotrust-security-model already allowed" ;;
+        no-allowlist) info "Skill allowlist: none pinned — skill visible by default" ;;
+        missing:*)
+          printf '\n'
+          printf '  ############################################################\n'
+          printf '  ##  WARNING: SKILL INSTALLED BUT *NOT* IN THE ALLOWLIST   ##\n'
+          printf '  ############################################################\n'
+          printf '  dinotrust-security-model was copied to:\n    %s\n\n' "$DT_SKILL_DEST"
+          printf '  But these agents pin a skills allowlist that does NOT\n'
+          printf '  include it: %s\n\n' "${_dt_state#missing:}"
+          printf '  CONSEQUENCE: those agents CANNOT see the security-model\n'
+          printf '  reference. Enforcement still works, but the agent loses the\n'
+          printf '  identity/trust mechanics it is supposed to reason with.\n'
+          printf '  Nothing else will warn you about this.\n\n'
+          printf '  FIX — add "dinotrust-security-model" to each agents.list[i].skills:\n'
+          printf '    OPENCLAW_CONFIG_PATH=%s openclaw config get agents.list\n' "$_dt_cfg"
+          printf '    OPENCLAW_CONFIG_PATH=%s openclaw config validate\n\n' "$_dt_cfg"
+          printf '  VERIFY (must NOT say "not allowed to see/use"):\n'
+          printf '    openclaw skills check\n'
+          printf '  ############################################################\n\n'
+          ;;
+        *) warn "Could not read $_dt_cfg to check the skills allowlist; verify with: openclaw skills check" ;;
+      esac
+    else
+      warn "Skipped skills-allowlist check (no config at $_dt_cfg or no python3). Verify with: openclaw skills check"
+    fi
   else
     warn "Could not copy dinotrust-security-model skill to $DT_SKILL_DEST — the injected block references it; copy skills/dinotrust-security-model/ manually if you want the reference layer."
   fi
