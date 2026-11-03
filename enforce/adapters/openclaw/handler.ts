@@ -1380,6 +1380,72 @@ const OWNER_MSG_MAX_SESSIONS = 256; // bound the map; this is a cache, not a log
 type InboundMsg = { text: string; replyToId: string | null; senderId: string | null; tsMs: number; runId: string | null };
 const lastInbound = new Map<string, InboundMsg>();
 
+// ── RESTART-DURABLE MIRROR OF THE LATCH ──────────────────────────────────────
+// WHY (measured 2026-11-03): `lastInbound` is PROCESS MEMORY, so a gateway
+// restart erases every identity it holds. On a group/thread lane that Map is
+// the ONLY source of senderId -- before_tool_call carries none, and the
+// ":direct:" fallback structurally cannot match
+// "agent:x:telegram:group:-100...:topic:N" -- so a restart silently DEMOTES THE
+// OWNER to nonowner until they happen to speak again.
+//
+// Measured in this install's own audit log: 129 null-sender blocks across SIX
+// agents (konsultan 45, analyst 25, kaka689 23, ads 21, kttal 11, event 4); 85
+// of them in lanes where a sender had never resolved at all; and every single
+// one inside 30 minutes of a plugin `register` event -- i.e. the window that
+// follows a restart. Only 1 of 44 measurable gaps was under the 120s TTL, so
+// "the latch expired" was NOT the cause: the latch was GONE.
+//
+// NOT A WIDENING. The mirror stores the SAME rows under the SAME envelope:
+// 120s TTL while unclaimed, 30-minute hard ceiling once adopted, same-sender
+// match, single-use consume. Expired rows are dropped on load and never served.
+// The only thing removed is "a process restart destroys identity inside a
+// window the policy already permits". Precedent in this very file:
+// recordLaneTier() already persists {tier,id} to disk for cron/subagent lanes.
+let latchStoreFile: string | null = null;   // set by initLatchStore() in register()
+
+/** Bind the mirror to a path beside the audit log + tier ledger (same dir, same
+ *  ownership, same lifecycle). MUST be called in register(): until it runs,
+ *  latchStoreFile is null and BOTH persist/hydrate are no-ops -- i.e. the whole
+ *  durability fix would be silently dead code. */
+function initLatchStore(c: Cfg) {
+  try {
+    latchStoreFile = siblingLedgerPath(c, "inbound-latch").replace(/\.jsonl$/i, ".json");
+    hydrateLatchStore();   // recover identities that outlived the restart
+  } catch { latchStoreFile = null; }
+}
+let latchLoadedMtimeMs = -1;                // re-read only when the file moves
+
+function persistLatchStore() {
+  if (!latchStoreFile) return;
+  try {
+    const rows: Record<string, InboundMsg> = {};
+    for (const [k, v] of lastInbound) rows[k] = v;
+    fs.mkdirSync(path.dirname(latchStoreFile), { recursive: true });
+    fs.writeFileSync(latchStoreFile, JSON.stringify(rows));
+    latchLoadedMtimeMs = fs.statSync(latchStoreFile).mtimeMs;
+  } catch { /* best-effort: a write failure must never block message intake */ }
+}
+
+/** Fill the in-memory Map from disk when THIS process has not seen the row yet.
+ *  Age-checked on load, so nothing expired is ever resurrected. */
+function hydrateLatchStore() {
+  if (!latchStoreFile) return;
+  try {
+    const st = fs.statSync(latchStoreFile);
+    if (st.mtimeMs === latchLoadedMtimeMs) return;   // nothing new since last read
+    latchLoadedMtimeMs = st.mtimeMs;
+    const rows = JSON.parse(fs.readFileSync(latchStoreFile, "utf8")) as Record<string, InboundMsg>;
+    const now = Date.now();
+    for (const [k, v] of Object.entries(rows ?? {})) {
+      if (!v || typeof v.tsMs !== "number") continue;
+      if (now - v.tsMs > OWNER_MSG_ADOPTED_MAX_MS) continue;  // never resurrect the expired
+      const cur = lastInbound.get(k);
+      if (!cur || cur.tsMs < v.tsMs) lastInbound.set(k, v);    // newest wins
+    }
+    pruneInbound(now);
+  } catch { /* absent/unreadable -> behave exactly as before (memory only) */ }
+}
+
 // Drop expired rows (and trim oldest if the map somehow grows unbounded).
 // An ADOPTED row is exempt from the short TTL -- its lifetime is the turn, not
 // the clock -- but still capped by OWNER_MSG_ADOPTED_MAX_MS.
@@ -1422,6 +1488,7 @@ export function recordInbound(sessionKey: string, m: InboundMsg) {
   if (!sessionKey) return;
   pruneInbound(m.tsMs);
   for (const key of latchKeysForSession(sessionKey)) lastInbound.set(key, m);
+  persistLatchStore();   // survive a restart; same envelope, see note above
 }
 
 // Read WITHOUT consuming: the gate must be able to evaluate and still decline.
@@ -1438,6 +1505,7 @@ export function recordInbound(sessionKey: string, m: InboundMsg) {
 // latch, even one second old -- previously any turn within 2 min could.
 function peekInbound(sessionKey: string, sender: string | null, runId: string | null): InboundMsg | null {
   if (!sessionKey) return null;
+  hydrateLatchStore();
   const m = lastInbound.get(sessionKey);
   if (!m) return null;
   if (sender != null && m.senderId != null && m.senderId !== sender) return null;
@@ -1446,12 +1514,12 @@ function peekInbound(sessionKey: string, sender: string | null, runId: string | 
   if (m.runId != null) return m.runId === runId ? m : null;
   // Unclaimed -> the short TTL gates adoption.
   if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { lastInbound.delete(sessionKey); return null; }
-  if (runId) m.runId = runId; // adopt: bind to this turn for its full duration
+  if (runId) { m.runId = runId; persistLatchStore(); } // adopt: bind to this turn for its full duration
   return m;
 }
 
 // Burn the latch the moment it grants approval (single-use).
-function consumeInbound(sessionKey: string) { lastInbound.delete(sessionKey); }
+function consumeInbound(sessionKey: string) { lastInbound.delete(sessionKey); persistLatchStore(); }
 
 // Extract the owner's CURRENT-TURN inbound message text. The hook event itself
 // never carries it on this host (see relay note above), so `relayed` — the
@@ -1802,6 +1870,32 @@ const FILE_READ_CMD = /^\s*(sudo\s+)?(cat|head|tail|sed|nl|more|less|strings|od|
  */
 const PROCESS_READ_ACTIONS: ReadonlySet<string> = new Set(["list", "poll", "log"]);
 
+/** UNRESOLVED IDENTITY != NON-OWNER (added 2026-11-03).
+ *
+ * On a channel lane a null sender does NOT mean "a stranger is asking". It means
+ * the platform id never reached the gate, so the caller was demoted to the
+ * strictest tier by DEFAULT, not by a decision about who they are. Those two
+ * states had identical deny text, and the text asserted the strongest possible
+ * claim -- "FIXED policy wall ... do NOT retry" -- which is provably false in
+ * this case: the very same owner in the very same lane runs exec normally once
+ * the id resolves again.
+ *
+ * Measured cost of collapsing them: this agent read that sentence, believed the
+ * wall was permanent policy, and reported a transient identity gap to the owner
+ * as a deliberate restriction. The misdiagnosis came from the MESSAGE, not from
+ * the plumbing. Telling the truth here widens no access -- the command stays
+ * blocked, byte for byte -- it only stops a recoverable fault being described
+ * as an intentional one. */
+export function unresolvedDenyReason(allowedTools?: string[]): string {
+  return "dinotrust could not resolve WHO is asking in this lane, so it fell back to the "
+    + "strictest tier. This is NOT a policy decision about you and NOT a statement that you "
+    + "lack access: the platform sender id did not reach the gate (group/topic lanes carry no "
+    + "senderId in before_tool_call, so identity comes from the inbound-message latch, which a "
+    + "gateway restart clears). If you ARE the owner, send one new message in this lane -- that "
+    + "re-latches your id and exec works again. Do NOT report this as a permanent restriction, "
+    + `and do NOT ask for the allowlist to be widened. Available meanwhile: ${laneAlternatives(allowedTools)}.`;
+}
+
 export function execDenyReason(cmd: string, scripts: string[], allowedTools?: string[]): string {
   const generic = "non-owner exec restricted to allowlisted tools";
   // WHY THE EXTRA SENTENCES (measured 2026-10-26): the bare generic reads as a
@@ -1888,6 +1982,7 @@ export function resolveSenderId(event: any, ctx: any): string | null {
     // Try every latch shape (full key, then base) and take the first that
     // actually carries a sender -- a hit with a null sender is not an identity.
     let m: InboundMsg | undefined;
+    hydrateLatchStore();
     for (const lk of latchKeysForSession(sk)) {
       const hit = lastInbound.get(lk);
       if (hit && hit.senderId != null && String(hit.senderId).length > 0) { m = hit; break; }
@@ -1909,7 +2004,7 @@ export function resolveSenderId(event: any, ctx: any): string | null {
           // 30-minute hard ceiling.
           if (isChannelLane(sk)) return String(m.senderId);
         } else if (age <= OWNER_MSG_TTL_MS) {
-          if (runId) m.runId = runId;   // bind to this turn, same as peekInbound
+          if (runId) { m.runId = runId; persistLatchStore(); }   // bind to this turn, same as peekInbound
           return String(m.senderId);
         }
       }
@@ -1963,6 +2058,7 @@ export default definePluginEntry({
     // OpenClaw passes plugins.entries[id] as pluginConfig ({ enabled, config, hooks });
     // unwrap .config like dinomem-recall-gate — flat merge without this leaves agentOwners/ownerIds empty.
     const c = cfg(api?.pluginConfig?.config ?? api?.pluginConfig ?? api?.config);
+    initLatchStore(c);   // see initLatchStore: without this the mirror is dead code
     audit(c, { evt: "register", enforce: c.enforce, ownerWarnOnly: c.ownerWarnOnly, agentFilter: c.agentFilter, hasPluginConfig: !!api?.pluginConfig });
     const priorDegraded = readDegradedMarker(c);
     if (priorDegraded) {
@@ -2065,6 +2161,11 @@ export default definePluginEntry({
         // lane). On a channel lane a missing id = lost metadata -> falls through
         // to the strictest tier, never owner. See isChannelLane doc above.
         const agentSelf = sender == null && !isChannelLane(sessionKey);
+        // See unresolvedDenyReason(): a null sender on a CHANNEL lane is lost
+        // identity, not an identified stranger. Verdict is unchanged (still the
+        // strictest tier); only the explanation and the audit tag differ, so a
+        // recoverable fault stops being reported as deliberate policy.
+        const identityUnresolved = sender == null && isChannelLane(sessionKey);
         // 5d: resolveLaneIdentity() owns owner/trusted resolution now, INCLUDING
         // the ledger replay. A real sender still wins outright; the ledger is
         // consulted only for the sender-less non-channel lanes (cron/subagent)
@@ -2377,20 +2478,26 @@ export default definePluginEntry({
             audit(c, { evt: "allow", rule: "R-nonowner-script", toolName, sessionKey, sender });
             return;
           }
-          const denyReason = execDenyReason(String((event?.params ?? {}).command ?? ""), c.nonOwnerAllowedScripts, c.nonOwnerAllowedTools);
-          audit(c, { evt: "block", rule: "R-nonowner-exec", toolName, sessionKey, sender, reason: denyReason, blocked: c.enforce });
+          const denyReason = identityUnresolved
+            ? unresolvedDenyReason(c.nonOwnerAllowedTools)
+            : execDenyReason(String((event?.params ?? {}).command ?? ""), c.nonOwnerAllowedScripts, c.nonOwnerAllowedTools);
+          audit(c, { evt: "block", rule: identityUnresolved ? "R-unresolved-exec" : "R-nonowner-exec", toolName, sessionKey, sender, identityUnresolved, reason: denyReason, blocked: c.enforce });
           if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: ${denyReason}` };
           return;
         }
         // 4. any other mutating tool -> block
         if (c.mutatingTools.includes(toolName)) {
-          audit(c, { evt: "block", rule: "R-nonowner-mutate", toolName, sessionKey, sender, blocked: c.enforce });
-          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner ${toolName} denied` };
+          audit(c, { evt: "block", rule: identityUnresolved ? "R-unresolved-mutate" : "R-nonowner-mutate", toolName, sessionKey, sender, identityUnresolved, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: identityUnresolved
+            ? `dinotrust-enforce: ${toolName} denied -- ${unresolvedDenyReason(c.nonOwnerAllowedTools)}`
+            : `dinotrust-enforce: non-owner ${toolName} denied` };
         }
         // 5. everything else (unknown tool) for non-owner -> block (default deny)
         else {
-          audit(c, { evt: "block", rule: "R-nonowner-default", toolName, sessionKey, sender, blocked: c.enforce });
-          if (c.enforce) return { block: true, blockReason: `dinotrust-enforce: non-owner tool ${toolName} not allowlisted` };
+          audit(c, { evt: "block", rule: identityUnresolved ? "R-unresolved-default" : "R-nonowner-default", toolName, sessionKey, sender, identityUnresolved, blocked: c.enforce });
+          if (c.enforce) return { block: true, blockReason: identityUnresolved
+            ? `dinotrust-enforce: tool ${toolName} denied -- ${unresolvedDenyReason(c.nonOwnerAllowedTools)}`
+            : `dinotrust-enforce: non-owner tool ${toolName} not allowlisted` };
         }
       } catch (err) {
         // Durable degraded marker + critical audit event so the degraded window

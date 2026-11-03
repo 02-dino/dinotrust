@@ -920,6 +920,32 @@ function laneAlternatives(allowedTools?: string[]): string {
 /** Plain file-READ shapes. Used only to redirect the caller to the `read` tool. */
 const FILE_READ_CMD = /^\s*(sudo\s+)?(cat|head|tail|sed|nl|more|less|strings|od|xxd)\b/;
 
+/** UNRESOLVED IDENTITY != NON-OWNER (added 2026-11-03).
+ *
+ * On a channel lane a null sender does NOT mean "a stranger is asking". It means
+ * the platform id never reached the gate, so the caller was demoted to the
+ * strictest tier by DEFAULT, not by a decision about who they are. Those two
+ * states shared identical deny text, and that text asserted the strongest
+ * possible claim -- "FIXED policy wall ... do NOT retry" -- which is provably
+ * false here: the same owner in the same lane runs exec normally once the id
+ * resolves again.
+ *
+ * Measured cost of collapsing them (live install, 2026-11-03): the agent read
+ * that sentence, believed the wall was permanent policy, and reported a
+ * transient identity gap to its owner as a deliberate restriction. The
+ * misdiagnosis came from the MESSAGE, not the plumbing. Telling the truth here
+ * widens no access -- the call stays blocked byte for byte -- it only stops a
+ * recoverable fault being described as an intentional one. */
+export function unresolvedDenyReason(allowedTools?: string[]): string {
+  return "dinotrust could not resolve WHO is asking in this lane, so it fell back to the "
+    + "strictest tier. This is NOT a policy decision about you and NOT a statement that you "
+    + "lack access: the platform sender id did not reach the gate (group/topic lanes carry no "
+    + "senderId in before_tool_call, so identity comes from the inbound-message latch, which a "
+    + "gateway restart clears). If you ARE the owner, send one new message in this lane -- that "
+    + "re-latches your id and exec works again. Do NOT report this as a permanent restriction, "
+    + `and do NOT ask for the allowlist to be widened. Available meanwhile: ${laneAlternatives(allowedTools)}.`;
+}
+
 export function execDenyReason(command: string | undefined, scripts: string[], allowedTools?: string[]): string {
   const generic = "non-owner exec restricted to allowlisted tools";
   // WHY THE EXTRA SENTENCES (measured 2026-10-26): the bare generic reads as a
@@ -1131,6 +1157,11 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
   // strictest tier, never owner. See isChannelLane doc above.
   const agentSelf = senderId == null && !isChannelLane(sessionKey);
   const isOwner = agentSelf || (senderId != null && owners.includes(senderId));
+  // See unresolvedDenyReason(): null sender on a CHANNEL lane is LOST identity,
+  // not an identified stranger. The verdict is unchanged (still strictest tier);
+  // only the explanation differs, so a recoverable fault stops being reported as
+  // deliberate policy.
+  const identityUnresolved = senderId == null && isChannelLane(sessionKey);
   const protectedHit = anyProtected(call, c.protectedGlobs);
 
   // ── OWNER / agent-operated-by-owner ──
@@ -1197,10 +1228,17 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
     };
   }
   if (call.toolName === "exec") {
-    return execRunsAllowedScript(call, c.nonOwnerAllowedScripts)
-      ? { action: "allow", reason: "non-owner allowlisted script" }
-      : { action: "block", reason: execDenyReason(call.command, c.nonOwnerAllowedScripts, c.nonOwnerAllowedTools) };
+    if (execRunsAllowedScript(call, c.nonOwnerAllowedScripts)) return { action: "allow", reason: "non-owner allowlisted script" };
+    return { action: "block", reason: identityUnresolved
+      ? unresolvedDenyReason(c.nonOwnerAllowedTools)
+      : execDenyReason(call.command, c.nonOwnerAllowedScripts, c.nonOwnerAllowedTools) };
   }
-  if (c.mutatingTools.includes(call.toolName)) return { action: "block", reason: `non-owner ${call.toolName} denied` };
-  return { action: "block", reason: `non-owner tool ${call.toolName} not allowlisted` };
+  if (c.mutatingTools.includes(call.toolName)) {
+    return { action: "block", reason: identityUnresolved
+      ? `${call.toolName} denied -- ${unresolvedDenyReason(c.nonOwnerAllowedTools)}`
+      : `non-owner ${call.toolName} denied` };
+  }
+  return { action: "block", reason: identityUnresolved
+    ? `tool ${call.toolName} denied -- ${unresolvedDenyReason(c.nonOwnerAllowedTools)}`
+    : `non-owner tool ${call.toolName} not allowlisted` };
 }
