@@ -37,6 +37,7 @@ import {
   ownerIntentMatches,
   pipedInterpreterSink,
   laneTierOverride,
+  initLatchStore,
   recordInbound,
   recordLaneTier,
   resolveLaneIdentity,
@@ -950,6 +951,50 @@ recordInbound(TOPIC, { text: "old", replyToId: null, senderId: ISS,
 iss("issue#1: latch past the 30-min ceiling does not resolve",
   resolveSenderId({ toolName: "exec", sessionKey: TOPIC, runId: "new-run" },
     { sessionKey: TOPIC, runId: "new-run" }) === null);
+
+// ── SHARED LATCH STORE: one file, many gateway processes ────────────────────
+// WHY THESE EXIST (measured 2026-11-04): the store path comes from
+// os.homedir(), and every gateway on a multi-agent box runs with the SAME
+// HOME, so all 14 agent gateways share ONE latch file. persistLatchStore()
+// serialized its own Map over that file, so each agent's write ERASED the
+// other 13 agents' rows -- identity could be lost with NO restart involved,
+// which is why the symptom outlived the restart-durability fix. 243 tests
+// passed over that bug because every one of them ran in a single process.
+//
+// The naive repair (hydrate-then-write) trades the clobber for something
+// worse: foreign rows get rewritten from THIS process's stale memory, which
+// resurrects a latch another agent already burned. So the contract under test
+// is ownership-scoped: foreign rows pass through from a FRESH disk read and
+// are never sourced from memory.
+const latchDir = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "dinotrust-latch-"));
+const latchCfg = { ...DEFAULTS, logFile: pathx.join(latchDir, "dinotrust-enforce.log") };
+const latchFile = pathx.join(latchDir, "dinotrust-enforce-inbound-latch.json");
+const FOREIGN = "agent:extractor:whatsapp:group:120363420572041876@g.us";
+const MINE = "agent:analyst:telegram:direct:1083618205";
+const readLatch = () => JSON.parse(fsx.readFileSync(latchFile, "utf8"));
+
+// Another gateway's row is already on disk before this process writes anything.
+fsx.writeFileSync(latchFile, JSON.stringify({
+  [FOREIGN]: { text: "theirs-v1", replyToId: null, senderId: "+6285285030950", tsMs: Date.now(), runId: null },
+}));
+initLatchStore(latchCfg);
+recordInbound(MINE, { text: "mine", replyToId: null, senderId: ISS, tsMs: Date.now(), runId: null });
+
+let after = readLatch();
+iss("shared latch: my row is written", after[MINE]?.senderId === ISS);
+iss("shared latch: a sibling agent's row SURVIVES my write (the clobber bug)",
+  after[FOREIGN]?.senderId === "+6285285030950");
+
+// The sibling updates its own row after we already hydrated the old one. Our
+// next write must not revert it from our stale copy.
+const fresh = readLatch();
+fresh[FOREIGN] = { text: "theirs-v2", replyToId: null, senderId: "+6285285030950", tsMs: Date.now(), runId: null };
+fsx.writeFileSync(latchFile, JSON.stringify(fresh));
+recordInbound(MINE, { text: "mine-2", replyToId: null, senderId: ISS, tsMs: Date.now(), runId: null });
+after = readLatch();
+iss("shared latch: sibling's NEWER row is not reverted from my stale memory",
+  after[FOREIGN]?.text === "theirs-v2");
+iss("shared latch: my own row still updates", after[MINE]?.text === "mine-2");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 // ── humanizeReason: raw detector reason -> plain-language sentence ──────────────

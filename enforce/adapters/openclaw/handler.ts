@@ -1407,7 +1407,7 @@ let latchStoreFile: string | null = null;   // set by initLatchStore() in regist
  *  ownership, same lifecycle). MUST be called in register(): until it runs,
  *  latchStoreFile is null and BOTH persist/hydrate are no-ops -- i.e. the whole
  *  durability fix would be silently dead code. */
-function initLatchStore(c: Cfg) {
+export function initLatchStore(c: Cfg) {
   try {
     latchStoreFile = siblingLedgerPath(c, "inbound-latch").replace(/\.jsonl$/i, ".json");
     hydrateLatchStore();   // recover identities that outlived the restart
@@ -1415,11 +1415,41 @@ function initLatchStore(c: Cfg) {
 }
 let latchLoadedMtimeMs = -1;                // re-read only when the file moves
 
+/** Latch keys THIS process has authored or retired (recorded, adopted, burned,
+ *  expired). Ownership is what makes the merge below safe in both directions.
+ *
+ *  WHY IT EXISTS (measured 2026-11-04): the store path is derived from
+ *  os.homedir(), and every gateway on this box runs with HOME=/root, so ONE
+ *  file is shared by all 14 agent gateways -- there is no per-agent copy. The
+ *  old persist serialized this process's whole Map over that file, so each
+ *  agent's write ERASED the other 13 agents' rows. Measured directly: the
+ *  analyst row written 08:51:55 was gone by 09:09, replaced by extractor's.
+ *  A restart was never required to lose identity -- a sibling agent speaking
+ *  was enough, which is why the symptom outlived the restart-durability fix.
+ *
+ *  The naive repair (hydrate-then-write) fixes the clobber and INTRODUCES a
+ *  worse bug: this process would rewrite foreign rows from its own stale
+ *  memory, resurrecting a latch another agent had already BURNED. Single-use
+ *  would silently stop being single-use. So the merge is ownership-scoped:
+ *  foreign rows pass through from a FRESH disk read and are never sourced from
+ *  memory, and an owned key that is no longer in the Map is deleted from disk
+ *  -- that is how a burn/expiry still propagates. */
+const ownedLatchKeys = new Set<string>();
+
 function persistLatchStore() {
   if (!latchStoreFile) return;
   try {
-    const rows: Record<string, InboundMsg> = {};
-    for (const [k, v] of lastInbound) rows[k] = v;
+    // Re-read first: everything outside our namespace is whatever disk says NOW,
+    // never what this process happened to cache earlier.
+    let rows: Record<string, InboundMsg> = {};
+    try {
+      const raw = JSON.parse(fs.readFileSync(latchStoreFile, "utf8"));
+      if (raw && typeof raw === "object") rows = raw as Record<string, InboundMsg>;
+    } catch { /* absent/corrupt -> start from empty, same as before */ }
+    // Our keys are authoritative: drop them all, then re-add only those still
+    // live in memory. A consumed/expired key stays dropped => the burn lands.
+    for (const k of ownedLatchKeys) delete rows[k];
+    for (const [k, v] of lastInbound) if (ownedLatchKeys.has(k)) rows[k] = v;
     fs.mkdirSync(path.dirname(latchStoreFile), { recursive: true });
     fs.writeFileSync(latchStoreFile, JSON.stringify(rows));
     latchLoadedMtimeMs = fs.statSync(latchStoreFile).mtimeMs;
@@ -1487,7 +1517,7 @@ function latchKeysForSession(sessionKey: string): string[] {
 export function recordInbound(sessionKey: string, m: InboundMsg) {
   if (!sessionKey) return;
   pruneInbound(m.tsMs);
-  for (const key of latchKeysForSession(sessionKey)) lastInbound.set(key, m);
+  for (const key of latchKeysForSession(sessionKey)) { lastInbound.set(key, m); ownedLatchKeys.add(key); }
   persistLatchStore();   // survive a restart; same envelope, see note above
 }
 
@@ -1509,17 +1539,19 @@ function peekInbound(sessionKey: string, sender: string | null, runId: string | 
   const m = lastInbound.get(sessionKey);
   if (!m) return null;
   if (sender != null && m.senderId != null && m.senderId !== sender) return null;
-  if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { lastInbound.delete(sessionKey); return null; }
+  if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return null; }
   // Already claimed by a turn -> only THAT turn may read it.
   if (m.runId != null) return m.runId === runId ? m : null;
   // Unclaimed -> the short TTL gates adoption.
-  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { lastInbound.delete(sessionKey); return null; }
-  if (runId) { m.runId = runId; persistLatchStore(); } // adopt: bind to this turn for its full duration
+  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return null; }
+  if (runId) { m.runId = runId; ownedLatchKeys.add(sessionKey); persistLatchStore(); } // adopt: bind to this turn for its full duration
   return m;
 }
 
 // Burn the latch the moment it grants approval (single-use).
-function consumeInbound(sessionKey: string) { lastInbound.delete(sessionKey); persistLatchStore(); }
+// Claim the key BEFORE deleting: persist only erases rows this process owns, so
+// an unclaimed burn would leave the row on disk and single-use would be a lie.
+function consumeInbound(sessionKey: string) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); persistLatchStore(); }
 
 // Extract the owner's CURRENT-TURN inbound message text. The hook event itself
 // never carries it on this host (see relay note above), so `relayed` — the
@@ -1982,10 +2014,13 @@ export function resolveSenderId(event: any, ctx: any): string | null {
     // Try every latch shape (full key, then base) and take the first that
     // actually carries a sender -- a hit with a null sender is not an identity.
     let m: InboundMsg | undefined;
+    // Remember WHICH key matched: the adoption stamp below has to claim that
+    // exact key, and the loop variable is not in scope down there.
+    let mKey: string | null = null;
     hydrateLatchStore();
     for (const lk of latchKeysForSession(sk)) {
       const hit = lastInbound.get(lk);
-      if (hit && hit.senderId != null && String(hit.senderId).length > 0) { m = hit; break; }
+      if (hit && hit.senderId != null && String(hit.senderId).length > 0) { m = hit; mKey = lk; break; }
     }
     if (m && m.senderId != null && String(m.senderId).length > 0) {
       const age = Date.now() - m.tsMs;
@@ -2004,7 +2039,7 @@ export function resolveSenderId(event: any, ctx: any): string | null {
           // 30-minute hard ceiling.
           if (isChannelLane(sk)) return String(m.senderId);
         } else if (age <= OWNER_MSG_TTL_MS) {
-          if (runId) { m.runId = runId; persistLatchStore(); }   // bind to this turn, same as peekInbound
+          if (runId) { m.runId = runId; if (mKey) ownedLatchKeys.add(mKey); persistLatchStore(); }   // bind to this turn, same as peekInbound
           return String(m.senderId);
         }
       }
