@@ -1436,23 +1436,77 @@ let latchLoadedMtimeMs = -1;                // re-read only when the file moves
  *  -- that is how a burn/expiry still propagates. */
 const ownedLatchKeys = new Set<string>();
 
+/** Serialize the read-modify-write in persistLatchStore ACROSS PROCESSES.
+ *
+ *  WHY (measured 2026-11-06, 14 gateways on one box): the store path derives
+ *  from os.homedir() and every gateway runs with the same HOME, so ONE file is
+ *  shared fleet-wide. The ownership-scoped merge fixed agents ERASING each
+ *  other, but it is still read-modify-write: two concurrent persists both read
+ *  the same snapshot, and whoever writes last reverts the other's freshly
+ *  recorded row. That is the same symptom the clobber fix was meant to end --
+ *  an identity vanishing with no restart involved -- just narrower.
+ *
+ *  O_EXCL lockfile, not flock(2): no native dependency, and a holder that died
+ *  mid-write is recovered by the staleness break instead of wedging message
+ *  intake forever. FAIL-OPEN by contract: if the lock cannot be taken inside
+ *  the budget we run anyway, because a missed latch is recoverable and a
+ *  blocked message intake is not. */
+const LATCH_LOCK_STALE_MS = 5_000;   // a holder older than this is assumed dead
+// 200ms, deliberately small. Atomics.wait blocks the EVENT LOOP (it is legal on
+// Node's main thread, unlike a browser), so this budget is the worst case we are
+// willing to freeze message intake for. Affordable because the two failure modes
+// are not equal: tmp+rename below already kills the dangerous one (a torn read
+// erasing every foreign row), leaving the lock to cover a lost update, which the
+// sender's next message repairs on its own.
+const LATCH_LOCK_WAIT_MS = 200;
+function withLatchLock<T>(file: string, fn: () => T): T {
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LATCH_LOCK_WAIT_MS;
+  const nap = new Int32Array(new SharedArrayBuffer(4));   // sync sleep, no spin
+  let held = false;
+  while (Date.now() < deadline) {
+    try { fs.closeSync(fs.openSync(lock, "wx")); held = true; break; } catch { /* taken */ }
+    try {
+      if (Date.now() - fs.statSync(lock).mtimeMs > LATCH_LOCK_STALE_MS) fs.unlinkSync(lock);
+    } catch { /* vanished between stat and unlink -> next attempt takes it */ }
+    Atomics.wait(nap, 0, 0, 5);
+  }
+  try { return fn(); }
+  finally { if (held) { try { fs.unlinkSync(lock); } catch { /* best-effort */ } } }
+}
+
 function persistLatchStore() {
   if (!latchStoreFile) return;
+  const file = latchStoreFile;
   try {
-    // Re-read first: everything outside our namespace is whatever disk says NOW,
-    // never what this process happened to cache earlier.
-    let rows: Record<string, InboundMsg> = {};
-    try {
-      const raw = JSON.parse(fs.readFileSync(latchStoreFile, "utf8"));
-      if (raw && typeof raw === "object") rows = raw as Record<string, InboundMsg>;
-    } catch { /* absent/corrupt -> start from empty, same as before */ }
-    // Our keys are authoritative: drop them all, then re-add only those still
-    // live in memory. A consumed/expired key stays dropped => the burn lands.
-    for (const k of ownedLatchKeys) delete rows[k];
-    for (const [k, v] of lastInbound) if (ownedLatchKeys.has(k)) rows[k] = v;
-    fs.mkdirSync(path.dirname(latchStoreFile), { recursive: true });
-    fs.writeFileSync(latchStoreFile, JSON.stringify(rows));
-    latchLoadedMtimeMs = fs.statSync(latchStoreFile).mtimeMs;
+    withLatchLock(file, () => {
+      // Re-read first: everything outside our namespace is whatever disk says NOW,
+      // never what this process happened to cache earlier.
+      let rows: Record<string, InboundMsg> = {};
+      try {
+        const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (raw && typeof raw === "object") rows = raw as Record<string, InboundMsg>;
+      } catch { /* absent/corrupt -> start from empty, same as before */ }
+      // Our keys are authoritative: drop them all, then re-add only those still
+      // live in memory. A consumed/expired key stays dropped => the burn lands.
+      for (const k of ownedLatchKeys) delete rows[k];
+      for (const [k, v] of lastInbound) if (ownedLatchKeys.has(k)) rows[k] = v;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // tmp+rename: rename(2) is atomic within a directory, so a concurrent
+      // hydrate never observes a partial file. writeFileSync TRUNCATES first,
+      // and a reader landing in that window parses nothing, keeps its stale
+      // mtime, and reads every foreign row as gone -- the lock above cannot
+      // help because readers deliberately do not take it. Tmp sits in the SAME
+      // dir: a cross-filesystem rename degrades to copy and loses atomicity.
+      const tmp = `${file}.${process.pid}.tmp`;
+      try {
+        fs.writeFileSync(tmp, JSON.stringify(rows));
+        fs.renameSync(tmp, file);
+      } finally {
+        try { fs.unlinkSync(tmp); } catch { /* renamed away on the success path */ }
+      }
+      latchLoadedMtimeMs = fs.statSync(file).mtimeMs;
+    });
   } catch { /* best-effort: a write failure must never block message intake */ }
 }
 
