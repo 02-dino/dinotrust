@@ -1587,17 +1587,45 @@ export function recordInbound(sessionKey: string, m: InboundMsg) {
 // 06:17-06:18 UTC, every one of them relayed:false.
 // This is STRICTER at the other end: a different turn can never reuse an adopted
 // latch, even one second old -- previously any turn within 2 min could.
-function peekInbound(sessionKey: string, sender: string | null, runId: string | null): InboundMsg | null {
-  if (!sessionKey) return null;
+// ── RUN TRIGGER (2026-11-09) ─────────────────────────────────────────────────
+// WHY: a runtime-event run ("Continue the OpenClaw runtime event.", trigger
+// "memory"/heartbeat/cron) in the SAME lane could adopt the owner's fresh
+// "yes delete" row before the owner's own run reached the gate, leaving the
+// owner's run with run_mismatch -> fail-closed block. Measured 2026-11-09
+// 09:00:34-09:02:17 WIB, topic 2031: memory run 2fd37139 overlapped user run
+// 94e584d4. Only a run the human started may adopt a human's message.
+// before_tool_call ctx carries no trigger, so learn it from before_prompt_build
+// (its ctx carries `trigger`) and key it by runId. Unknown trigger (hook absent
+// / older host) => old behaviour, never a widening.
+const runTriggers = new Map<string, string>();
+const RUN_TRIGGER_MAX = 512;
+export function noteRunTrigger(runId: string | null, trigger: string | null) {
+  if (!runId || !trigger) return;
+  runTriggers.set(runId, trigger);
+  if (runTriggers.size > RUN_TRIGGER_MAX) runTriggers.delete(runTriggers.keys().next().value as string);
+}
+/** false only when we KNOW the run was not started by a human message. */
+export function runMayAdopt(runId: string | null): boolean {
+  const t = runId ? runTriggers.get(runId) : undefined;
+  return t == null || t === "user" || t === "manual";
+}
+/** Why peekInbound declined -- audit-only, so one log line names the failed leg. */
+export type PeekDiag = { reason?: string; ownerRunId?: string | null; runTrigger?: string | null };
+export function peekInbound(sessionKey: string, sender: string | null, runId: string | null, diag?: PeekDiag): InboundMsg | null {
+  const miss = (reason: string, m?: InboundMsg) => { if (diag) { diag.reason = reason; diag.ownerRunId = m?.runId ?? null; } return null; };
+  if (diag) diag.runTrigger = runId ? runTriggers.get(runId) ?? null : null;
+  if (!sessionKey) return miss("no_session");
   hydrateLatchStore();
   const m = lastInbound.get(sessionKey);
-  if (!m) return null;
-  if (sender != null && m.senderId != null && m.senderId !== sender) return null;
-  if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return null; }
+  if (!m) return miss("no_row");
+  if (sender != null && m.senderId != null && m.senderId !== sender) return miss("sender_mismatch", m);
+  if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return miss("expired_ceiling", m); }
   // Already claimed by a turn -> only THAT turn may read it.
-  if (m.runId != null) return m.runId === runId ? m : null;
+  if (m.runId != null) return m.runId === runId ? m : miss("run_mismatch", m);
   // Unclaimed -> the short TTL gates adoption.
-  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return null; }
+  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return miss("expired_ttl", m); }
+  // A runtime-event run must not consume the human's row (see RUN TRIGGER).
+  if (!runMayAdopt(runId)) return miss("non_user_run", m);
   if (runId) { m.runId = runId; ownedLatchKeys.add(sessionKey); persistLatchStore(); } // adopt: bind to this turn for its full duration
   return m;
 }
@@ -2093,7 +2121,9 @@ export function resolveSenderId(event: any, ctx: any): string | null {
           // 30-minute hard ceiling.
           if (isChannelLane(sk)) return String(m.senderId);
         } else if (age <= OWNER_MSG_TTL_MS) {
-          if (runId) { m.runId = runId; if (mKey) ownedLatchKeys.add(mKey); persistLatchStore(); }   // bind to this turn, same as peekInbound
+          // Identity is still returned to a runtime-event run, but it must not
+          // STAMP the row: that would steal the owner's approval (RUN TRIGGER).
+          if (runId && runMayAdopt(runId)) { m.runId = runId; if (mKey) ownedLatchKeys.add(mKey); persistLatchStore(); }   // bind to this turn, same as peekInbound
           return String(m.senderId);
         }
       }
@@ -2159,6 +2189,10 @@ export default definePluginEntry({
     // (see INBOUND MESSAGE RELAY note), so without this subscription BOTH owner
     // approval paths are dead code. Wrapped in try/catch: a throw here must never
     // break message intake — worst case the approval paths stay unavailable.
+    // Observe-only: returns nothing, so it never mutates the prompt.
+    api.on("before_prompt_build", async (event: any, ctx: any) => {
+      try { noteRunTrigger(String(ctx?.runId ?? event?.runId ?? "") || null, String(ctx?.trigger ?? "") || null); } catch { /* never break a run */ }
+    });
     api.on("message_received", async (event: any, ctx: any) => {
       try {
         const sessionKey = String(event?.sessionKey ?? ctx?.sessionKey ?? "");
@@ -2308,7 +2342,8 @@ export default definePluginEntry({
               // marker path must demand a FULL-PATH mention (basename is too
               // loose for text the owner may not have written about THIS command).
               const runId = String(ctx?.runId ?? event?.runId ?? "") || null;
-              const relayed = peekInbound(sessionKey, sender, runId);
+              const peekDiag: PeekDiag = {};
+              const relayed = peekInbound(sessionKey, sender, runId, peekDiag);
               const ownerText = currentTurnOwnerText(event, ctx, relayed);
               const relayedOnly = !!relayed && ownerText === relayed.text;
               const tier = escSeverity(esc);
@@ -2376,7 +2411,7 @@ export default definePluginEntry({
               // still shows relayed:false we need to know WHICH leg failed --
               // no latch at all (relay never fired) vs a latch this turn couldn't
               // claim (runId missing -> turn-scoping degraded to wall-clock).
-              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, relayed: relayedOnly, hasRunId: runId != null, latchAgeMs: relayed ? Date.now() - relayed.tsMs : null, targets: targets.slice(0, 4) });
+              audit(c, { evt: "owner-critical-block", rule: "R-escalation-failclosed", toolName, sessionKey, sender: sender ?? "self", hit: esc, tier, intentOk, markerPresent, unattendedAgentSelf, isReply, ownerTextLen: ownerText.length, relayed: relayedOnly, hasRunId: runId != null, latchAgeMs: relayed ? Date.now() - relayed.tsMs : null, peekMiss: peekDiag.reason ?? null, latchOwnerRun: peekDiag.ownerRunId ?? null, runId, runTrigger: peekDiag.runTrigger ?? null, targets: targets.slice(0, 4) });
               // Record the pending intent (with targets+tier) so the owner's next
               // signed affirmative reply can resolve it via openPendingForTarget.
               recordPendingIntent(c, { fp, command: cmd, toolName, sessionKey, sender: sender ?? "self", hit: esc, targets, severity: tier });
