@@ -1531,12 +1531,19 @@ function hydrateLatchStore() {
 }
 
 // Drop expired rows (and trim oldest if the map somehow grows unbounded).
-// An ADOPTED row is exempt from the short TTL -- its lifetime is the turn, not
-// the clock -- but still capped by OWNER_MSG_ADOPTED_MAX_MS.
+// ONE lifetime for every row, adopted or not: OWNER_MSG_ADOPTED_MAX_MS.
+// IDENTITY vs APPROVAL (2026-11-11): the row carries two facts with different
+// shelf lives. "This text approves a command" goes stale fast -> peekInbound
+// still refuses to ADOPT past OWNER_MSG_TTL_MS. "This sender is who is talking
+// in this lane" does not go stale until the next inbound overwrites it. Pruning
+// unclaimed rows at the 120s TTL fused the two: a turn that merely STARTED
+// >2 min after the message (queued behind a runtime-event run, long thinking)
+// found no row and the owner was demoted to nonowner. Measured 2026-11-11:
+// owner message 13:00:55Z, first tool call 13:03:49Z (174s), 12x
+// R-unresolved-exec, no restart anywhere -- the row had simply been pruned.
 function pruneInbound(now: number) {
   for (const [k, v] of lastInbound) {
-    const limit = v.runId != null ? OWNER_MSG_ADOPTED_MAX_MS : OWNER_MSG_TTL_MS;
-    if (now - v.tsMs > limit) lastInbound.delete(k);
+    if (now - v.tsMs > OWNER_MSG_ADOPTED_MAX_MS) lastInbound.delete(k);
   }
   if (lastInbound.size > OWNER_MSG_MAX_SESSIONS) {
     const rows = [...lastInbound.entries()].sort((a, b) => a[1].tsMs - b[1].tsMs);
@@ -1622,8 +1629,9 @@ export function peekInbound(sessionKey: string, sender: string | null, runId: st
   if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return miss("expired_ceiling", m); }
   // Already claimed by a turn -> only THAT turn may read it.
   if (m.runId != null) return m.runId === runId ? m : miss("run_mismatch", m);
-  // Unclaimed -> the short TTL gates adoption.
-  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return miss("expired_ttl", m); }
+  // Unclaimed -> the short TTL gates adoption. Decline WITHOUT deleting: the
+  // row still vouches for identity (see pruneInbound); only approval is stale.
+  if (Date.now() - m.tsMs > OWNER_MSG_TTL_MS) return miss("expired_ttl", m);
   // A runtime-event run must not consume the human's row (see RUN TRIGGER).
   if (!runMayAdopt(runId)) return miss("non_user_run", m);
   if (runId) { m.runId = runId; ownedLatchKeys.add(sessionKey); persistLatchStore(); } // adopt: bind to this turn for its full duration
@@ -2004,8 +2012,8 @@ export function unresolvedDenyReason(allowedTools?: string[]): string {
   return "dinotrust could not resolve WHO is asking in this lane, so it fell back to the "
     + "strictest tier. This is NOT a policy decision about you and NOT a statement that you "
     + "lack access: the platform sender id did not reach the gate (group/topic lanes carry no "
-    + "senderId in before_tool_call, so identity comes from the inbound-message latch, which a "
-    + "gateway restart clears). If you ARE the owner, send one new message in this lane -- that "
+    + "senderId in before_tool_call, so identity comes from the inbound-message latch, and this "
+    + "lane's latch is absent or older than its 30-minute ceiling). If you ARE the owner, send one new message in this lane -- that "
     + "re-latches your id and exec works again. Do NOT report this as a permanent restriction, "
     + `and do NOT ask for the allowlist to be widened. Available meanwhile: ${laneAlternatives(allowedTools)}.`;
 }
@@ -2124,6 +2132,14 @@ export function resolveSenderId(event: any, ctx: any): string | null {
           // Identity is still returned to a runtime-event run, but it must not
           // STAMP the row: that would steal the owner's approval (RUN TRIGGER).
           if (runId && runMayAdopt(runId)) { m.runId = runId; if (mKey) ownedLatchKeys.add(mKey); persistLatchStore(); }   // bind to this turn, same as peekInbound
+          return String(m.senderId);
+        } else if (isChannelLane(sk)) {
+          // Unclaimed and past the APPROVAL TTL but inside the ceiling: the
+          // sender is still who is talking in this lane. Return identity but
+          // do NOT stamp -- stamping would let peekInbound hand a >120s-old
+          // "yes delete" to this run, which is exactly the widening the TTL
+          // exists to prevent. Same isChannelLane guard as the adopted branch
+          // above, for the same reason (cron/subagent lanes never inherit).
           return String(m.senderId);
         }
       }
