@@ -10,6 +10,12 @@
         "default": "",
         "description": "Only enforce on sessions whose sessionKey includes this substring. Empty string = all agents."
       },
+      "waIdentityAliases": {
+        "type": "object",
+        "additionalProperties": { "type": "string" },
+        "default": {},
+        "description": "WhatsApp only: map an opaque sender id (LID, e.g. '123456789@lid') to the owner's E.164 number ('+628...'). Needed when WhatsApp sends a LID instead of the phone number; without it the owner is treated as non-owner on that message. senderE164 is always preferred when present. '+628..' and '628..' already match without an alias."
+      },
       "ownerIds": {
         "type": "array",
         "items": { "type": "string" },

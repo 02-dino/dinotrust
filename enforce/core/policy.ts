@@ -1029,7 +1029,7 @@ export function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
  * match mirrors pickAgentOwners so "agent:ads" scopes to that agent lane. */
 function findTrusted(senderId: string, c: PolicyConfig, sessionKey: string): TrustedEntry | null {
   for (const t of c.trustedIds) {
-    if (t.id !== senderId) continue;
+    if (t.id !== senderId && !ownerIdMatches(senderId, [t.id])) continue;
     if (t.scopeAgents && t.scopeAgents.length > 0) {
       const inAgent = t.scopeAgents.some((k) => k && sessionKey.includes(k));
       if (!inAgent) continue; // trusted, but not in one of its scoped agents -> fall through to non-owner
@@ -1146,6 +1146,18 @@ export function isChannelLane(sessionKey: string): boolean {
   return parts.length >= 3 && parts[0] === "agent" && CHANNEL_LANES.has(String(parts[2]).toLowerCase());
 }
 
+/** WhatsApp sends the same number as "+628…", "628…" or "@628…" depending on
+ * the event path. Exact string compare demoted a configured owner to non-owner
+ * whenever the form differed (konsultan WA group, 2026-11-20). Strip a leading
+ * "+"/"@" on both sides before comparing; nothing else is normalised, so ids
+ * that differ in substance still never match. Mirrors handler.ts. */
+export function ownerIdMatches(sender: string, owners: string[]): boolean {
+  const norm = (s: string) => String(s || "").trim().replace(/^\+/, "").replace(/^@/, "");
+  const ns = norm(sender);
+  if (!ns || !Array.isArray(owners)) return false;
+  return owners.some((o) => o === sender || norm(o) === ns);
+}
+
 export function decide(call: ToolCall, senderId: string | null, config: PolicyConfig, sessionKey: string = ""): Verdict {
   const c = config;
   // Multi-agent owner scoping: resolve the effective owner list for this
@@ -1156,7 +1168,7 @@ export function decide(call: ToolCall, senderId: string | null, config: PolicyCo
   // On a channel lane a missing id = lost metadata -> falls through to the
   // strictest tier, never owner. See isChannelLane doc above.
   const agentSelf = senderId == null && !isChannelLane(sessionKey);
-  const isOwner = agentSelf || (senderId != null && owners.includes(senderId));
+  const isOwner = agentSelf || (senderId != null && ownerIdMatches(senderId, owners));
   // See unresolvedDenyReason(): null sender on a CHANNEL lane is LOST identity,
   // not an identified stranger. The verdict is unchanged (still strictest tier);
   // only the explanation differs, so a recoverable fault stops being reported as

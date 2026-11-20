@@ -332,6 +332,16 @@ The ruleset matches: *sender is owner IFF (a bare owner_id equals the sender_id)
 
 **Why this matters:** if you build the agent through one channel (say Telegram) and later connect it to a customer-facing channel (a WhatsApp VIP group), a Telegram-scoped owner ID keeps full owner control on Telegram while making you — and everyone — non-owner on WhatsApp. Without scoping you'd rely on the two platforms' ID formats never colliding, which is luck, not policy.
 
+**WhatsApp number forms + LID.** WhatsApp can hand the same person over as `+628…`, `628…` or `@628…`, and on some event paths as an opaque LID (`123456789@lid`) instead of the phone number. dinotrust treats the `+`/`@`/bare forms as the same id (owner and trusted tier), prefers `senderE164` when the platform provides it, and pins a verified WhatsApp owner for the rest of that bot reply so a long multi-tool turn doesn't lose the identity half-way. A LID cannot be turned into a number by dinotrust; if your WhatsApp owner only ever arrives as a LID, map it once in the enforce config:
+
+```json
+"plugins": { "entries": { "dinotrust-enforce": { "config": {
+  "waIdentityAliases": { "123456789@lid": "+628123456789" }
+} } } }
+```
+
+Without an alias a LID-only message is treated as non-owner (fail-closed). The pin only ever latches a sender that already matches that agent's owner list, so a non-owner in the same group never inherits it.
+
 > **⚠️ Each owner is a full-access account.** More owners means more accounts that, if compromised, grant the agent's full owner privileges. Add only IDs you trust at the same level as your own. There is no partial-owner tier — owner is all-or-nothing (use a profile preset if you need scoped non-owner access instead).
 
 **Adding or removing an owner after install**

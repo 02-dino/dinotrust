@@ -398,6 +398,24 @@ function tn(name, c, sender, expect) {
 }
 tn("exec-result: no allowlisted scripts -> process poll blocked", call("process", { action: "poll" }), STRANGER, "block");
 
+// WhatsApp number forms (2026-11-20): "+628.." configured, "628.."/"@628.." arrives.
+const CFG_WA = normalizeConfig({ ownerIds: ["+6285700000001"], trustedIds: [{ id: "+6285700000009", tools: ["exec"] }] });
+function twa(name, sender, expectOwner) {
+  const v = decide(call("write", { path: "/tmp/x" }), sender, CFG_WA, "agent:konsultan:whatsapp:group:1@g.us");
+  const ok = (v.action === "allow") === expectOwner;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+twa("wa: owner as 628.. (no +) is owner", "6285700000001", true);
+twa("wa: owner as @628.. is owner", "@6285700000001", true);
+twa("wa: different number is NOT owner", "6285700000002", false);
+{
+  const v = decide(call("exec", { command: "ls" }), "6285700000009", CFG_WA, "agent:konsultan:whatsapp:group:1@g.us");
+  const ok = /^trusted: \+6285700000009/.test(String(v.reason));
+  console.log(`${ok ? "PASS" : "FAIL"}  wa: trusted +628.. matched when sent as 628..  -> ${v.action} (${v.reason})`);
+  ok ? pass++ : fail++;
+}
+
 // back-compat: empty trustedIds -> byte-identical to pre-trusted-tier behavior
 const v = decide(call("read"), "555555", CFG);
 const backOk = v.action === "allow" && v.reason === "non-owner allowed tool";

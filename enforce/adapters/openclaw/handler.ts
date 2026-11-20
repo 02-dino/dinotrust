@@ -57,6 +57,8 @@ type Cfg = {
   // that agent's owner id list. Present = resolver scopes owners per agent;
   // absent/empty = identical to flat ownerIds (single-agent back-compat).
   agentOwners?: Record<string, string[]>;
+  /** FIX-WA-OWNER-LATCH-2026-11-20: map WA LID / opaque senderId -> E.164 owner id. */
+  waIdentityAliases?: Record<string, string>;
   /**
    * Agent-key -> that agent's workspace dir, e.g.
    * { "agent:editor": "/root/.openclaw/workspace-editor" }. Same substring
@@ -177,6 +179,7 @@ export const DEFAULTS: Cfg = {
   agentFilter: "",
   ownerIds: [],
   agentOwners: {},
+  waIdentityAliases: {},
   agentWorkspaces: {},
   // English + Indonesian. Installs in other languages extend these two lists
   // via config rather than waiting for a release (see the Cfg doc above).
@@ -272,6 +275,7 @@ function cfg(raw: any): Cfg {
     if (!Array.isArray((c as any)[k])) (c as any)[k] = (DEFAULTS as any)[k];
   }
   if (c.agentOwners == null || typeof c.agentOwners !== "object" || Array.isArray(c.agentOwners)) c.agentOwners = {};
+  if (c.waIdentityAliases == null || typeof c.waIdentityAliases !== "object" || Array.isArray(c.waIdentityAliases)) c.waIdentityAliases = {};
   if (c.agentWorkspaces == null || typeof c.agentWorkspaces !== "object" || Array.isArray(c.agentWorkspaces)) c.agentWorkspaces = {};
   for (const k of ["approvalIntentVerbs", "approvalNegations"] as const) {
     const v = (c as any)[k];
@@ -300,6 +304,76 @@ export function pickAgentOwners(sessionKey: string, c: Cfg): string[] {
     }
   }
   return c.ownerIds;
+}
+
+/** FIX-KONSULTAN-WA-OWNER-MATCH (2026-11-20): WhatsApp may send +628… or 628… or @lid forms. */
+export function ownerIdMatches(sender: string, owners: string[]): boolean {
+  const norm = (s: string) => String(s || "").trim().replace(/^\+/, "").replace(/^@/, "");
+  const ns = norm(sender);
+  if (!ns || !Array.isArray(owners)) return false;
+  return owners.some((o) => o === sender || norm(o) === ns);
+}
+
+/** FIX-WA-OWNER-LATCH-2026-11-20: prefer E.164; map LID via waIdentityAliases. */
+export function canonicalizeSenderId(id: string | null | undefined, c: Cfg): string | null {
+  if (id == null) return null;
+  const s = String(id).trim();
+  if (!s) return null;
+  const map = c.waIdentityAliases ?? {};
+  if (map[s]) return String(map[s]).trim();
+  const low = s.toLowerCase();
+  if (map[low]) return String(map[low]).trim();
+  return s;
+}
+
+export function canonicalSenderFromEvent(event: any, c: Cfg): string | null {
+  const md = event?.metadata && typeof event.metadata === "object" ? event.metadata : null;
+  for (const v of [event?.senderE164, md?.senderE164]) {
+    if (v != null && String(v).trim()) return canonicalizeSenderId(String(v).trim(), c);
+  }
+  for (const v of [event?.senderId, event?.from, md?.senderId]) {
+    if (v != null && String(v).trim()) return canonicalizeSenderId(String(v).trim(), c);
+  }
+  return null;
+}
+
+export function sendersEquivalent(a: string | null, b: string | null, c: Cfg, sessionKey: string): boolean {
+  if (a == null || b == null) return false;
+  if (a === b) return true;
+  const ca = canonicalizeSenderId(a, c);
+  const cb = canonicalizeSenderId(b, c);
+  if (ca && cb && ca === cb) return true;
+  const owners = pickAgentOwners(sessionKey, c);
+  if (ownerIdMatches(a, owners) && ownerIdMatches(b, owners)) return true;
+  return false;
+}
+
+type WaOwnerPin = { sender: string; tsMs: number };
+const waOwnerPin = new Map<string, WaOwnerPin>();
+
+function waPinKey(sessionKey: string): string {
+  const keys = latchKeysForSession(sessionKey);
+  return keys.length > 1 ? keys[keys.length - 1] : (keys[0] || sessionKey);
+}
+
+export function noteWaOwnerPin(sessionKey: string, sender: string | null, c: Cfg) {
+  if (!sessionKey || !sender) return;
+  const parts = String(sessionKey).split(":");
+  if (parts.length < 3 || String(parts[2]).toLowerCase() !== "whatsapp") return;
+  if (!isChannelLane(sessionKey)) return;
+  if (!ownerIdMatches(sender, pickAgentOwners(sessionKey, c))) return;
+  waOwnerPin.set(waPinKey(sessionKey), { sender, tsMs: Date.now() });
+}
+
+export function readWaOwnerPin(sessionKey: string): string | null {
+  if (!sessionKey) return null;
+  const pin = waOwnerPin.get(waPinKey(sessionKey));
+  if (!pin) return null;
+  if (Date.now() - pin.tsMs > OWNER_MSG_ADOPTED_MAX_MS) {
+    waOwnerPin.delete(waPinKey(sessionKey));
+    return null;
+  }
+  return pin.sender;
 }
 
 // Match senderId AND (if set) scopeAgents against the current sessionKey, so a
@@ -336,7 +410,7 @@ export function execCriticalWithinScope(cmd: string, globs: string[]): boolean {
 
 export function findTrusted(senderId: string, c: Cfg, sessionKey: string): TrustedEntry | null {
   for (const t of c.trustedIds) {
-    if (t.id !== senderId) continue;
+    if (t.id !== senderId && !ownerIdMatches(senderId, [t.id])) continue;
     if (t.scopeAgents && t.scopeAgents.length > 0) {
       const inAgent = t.scopeAgents.some((k) => k && sessionKey.includes(k));
       if (!inAgent) continue; // not in a scoped agent -> fall through to non-owner
@@ -558,7 +632,7 @@ export function resolveLaneIdentity(
   c: Cfg,
 ): { isOwner: boolean; trusted: TrustedEntry | null } {
   if (sender != null) {
-    if (pickAgentOwners(sessionKey, c).includes(sender)) return { isOwner: true, trusted: null };
+    if (ownerIdMatches(sender, pickAgentOwners(sessionKey, c))) return { isOwner: true, trusted: null };
     return { isOwner: false, trusted: c.trustedIds.length > 0 ? findTrusted(sender, c, sessionKey) : null };
   }
   // Null sender on a CHANNEL lane = lost platform metadata -> strictest tier,
@@ -603,7 +677,7 @@ export function spawnLaneIds(event: any, ctx: any): { child: string | null; requ
  * it is the agent operating itself unattended -> owner. */
 export function tierOf(senderId: string | null, c: Cfg, sessionKey: string): LaneTier {
   if (senderId == null) return isChannelLane(sessionKey) ? "nonowner" : "owner";
-  if (pickAgentOwners(sessionKey, c).includes(senderId)) return "owner";
+  if (ownerIdMatches(senderId, pickAgentOwners(sessionKey, c))) return "owner";
   return findTrusted(senderId, c, sessionKey) ? "trusted" : "nonowner";
 }
 
@@ -1618,14 +1692,15 @@ export function runMayAdopt(runId: string | null): boolean {
 }
 /** Why peekInbound declined -- audit-only, so one log line names the failed leg. */
 export type PeekDiag = { reason?: string; ownerRunId?: string | null; runTrigger?: string | null };
-export function peekInbound(sessionKey: string, sender: string | null, runId: string | null, diag?: PeekDiag): InboundMsg | null {
+export function peekInbound(sessionKey: string, sender: string | null, runId: string | null, diag?: PeekDiag, c?: Cfg): InboundMsg | null {
   const miss = (reason: string, m?: InboundMsg) => { if (diag) { diag.reason = reason; diag.ownerRunId = m?.runId ?? null; } return null; };
   if (diag) diag.runTrigger = runId ? runTriggers.get(runId) ?? null : null;
   if (!sessionKey) return miss("no_session");
   hydrateLatchStore();
   const m = lastInbound.get(sessionKey);
   if (!m) return miss("no_row");
-  if (sender != null && m.senderId != null && m.senderId !== sender) return miss("sender_mismatch", m);
+  const peekCfg = c ?? ({ waIdentityAliases: {} } as Cfg);
+  if (sender != null && m.senderId != null && !sendersEquivalent(sender, m.senderId, peekCfg, sessionKey)) return miss("sender_mismatch", m);
   if (Date.now() - m.tsMs > OWNER_MSG_ADOPTED_MAX_MS) { ownedLatchKeys.add(sessionKey); lastInbound.delete(sessionKey); return miss("expired_ceiling", m); }
   // Already claimed by a turn -> only THAT turn may read it.
   if (m.runId != null) return m.runId === runId ? m : miss("run_mismatch", m);
@@ -2076,9 +2151,19 @@ function isChannelLane(sessionKey: string): boolean {
   return parts.length >= 3 && parts[0] === "agent" && CHANNEL_LANES.has(String(parts[2]).toLowerCase());
 }
 
-export function resolveSenderId(event: any, ctx: any): string | null {
+export function resolveSenderId(event: any, ctx: any, c?: Cfg): string | null {
+  const cfg = c ?? ({ waIdentityAliases: {} } as Cfg);
   for (const src of [ctx, event, event?.metadata]) {
-    if (src && src.senderId != null && String(src.senderId).length > 0) return String(src.senderId);
+    if (src?.senderE164 != null && String(src.senderE164).trim()) {
+      const v = canonicalizeSenderId(String(src.senderE164).trim(), cfg);
+      if (v) return v;
+    }
+  }
+  for (const src of [ctx, event, event?.metadata]) {
+    if (src && src.senderId != null && String(src.senderId).length > 0) {
+      const v = canonicalizeSenderId(String(src.senderId), cfg);
+      if (v) return v;
+    }
   }
   const sk = String(ctx?.sessionKey ?? event?.sessionKey ?? "");
   const parts = sk.split(":");
@@ -2117,7 +2202,7 @@ export function resolveSenderId(event: any, ctx: any): string | null {
       const runId = String(ctx?.runId ?? event?.runId ?? "") || null;
       if (age <= OWNER_MSG_ADOPTED_MAX_MS) {
         if (m.runId != null) {
-          if (m.runId === runId) return String(m.senderId);
+          if (m.runId === runId) return canonicalizeSenderId(String(m.senderId), cfg) ?? String(m.senderId);
           // Continuation/compaction lanes: new runId, same sessionKey (forum topic/WA thread).
           // Owner tier must survive; approval paths stay run-scoped via peekInbound.
           //
@@ -2127,12 +2212,12 @@ export function resolveSenderId(event: any, ctx: any): string | null {
           // are NOT channel lanes (cron fires on agent:<a>:cron:<jobId>), so the guard
           // keeps the widening to lanes that genuinely carry a human, still inside the
           // 30-minute hard ceiling.
-          if (isChannelLane(sk)) return String(m.senderId);
+          if (isChannelLane(sk)) return canonicalizeSenderId(String(m.senderId), cfg) ?? String(m.senderId);
         } else if (age <= OWNER_MSG_TTL_MS) {
           // Identity is still returned to a runtime-event run, but it must not
           // STAMP the row: that would steal the owner's approval (RUN TRIGGER).
           if (runId && runMayAdopt(runId)) { m.runId = runId; if (mKey) ownedLatchKeys.add(mKey); persistLatchStore(); }   // bind to this turn, same as peekInbound
-          return String(m.senderId);
+          return canonicalizeSenderId(String(m.senderId), cfg) ?? String(m.senderId);
         } else if (isChannelLane(sk)) {
           // Unclaimed and past the APPROVAL TTL but inside the ceiling: the
           // sender is still who is talking in this lane. Return identity but
@@ -2145,6 +2230,8 @@ export function resolveSenderId(event: any, ctx: any): string | null {
       }
     }
   } catch { /* latch unavailable -> fall through to null (agent-self / strict) */ }
+  const pinned = readWaOwnerPin(sk);
+  if (pinned) return canonicalizeSenderId(pinned, cfg) ?? pinned;
   return null;
 }
 
@@ -2216,14 +2303,15 @@ export default definePluginEntry({
         if (c.agentFilter && !sessionKey.includes(c.agentFilter)) return;
         const text = String(event?.content ?? "");
         const rid = event?.replyToId ?? event?.replyToIdFull ?? null;
-        const sid = event?.senderId ?? event?.from ?? null;
+        const sid = canonicalSenderFromEvent(event, c);
         recordInbound(sessionKey, {
           text,
           replyToId: rid != null && String(rid).trim() ? String(rid).trim() : null,
-          senderId: sid != null && String(sid).trim() ? String(sid).trim() : null,
+          senderId: sid,
           tsMs: Date.now(),
           runId: null, // unclaimed; the first turn to peek adopts it
         });
+        noteWaOwnerPin(sessionKey, sid, c);
       } catch { /* never break message intake */ }
     });
 
@@ -2252,7 +2340,7 @@ export default definePluginEntry({
         if (!CRON_TIER_ACTIONS.has(action)) return;
         const jobId = cronJobIdOf(event);
         if (!jobId) return;   // no id -> no entry -> 5d grandfathers it to owner
-        const sender = resolveSenderId(event, ctx);
+        const sender = resolveSenderId(event, ctx, c);
         const tier = tierOf(sender, c, sessionKey);
         recordLaneTier(c, jobId, tier, sender);
         audit(c, { evt: "lane-tier", rule: "R-ledger-cron", toolName: "cron", sessionKey, sender, action, jobId, tier });
@@ -2292,7 +2380,7 @@ export default definePluginEntry({
         if (c.agentFilter && !sessionKey.includes(c.agentFilter)) return;
 
         const toolName: string = String(event?.toolName ?? ctx?.toolName ?? "");
-        const sender = resolveSenderId(event, ctx);
+        const sender = resolveSenderId(event, ctx, c);
         // Multi-agent owner scoping: resolve the effective owner list for this
         // sessionKey via the agentOwners map (falls back to flat ownerIds when
         // the map is absent/empty or nothing matches -> single-agent back-compat).
@@ -2359,7 +2447,7 @@ export default definePluginEntry({
               // loose for text the owner may not have written about THIS command).
               const runId = String(ctx?.runId ?? event?.runId ?? "") || null;
               const peekDiag: PeekDiag = {};
-              const relayed = peekInbound(sessionKey, sender, runId, peekDiag);
+              const relayed = peekInbound(sessionKey, sender, runId, peekDiag, c);
               const ownerText = currentTurnOwnerText(event, ctx, relayed);
               const relayedOnly = !!relayed && ownerText === relayed.text;
               const tier = escSeverity(esc);
