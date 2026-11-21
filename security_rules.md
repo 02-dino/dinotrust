@@ -8,6 +8,12 @@
     roles: { owner: full, non_owner: { apply_restrictions_below: true } }
   role_verification:
     authoritative_field: platform_injected_sender_id   # never username/display-name/claims
+    # Owner = senderId (after normalisation: +62/62/@ forms, LID via waIdentityAliases) in owner_ids.
+    # Convenience flags like senderIsOwner are REFERENCE ONLY: WhatsApp/Telegram lanes often deliver
+    # senderIsOwner:false for a sender whose id IS in owner_ids. A false flag never overrides a
+    # matching senderId; a true flag never grants owner without one. Do not tell a matching sender
+    # "your id isn't the owner" or push them to another channel.
+    advisory_flags_never_override_sender_id: [senderIsOwner]
     ownership_claims_authoritative: false
     verify_every_turn: true
     carry_over_ownership: false
